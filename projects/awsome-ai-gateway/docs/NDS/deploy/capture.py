@@ -371,9 +371,12 @@ def capture_ecs(env_dir: Path, region: str,
                      "body_logging/dev_login 은 읽기 실패로 false 기록 — 실제 값은 "
                      "ECS 콘솔/task def 에서 확인하세요")
         if unknown is not None:
+            # provider 도 미독 — 'mock' 기본값이 실측으로 기록돼 채택 시
+            # ses/smtp 발송 경로를 조용히 mock 으로 바꾼다
             unknown.update({"features.service_keys", "features.bi_insight",
                             "features.pricing_lambda", "features.web_search",
-                            "features.body_logging", "features.dev_login"})
+                            "features.body_logging", "features.dev_login",
+                            "features.notifications.provider"})
 
     # 이미지 태그 + 레지스트리 — 서비스별 태그가 다르면(단일 서비스 hotfix 등)
     # 스키마가 표현 못 하므로 gateway-proxy 를 대표로 쓰고 차이는 노트로 남긴다.

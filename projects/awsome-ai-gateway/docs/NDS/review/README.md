@@ -26,6 +26,7 @@
 | 19차 | e3c1a209 | configure 필드 소실(allowed_roles/zone_id/capacity_tier), 캡처본 소스, compose dev_login fail-closed, terraform init -reconfigure, teardown env_dir 가드 |
 | 20차 | 40782825 | gen overlay 경로(alert_emails/infra 유실), bootstrap stale cfg, plan/apply/doctor 항상 reconfigure, ECS backend 불일치 경고 |
 | 21차 | 7e6d5a54 | 기능별 독립 검증 3인조 — teardown 완전성(OOB 잔여·인라인 정책·env_dir 전 채널 가드·apply 가드·빈 outputs 차단), capture 채택 안전(compose unknown·internal_api·ALB 폴백·도메인 게이트·env_dir 무효화), bootstrap/apply 수렴(persist split-brain·migration 폴백 ECR·null 섹션·ecs lock table·oidc 잠금 경고) |
+| 22차 | d2d03565+후속 | 3인 리뷰 재투입 — cli 커맨드 표면(wizard 스칼라-리스트 소실·비질문키 보존·원자적 쓰기·absorb 백업), ecs 경로 수렴(immutable push·force_delete·stale URL·pricing 게이트·init 순서·wait 판정·빈 state 중단·삭제유예 가드·cidrs fail-closed 정정·extra-vars preview), doctor(init rc·readiness 우선·미검증 WARN·FAILED 라벨·digest 가드), eks(--context↔backend 불일치 차단·declared last-wins·teardown outputs 검증·namespaced SecretStore 소유 경계·capture provider unknown·tfstate retry persist) — **440 tests** |
 
 ## 기능별 레포트
 

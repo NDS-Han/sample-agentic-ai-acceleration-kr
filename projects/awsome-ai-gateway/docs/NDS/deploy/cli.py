@@ -1176,24 +1176,36 @@ def _teardown_eks(cfg: schema.GatewayConfig, args) -> int:
         # helm/terraform 관리 밖의 프로비저닝 리소스 — 멱등 teardown
         from . import websearch
         websearch.teardown(cfg.env, REPO_ROOT)
+    # outputs 유래 이름으로 out-of-band 리소스를 지우므로 env_dir 의 state 가
+    # 이 env 의 것인지 먼저 검증한다 — 외부 state 의 chat_agent_name/admin_arn
+    # 을 읽으면 남의 Runtime/role 정책을 지운다 (apply 의
+    # _check_env_dir_declared 와 같은 보호, teardown 의 비-infra 경로에도 필요).
+    outs: dict = {}
+    if env_dir:
+        declared = eks_apply._declared_environment(env_dir)
+        if declared and declared != cfg.env:
+            console.print(f"[yellow]⚠ {env_dir} 의 environment 선언({declared})이 "
+                          f"env({cfg.env})와 다릅니다 — output 유래 이름은 도출값으로 대체")
+        else:
+            ini = eks_apply._tf_init(cfg, env_dir)
+            if ini.returncode == 0:
+                outs = eks_apply.tf_outputs(env_dir)
+            else:
+                console.print("[yellow]⚠ terraform init 실패 — output 유래 "
+                              "이름은 도출값으로 대체합니다")
     if cfg.features.bi_insight:
         # 프로비저너 소유 Runtime — helm/terraform 관리 밖, 멱등 teardown.
         # env destroy 전이라 outputs 가 읽힌다 — 사람이 project 변수를 바꾼
         # env 에선 도출 이름과 실측이 어긋나 Runtime 이 새어나가므로 실측 우선.
         from . import chatagent
-        chat_name = ""
-        if env_dir:
-            chat_name = eks_apply.tf_outputs(env_dir).get("chat_agent_name", "")
         chatagent.teardown(REPO_ROOT, cfg.env, region=cfg.aws.region,
-                           chat_agent_name=chat_name)
+                           chat_agent_name=outs.get("chat_agent_name", ""))
     # 플래그가 현재 꺼져 있어도 detach 는 시도한다 — 켰다 끈 env 의
     # LitellmPricingInvoke 인라인 정책이 admin-api IRSA role(terraform 소유)에
     # 남아 있으면 terraform destroy 의 role 삭제가 DeleteConflict 로 중간에
     # 죽는다. 함수/role 은 결정적 이름의 프로비저너 소유 — 한 번도 안 켠
     # env 에선 NotFound no-op 이다.
-    admin_arn = ""
-    if env_dir:
-        admin_arn = eks_apply.tf_outputs(env_dir).get("admin_api_role_arn", "")
+    admin_arn = outs.get("admin_api_role_arn", "")
     if cfg.features.pricing_lambda or admin_arn:
         from . import pricinglambda
         pricinglambda.teardown(cfg, admin_role_arn=admin_arn)
@@ -1228,11 +1240,16 @@ def _teardown_eks_oob(cfg: schema.GatewayConfig, meta: dict, context: str) -> No
     from . import eks_apply
     base = ["kubectl"] + (["--context", context] if context else [])
     name, kind = eks_apply._secret_store_ref(meta, REPO_ROOT)
-    del_args = base + ["delete", kind.lower(), name]
-    if kind.lower() != "clustersecretstore":  # namespaced kind 는 -n 필수
-        del_args += ["-n", meta["namespace"]]
-    eks_apply._run_quiet(del_args + ["--ignore-not-found"],
-                         cwd=REPO_ROOT, timeout=60)
+    if kind.lower() == "clustersecretstore":
+        # ClusterSecretStore 만 NDS 생성 — namespaced SecretStore 는 apply 측이
+        # '사람 소유'로 생성을 거부하는 kind 다. 공유/채택 env 에서 지우면 같은
+        # ns 의 ExternalSecret 전부가 깨지므로 삭제하지 않고 공시만 한다.
+        eks_apply._run_quiet(
+            base + ["delete", kind.lower(), name, "--ignore-not-found"],
+            cwd=REPO_ROOT, timeout=60)
+    elif name:
+        console.print(f"ⓘ namespaced SecretStore '{name}' 는 사람 소유로 취급해 "
+                      "삭제하지 않습니다 — 필요하면 수동 삭제하세요")
     from .bootstrap import secret_prefix
     prefix = secret_prefix(cfg, REPO_ROOT)
     for suffix in ("app", "redis"):
@@ -1302,12 +1319,21 @@ def cmd_bootstrap(args) -> int:
                 table = _unwrap(questionary.text(
                     "TFLOCK_TABLE", default=table).ask())
                 # 바뀐 값을 gateway.yaml 에도 반영 — 재실행 때 같은 실패를
-                # 반복하지 않도록.
+                # 반복하지 않도록. 저장에 실패하면 in-memory 신이름으로
+                # backend 를 만들고 이후 reload 가 구선언으로 되돌아가는
+                # split-brain 이 된다 — 저장 가능할 때만 재시도한다.
                 try:
-                    bootstrap.persist_bootstrap_answers(
+                    saved = bootstrap.persist_bootstrap_answers(
                         cfg_path, {"tfstate": (bucket, table)})
-                except OSError:
-                    pass
+                except OSError as exc:
+                    raise SystemExit(
+                        f"tfstate 이름 변경을 gateway.yaml 에 저장하지 못했습니다 "
+                        f"({exc}) — 수동으로 deploy.tfstate_bucket/table 을 "
+                        "고친 뒤 재시도하세요")
+                if not saved:
+                    raise SystemExit(
+                        "tfstate 이름 변경이 gateway.yaml 검증을 통과하지 "
+                        "못했습니다 — yaml 을 고친 뒤 재시도하세요")
 
     if not eks:
         if args.plan:

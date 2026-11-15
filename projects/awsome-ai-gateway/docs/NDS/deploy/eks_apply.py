@@ -1517,29 +1517,42 @@ def _human_declared_chat_agent(env_dir: Path) -> bool:
 
 
 def _declared_environment(env_dir: Path) -> str:
-    """env_dir 의 terraform 자동로드 채널 전체에서 environment 선언을 읽는다.
+    """env_dir 의 terraform 자동로드 채널에서 environment 의 '실효' 선언을 읽는다.
 
-    terraform 이 실제로 읽는 채널과 맞춘다 — terraform.tfvars +
-    *.auto.tfvars(HCL, 주석은 tfvars_clean 으로 제거) + *.tfvars.json(JSON
-    은 주석 불가라 키 존재가 곧 선언). terraform.tfvars 만 보면
-    environment 를 auto.tfvars/json 에 둔 디렉토리를 '판독 불가'로 오인해
-    dir-name 폴백 확인만으로 다른 env 의 state 삭제/쓰기가 통과된다.
-    TF_VAR_environment 는 디렉토리에 영속되지 않아 스코프 판단 근거가
-    못 되므로 보지 않는다."""
+    terraform 로드 순서(문서 명세)는 terraform.tfvars → terraform.tfvars.json
+    → *.auto.tfvars / *.auto.tfvars.json 을 파일명 사전순으로 **나중 파일이
+    이긴다**. 첫 매치를 반환하면 override 파일이 있는 디렉토리를 잘못 판정해
+    다른 env 의 state 에 쓰는 걸 통과시킨다 — 순서대로 전부 읽어 마지막
+    선언을 취한다. -var-file 전용 파일(prod.tfvars.json 등)은 자동로드가
+    아니므로 제외. TF_VAR_environment 는 디렉토리에 영속되지 않아 보지 않는다."""
     from .render.common import tfvars_clean
-    from .render.eks import _env_tfvars_texts
     pat = re.compile(r'(?m)^\s*environment\s*=\s*"([^"]+)"')
-    m = pat.search(tfvars_clean("\n".join(_env_tfvars_texts(env_dir))))
-    if m:
-        return m.group(1)
-    for f in sorted(env_dir.glob("*.tfvars.json")):
+    found = ""
+
+    def _hcl(p: Path) -> None:
+        nonlocal found
         try:
-            data = json.loads(f.read_text())
+            ms = pat.findall(tfvars_clean(p.read_text()))
+        except (OSError, UnicodeDecodeError):
+            return
+        if ms:
+            found = ms[-1]
+
+    def _json(p: Path) -> None:
+        nonlocal found
+        try:
+            data = json.loads(p.read_text())
         except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-            continue
+            return
         if isinstance(data, dict) and data.get("environment"):
-            return str(data["environment"])
-    return ""
+            found = str(data["environment"])
+
+    _hcl(env_dir / "terraform.tfvars")
+    _json(env_dir / "terraform.tfvars.json")
+    for f in sorted({*env_dir.glob("*.auto.tfvars"),
+                     *env_dir.glob("*.auto.tfvars.json")}, key=lambda p: p.name):
+        (_json if f.name.endswith(".json") else _hcl)(f)
+    return found
 
 
 def _check_env_dir_declared(cfg: GatewayConfig, env_dir: Path | None,
@@ -1560,7 +1573,10 @@ def _check_env_dir_declared(cfg: GatewayConfig, env_dir: Path | None,
         if hard:
             raise SystemExit(msg + " — managed terraform 적용을 거부합니다")
         print(f"⚠ {msg}", file=sys.stderr)
-    elif not declared and env_dir.name != cfg.env:
+    elif not declared and env_dir.name not in (cfg.env,
+                                               f"llm-gateway-{cfg.env}"):
+        # 관례 디렉토리(environments/llm-gateway-<env>)도 정상 — 그걸 불일치로
+        # 경고하면 표준 레이아웃에서 매 apply 가 거짓 경고를 낸다
         print(f"⚠ {env_dir} 에서 environment 선언을 판독할 수 없고 디렉토리 "
               f"이름도 env '{cfg.env}' 와 다릅니다 — 채택/공유 env 라면 이 "
               "디렉토리의 state 가 의도한 환경의 것인지 대조하세요",

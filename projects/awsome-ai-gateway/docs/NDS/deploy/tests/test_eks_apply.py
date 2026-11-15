@@ -1552,3 +1552,25 @@ def test_check_context_cluster_match_and_unresolvable_pass(monkeypatch):
     bad = types.SimpleNamespace(returncode=1, stdout="")
     monkeypatch.setattr(eks_apply, "_run_quiet", lambda *a, **k: bad)
     eks_apply._check_context_cluster(outs, "myctx", hard=True)
+
+
+def test_declared_environment_last_wins(tmp_path):
+    """terraform 은 last-file-wins — override 선언이 실효값이다."""
+    (tmp_path / "terraform.tfvars").write_text('environment = "dev"\n')
+    # 자동로드 순서상 zzz.auto.tfvars 가 마지막 — 실효는 prod
+    (tmp_path / "zzz.auto.tfvars").write_text('environment = "prod"\n')
+    assert eks_apply._declared_environment(tmp_path) == "prod"
+    # terraform.tfvars.json 도 override 가능 — tfvars 뒤, auto 앞
+    (tmp_path / "terraform.tfvars.json").write_text('{"environment": "json-env"}')
+    (tmp_path / "zzz.auto.tfvars").unlink()
+    assert eks_apply._declared_environment(tmp_path) == "json-env"
+
+
+def test_declared_environment_skips_varfile_only_json(tmp_path):
+    """prod.tfvars.json 같은 -var-file 전용 파일은 자동로드가 아니다."""
+    (tmp_path / "prod.tfvars.json").write_text('{"environment": "prod"}')
+    (tmp_path / "terraform.tfvars").write_text('environment = "dev"\n')
+    assert eks_apply._declared_environment(tmp_path) == "dev"
+    # auto.tfvars.json 은 자동로드 — 스캔 대상
+    (tmp_path / "x.auto.tfvars.json").write_text('{"environment": "auto"}')
+    assert eks_apply._declared_environment(tmp_path) == "auto"
