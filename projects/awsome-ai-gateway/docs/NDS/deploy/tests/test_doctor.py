@@ -46,3 +46,56 @@ def test_tf_drift_plan_uses_managed_overlay_when_present(tmp_path):
     assert any(a.endswith("eks/terraform.tfvars") for a in argv
                if a.startswith("-var-file="))
     assert "-no-color" in argv
+
+
+# ==============================================================================
+# R18 회귀 — compose migration ExitCode / eks 컨테이너 선택
+# ==============================================================================
+
+import json, subprocess
+from pathlib import Path
+
+
+def test_compose_migration_exit_nonzero_is_high(tmp_path, monkeypatch):
+    """exited 상태만 보면 exit=1 실패 마이그레이션이 '완료'로 오진된다."""
+    (tmp_path / "docker-compose.yml").write_text("services: {}\n")
+    (tmp_path / ".env").write_text(
+        "POSTGRES_PASSWORD=x\nVIRTUAL_KEY_ENCRYPTION_KEY=k\n"
+        "NEXTAUTH_SECRET=n\nINTERNAL_API_TOKEN=t\n")
+    (tmp_path / "Caddyfile").write_text(":8000 {\n}\n")
+    rows = [{"Service": "migration", "State": "exited", "ExitCode": 1}]
+    calls = {"n": 0}
+
+    def fake_run(argv, **kw):
+        calls["n"] += 1
+        if "ps" in argv:
+            return subprocess.CompletedProcess(argv, 0, json.dumps(rows), "")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+    monkeypatch.setattr(doctor, "_run", fake_run)
+    rep = doctor.check_compose(
+        schema.from_dict({"version": 1, "env": "dev",
+                          "deploy": {"target": "compose", "size_tier": "t0"}}),
+        tmp_path)
+    f = [x for x in rep.findings if x.check == "services"
+         and "migration" in x.message]
+    assert f and f[0].level == "HIGH"
+
+
+def test_compose_migration_exit_zero_is_ok(tmp_path, monkeypatch):
+    (tmp_path / "docker-compose.yml").write_text("services: {}\n")
+    (tmp_path / ".env").write_text(
+        "POSTGRES_PASSWORD=x\nVIRTUAL_KEY_ENCRYPTION_KEY=k\n"
+        "NEXTAUTH_SECRET=n\nINTERNAL_API_TOKEN=t\n")
+    (tmp_path / "Caddyfile").write_text(":8000 {\n}\n")
+    rows = [{"Service": "migration", "State": "exited", "ExitCode": 0}]
+    monkeypatch.setattr(
+        doctor, "_run",
+        lambda argv, **kw: subprocess.CompletedProcess(
+            argv, 0, json.dumps(rows) if "ps" in argv else "", ""))
+    rep = doctor.check_compose(
+        schema.from_dict({"version": 1, "env": "dev",
+                          "deploy": {"target": "compose", "size_tier": "t0"}}),
+        tmp_path)
+    f = [x for x in rep.findings if x.check == "services"
+         and "migration" in x.message]
+    assert f and f[0].level == "OK"

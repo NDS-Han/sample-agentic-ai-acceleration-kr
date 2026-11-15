@@ -113,11 +113,16 @@ def check_compose(cfg: GatewayConfig, out_dir: Path) -> DoctorReport:
             if isinstance(row, dict):
                 rows.append(row)
     states: dict[str, str] = {}
+    exits: dict[str, int] = {}
     for row in rows:
         name = row.get("Service") or row.get("Name", "")
         health = row.get("Health") or ""
         state = row.get("State", "")
         states[name] = health or state
+        try:
+            exits[name] = int(row.get("ExitCode", 0))
+        except (TypeError, ValueError):
+            exits[name] = 0
 
     if not states:
         rep.add("WARN", "services", "기동 중인 서비스가 없습니다 — `docker compose up -d` 필요")
@@ -127,7 +132,12 @@ def check_compose(cfg: GatewayConfig, out_dir: Path) -> DoctorReport:
         if state is None:
             rep.add("HIGH", "services", f"{svc} 컨테이너 없음")
         elif svc == "migration" and "exited" in state:
-            rep.add("OK", "services", f"migration 완료 ({state})")
+            # "exited" 만 보면 ExitCode 1 인 실패 마이그레이션이 완료로 보인다
+            if exits.get(svc) == 0:
+                rep.add("OK", "services", f"migration 완료 ({state})")
+            else:
+                rep.add("HIGH", "services",
+                        f"migration 실패 (exit={exits.get(svc)}) — 로그를 확인하세요")
         elif state in ("healthy", "running"):
             rep.add("OK", "services", f"{svc} {state}")
         elif "exited" in state:
@@ -244,7 +254,7 @@ def check_ecs(cfg: GatewayConfig, gen_dir: Path, repo_root: Path) -> DoctorRepor
         _run(["terraform", "init", "-input=false", "-reconfigure",
               f"-backend-config={backend}"], cwd=env_dir, timeout=180)
     r = _run(["terraform", "plan", "-detailed-exitcode", "-input=false",
-              f"-var-file={var_file}"],
+              "-no-color", f"-var-file={var_file}"],
              cwd=env_dir, timeout=300)
     if r.returncode == 0:
         rep.add("OK", "drift", "terraform plan no-op — gateway.yaml 과 라이브 인프라 일치")
@@ -263,7 +273,8 @@ def check_ecs(cfg: GatewayConfig, gen_dir: Path, repo_root: Path) -> DoctorRepor
     if not cluster:
         rep.add("HIGH", "services", "terraform output 에 클러스터 없음 — apply 됐는지 확인")
         return rep
-    names = list((outputs.get("service_names") or {}).values()) or list(ECS_SERVICES)
+    name_map = outputs.get("service_names") or {}
+    names = list(name_map.values()) or list(ECS_SERVICES)
     r = _aws(["ecs", "describe-services", "--cluster", cluster, "--services", *names],
              cfg.aws.region)
     if r.returncode != 0:
@@ -273,9 +284,11 @@ def check_ecs(cfg: GatewayConfig, gen_dir: Path, repo_root: Path) -> DoctorRepor
             svcs = json.loads(r.stdout).get("services", [])
         except json.JSONDecodeError:
             svcs = []
+        # live 서비스명은 service_names output 이 정본 — 커스텀 명명 배포에서
+        # 논리명으로 by_name 을 찾으면 전부 "서비스 없음" 으로 오진한다.
         by_name = {s["serviceName"]: s for s in svcs}
         for name in ECS_SERVICES:
-            s = by_name.get(name)
+            s = by_name.get(name_map.get(name, name))
             if s is None:
                 rep.add("HIGH", "services", f"{name} 서비스 없음")
                 continue
@@ -291,30 +304,51 @@ def check_ecs(cfg: GatewayConfig, gen_dir: Path, repo_root: Path) -> DoctorRepor
 
     # 5. migration task — taskArns 는 시간순을 보장하지 않으므로 stoppedAt 이
     #    가장 최근인 STOPPED task 를 찾아 exitCode 를 본다
-    fam = (outputs.get("migration_task_definition_arn") or "").split("/")[-1]
+    # ARN 의 family 는 "name:rev" 형태 — rev 를 붙인 채 --family 로 물으면
+    # 다른 revision 으로 실행된 task 가 빠져 "실행 기록 없음" 오진이 난다.
+    fam = (outputs.get("migration_task_definition_arn") or "") \
+        .split("/")[-1].split(":")[0]
     if fam:
         r = _aws(["ecs", "list-tasks", "--cluster", cluster, "--family", fam,
                   "--desired-status", "STOPPED"], cfg.aws.region)
-        try:
-            arns = json.loads(r.stdout).get("taskArns", [])
-        except json.JSONDecodeError:
-            arns = []
-        if not arns:
-            rep.add("HIGH", "migration", "migration task 실행 기록 없음")
+        if r.returncode != 0:
+            rep.add("WARN", "migration",
+                    f"list-tasks 실패 — migration 이력을 확인할 수 없습니다: "
+                    f"{r.stderr.strip()[:150]}")
+            fam = ""
         else:
+            try:
+                arns = json.loads(r.stdout).get("taskArns", [])
+            except json.JSONDecodeError:
+                arns = []
+        if fam and not arns:
+            rep.add("HIGH", "migration", "migration task 실행 기록 없음")
+        elif fam:
             r = _aws(["ecs", "describe-tasks", "--cluster", cluster,
                       "--tasks", *arns[:100]], cfg.aws.region)
-            try:
-                tasks = json.loads(r.stdout).get("tasks", [])
-                task = max(tasks, key=lambda t: t.get("stoppedAt", ""))
-                code = (task.get("containers") or [{}])[0].get("exitCode")
-            except (json.JSONDecodeError, ValueError, IndexError, KeyError):
-                code = None
-            if code == 0:
-                rep.add("OK", "migration", "마지막 migration task exitCode=0")
+            if r.returncode != 0:
+                rep.add("WARN", "migration",
+                        f"describe-tasks 실패: {r.stderr.strip()[:150]}")
+                tasks = []
             else:
-                rep.add("HIGH", "migration",
-                        f"마지막 migration task 비정상 (exitCode={code})")
+                try:
+                    tasks = json.loads(r.stdout).get("tasks", [])
+                except json.JSONDecodeError:
+                    tasks = []
+            if not tasks:
+                rep.add("WARN", "migration",
+                        "describe-tasks 결과가 비어 있습니다 — 이력 확인 불가")
+            else:
+                try:
+                    task = max(tasks, key=lambda t: t.get("stoppedAt", ""))
+                    code = (task.get("containers") or [{}])[0].get("exitCode")
+                except (ValueError, IndexError, KeyError, AttributeError):
+                    code = None
+                if code == 0:
+                    rep.add("OK", "migration", "마지막 migration task exitCode=0")
+                else:
+                    rep.add("HIGH", "migration",
+                            f"마지막 migration task 비정상 (exitCode={code})")
 
     # 6. 엔드포인트 — ALB DNS 로 gateway health 확인 (도메인 없으면 http)
     import urllib.request
@@ -350,6 +384,12 @@ _KEBAB_TO_CAMEL = {
 }
 
 
+def _d(node) -> dict:
+    """leaf 가 dict 가 아니면 {} — `x or {}` 는 truthy 스칼라를 통과시켜
+    이후 .get 이 AttributeError 로 죽는 함정을 막는다."""
+    return node if isinstance(node, dict) else {}
+
+
 def _expected_tag(cfg: GatewayConfig, kebab_svc: str) -> str:
     """해당 서비스의 기대 태그 — images.tags 핀이 images.tag 기본값을 덮는다
     (render/eks.py 와 같은 규칙). 어느 쪽도 없으면 '' (검사 생략)."""
@@ -363,7 +403,15 @@ def _eks_meta(gen_dir: Path, rep: DoctorReport) -> dict:
         rep.add("HIGH", "artifacts", "gen/<env>/eks/deploy.yaml 없음 — `deploy render` 먼저 실행")
         return {}
     rep.add("OK", "artifacts", "render 산출물 존재")
-    return yaml.safe_load(p.read_text()) or {}
+    try:
+        meta = yaml.safe_load(p.read_text())
+    except (yaml.YAMLError, OSError) as exc:
+        rep.add("HIGH", "artifacts", f"deploy.yaml 파싱 실패: {exc}")
+        return {}
+    if not isinstance(meta, dict):
+        rep.add("HIGH", "artifacts", "deploy.yaml 최상위가 mapping 이 아닙니다")
+        return {}
+    return meta
 
 
 def _minor_tuple(v: str) -> tuple[int, int]:
@@ -387,16 +435,22 @@ def _check_cluster_version(rep: DoctorReport, meta: dict, repo_root: Path,
         from .render.common import tfvars_clean
         # ^ 앵커 + 주석 제거 — `# eks_cluster_version=`/`legacy_eks_cluster_version=`
         # 같은 죽은 선언이 라이브와 무관한 허위 다운그레이드 경고를 만든다.
-        m = re.search(r'(?m)^\s*eks_cluster_version\s*=\s*"(\d+\.\d+)"',
-                      tfvars_clean(tfvars.read_text()))
+        try:
+            m = re.search(r'(?m)^\s*eks_cluster_version\s*=\s*"(\d+\.\d+)"',
+                          tfvars_clean(tfvars.read_text()))
+        except OSError:
+            m = None
         declared = m.group(1) if m else ""
     if not declared and env_dir:
         # 미선언이면 variables.tf 기본값이 실제 적용값 — 비교 대상은 그쪽이다.
         varf = env_dir / "variables.tf"
         if varf.exists():
-            m = re.search(
-                r'variable\s+"eks_cluster_version"[^}]*default\s*=\s*"(\d+\.\d+)"',
-                varf.read_text(), re.S)
+            try:
+                m = re.search(
+                    r'variable\s+"eks_cluster_version"[^}]*default\s*=\s*"(\d+\.\d+)"',
+                    varf.read_text(), re.S)
+            except OSError:
+                m = None
             declared = m.group(1) if m else ""
 
     live = ""
@@ -450,10 +504,17 @@ def check_eks(cfg: GatewayConfig, gen_dir: Path, repo_root: Path,
     #     예고 없이 업그레이드한다 (다운그레이드 커밋은 과거 실제 사고)
     _check_cluster_version(rep, meta, repo_root, ctx)
 
-    # 2. helm release
+    # 2. helm release — 바이너리 부재(rc=127, _run 이 변환)와 release 부재를
+    #    구분한다: helm 없는 콜드 머신에서 "release 없음" 으로 오진하면 엉뚱한
+    #    조치를 유도한다.
     r = _run(["helm", "status", rel, "-n", ns, "-o", "json", *kctx])
     if r.returncode != 0:
-        rep.add("HIGH", "release", f"helm release '{rel}' 없음 — 배포되지 않았거나 이름/namespace 다름")
+        if r.returncode == 127:
+            rep.add("HIGH", "release", f"helm CLI 실행 불가: {r.stderr.strip()[:120]}")
+        else:
+            rep.add("HIGH", "release",
+                    f"helm release '{rel}' 없음 — 배포되지 않았거나 "
+                    f"이름/namespace 다름: {r.stderr.strip()[:120]}")
         return rep
     try:
         st = json.loads(r.stdout)
@@ -473,15 +534,15 @@ def check_eks(cfg: GatewayConfig, gen_dir: Path, repo_root: Path,
             all_items = []
         # 공유 ns 의 다른 릴리스가 이름 접두로 우리 것처럼 보인다 — instance
         # 라벨로 우리 release 만 고른다 (라벨 없는 레거시 채택 배포는 폴백).
-        ours = [i for i in all_items
-                if ((i.get("metadata") or {}).get("labels") or {})
-                .get("app.kubernetes.io/instance") == rel]
+        def _inst_of(i) -> str:
+            return str(_d(_d(i.get("metadata")).get("labels"))
+                       .get("app.kubernetes.io/instance") or "")
+        all_items = [i for i in all_items if isinstance(i, dict)]
+        ours = [i for i in all_items if _inst_of(i) == rel]
         # 폴백(레거시 무라벨 채택)에서도 다른 릴리스 소유가 명시된 아이템은
         # 제외한다 — instance=<다른 release> 인 외부 deployment 가 component
         # 라벨만 같으면 by_name 을 덮어써 우리 것으로 오흡수된다.
-        items = ours or [i for i in all_items
-                         if not ((i.get("metadata") or {}).get("labels") or {})
-                         .get("app.kubernetes.io/instance")]
+        items = ours or [i for i in all_items if not _inst_of(i)]
         # 서비스 식별은 component 라벨 우선 — 이름 프리픽스는 fullnameOverride
         # 면 어긋나 전부 "deployment 없음" 으로 오진된다. 라벨 없는 수동 배포는
         # 이름 접두(<release>-<svc>) 폴백. setdefault — kubectl 은 이름순
@@ -489,30 +550,39 @@ def check_eks(cfg: GatewayConfig, gen_dir: Path, repo_root: Path,
         # 우리 release 쪽일 가능성이 높다(덮어쓰기 방지).
         by_name = {}
         for i in items:
-            labels = (i.get("metadata") or {}).get("labels") or {}
+            if not isinstance(i, dict):
+                continue
+            labels = _d(_d(i.get("metadata")).get("labels"))
             comp = labels.get("app.kubernetes.io/component")
-            n = comp or i["metadata"]["name"]
+            n = comp or str(_d(i.get("metadata")).get("name") or "")
             if not comp:
                 for p in (f"{rel}-", "llm-gateway-"):
                     if n.startswith(p):
                         n = n[len(p):]
                         break
             by_name.setdefault(n, i)
+
+        # 앱 컨테이너는 차트가 컴포넌트명으로 명명 — containers[0] 무조건은
+        # 사이드카(otel-collector 등) 첫 정의 시 이미지/env 를 잘못 읽는다.
+        def _app_container(dep: dict, svc: str) -> dict:
+            try:
+                cs = (dep["spec"]["template"]["spec"].get("containers") or [])
+                return (next((c for c in cs if c.get("name") == svc), None)
+                        or (cs[0] if cs else {}))
+            except (KeyError, TypeError, AttributeError):
+                return {}
+
         for name in EKS_DEPLOYMENTS:
             d = by_name.get(name) or by_name.get(f"{rel}-{name}")
             if not d:
                 rep.add("WARN", "deploy", f"{name} deployment 없음")
                 continue
-            spec = d.get("spec") or {}
-            stt = d.get("status") or {}
+            spec = _d(d.get("spec"))
+            stt = _d(d.get("status"))
             want = spec.get("replicas", 1)
             ready = stt.get("readyReplicas", 0)
-            img = ""
-            try:
-                img = d["spec"]["template"]["spec"]["containers"][0]["image"]
-                tag = img.rsplit(":", 1)[-1]
-            except (KeyError, IndexError):
-                tag = ""
+            img = str(_app_container(d, name).get("image") or "")
+            tag = img.rsplit(":", 1)[-1] if ":" in img else ""
             msg = f"{name} {ready}/{want} ready"
             expected = _expected_tag(cfg, name)
             if expected and tag and tag != expected:
@@ -533,11 +603,10 @@ def check_eks(cfg: GatewayConfig, gen_dir: Path, repo_root: Path,
                 try:
                     return {
                         e["name"]: e.get("value", "")
-                        for e in (d["spec"]["template"]["spec"]
-                                  ["containers"][0].get("env") or [])
+                        for e in (_app_container(d, svc).get("env") or [])
                         if isinstance(e, dict)
                     }
-                except (KeyError, IndexError):
+                except (KeyError, IndexError, TypeError):
                     return {}
             arn = _env_of("admin-api").get("AGENTCORE_RUNTIME_ARN", "")
             if arn:
@@ -558,18 +627,16 @@ def check_eks(cfg: GatewayConfig, gen_dir: Path, repo_root: Path,
     r = _run(["kubectl", "get", "jobs", "-n", ns, "-o", "json", *ctx])
     if r.returncode == 0:
         try:
-            all_jobs = json.loads(r.stdout).get("items", [])
-            ours = [j for j in all_jobs
-                    if ((j.get("metadata") or {}).get("labels") or {})
-                    .get("app.kubernetes.io/instance") == rel]
+            all_jobs = [j for j in json.loads(r.stdout).get("items", [])
+                        if isinstance(j, dict)]
+            ours = [j for j in all_jobs if _inst_of(j) == rel]
             # deployments 와 같은 규칙 — 무라벨 폴백에서도 타 릴리스 소유가
             # 명시된 Job 은 우리 migration 결과로 오흡수하지 않는다.
-            unowned = [j for j in all_jobs
-                       if not ((j.get("metadata") or {}).get("labels") or {})
-                       .get("app.kubernetes.io/instance")]
+            unowned = [j for j in all_jobs if not _inst_of(j)]
             jobs = [j for j in (ours or unowned)
-                    if "migration" in j["metadata"]["name"]]
-            job = max(jobs, key=lambda j: j["metadata"].get("creationTimestamp", "")) if jobs else None
+                    if "migration" in str(_d(j.get("metadata")).get("name", ""))]
+            job = max(jobs, key=lambda j: _d(j.get("metadata"))
+                      .get("creationTimestamp", "")) if jobs else None
         except (json.JSONDecodeError, ValueError, KeyError):
             job = None
         if job is None:
@@ -595,10 +662,12 @@ def check_eks(cfg: GatewayConfig, gen_dir: Path, repo_root: Path,
             else:
                 rep.add("WARN", "migration", "migration Job 을 못 찾았습니다")
         else:
-            conds = (job.get("status") or {}).get("conditions") or []
-            done = any(c.get("type") == "Complete" and c.get("status") == "True" for c in conds)
-            failed = any(c.get("type") == "Failed" and c.get("status") == "True" for c in conds)
-            name = job["metadata"]["name"]
+            conds = _d(job.get("status")).get("conditions") or []
+            done = any(_d(c).get("type") == "Complete"
+                       and _d(c).get("status") == "True" for c in conds)
+            failed = any(_d(c).get("type") == "Failed"
+                         and _d(c).get("status") == "True" for c in conds)
+            name = str(_d(job.get("metadata")).get("name", "?"))
             if done:
                 rep.add("OK", "migration", f"{name} Complete")
             elif failed:

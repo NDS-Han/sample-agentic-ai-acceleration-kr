@@ -142,7 +142,7 @@ def test_db_budget_within_ceiling_by_default():
     from deploy.tiers import ecs_db_budget
     b = ecs_db_budget(_cfg())
     assert b["steady"] == 80    # pool_size 10/proc — t1: gw2×20 + 4svc×10
-    assert b["worst"] == 630    # +overflow 30/proc — gw8×60 + api2×30 + 3×30
+    assert b["worst"] == 660    # +overflow 30/proc — gw8×60 + api2×30 + 3×30 + migration 30
     assert b["floor_capacity"] == 225 and b["ceiling_capacity"] == 900
 
 

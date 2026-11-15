@@ -276,6 +276,11 @@ def ecs_db_budget(cfg) -> dict:
         desired = int(s.get("desired_count", 0))
         cap = max(desired, int(s.get("max_count", desired)))
         steady += typical * desired
+        # migration 은 run-task(상주 아님)라 desired=0 이지만 배포 창에는
+        # 1 task 가 겹쳐 돈다 — worst 계산에 1 task 분을 포함시켜야
+        # 배포 중 커넥션 피크가 예산 밖으로 빠지지 않는다.
+        if svc == "migration":
+            cap = max(cap, 1)
         worst += per * cap
     if db["mode"] == "serverless":
         floor_cap = int(db["min_acu"] * ACU_CONNECTIONS)

@@ -1188,7 +1188,7 @@ def test_managed_overlay_emits_application_namespace(monkeypatch, tmp_path):
     from deploy import schema
     cfg = schema.from_dict({
         "version": 1, "env": "stg",
-        "aws": {"region": "ap-northeast-2", "account_id": "1"},
+        "aws": {"region": "ap-northeast-2", "account_id": "123456789012"},
         "deploy": {"target": "eks", "size_tier": "t3",
                    "namespace": "custom-ns"},
         "features": {"notifications": {"provider": "mock"}},

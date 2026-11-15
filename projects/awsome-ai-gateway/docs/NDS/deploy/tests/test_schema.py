@@ -699,3 +699,82 @@ def test_subnet_cidrs_outside_vpc_rejected():
     # /16 은 통과
     out = schema.subnet_cidrs("10.30.0.0/16", 2)
     assert out["private_subnet_cidrs"] == ["10.30.1.0/24", "10.30.2.0/24"]
+
+
+# ==============================================================================
+# R18 회귀 — validate()/from_dict() 크래시 경로가 SchemaError 로 수렴
+# ==============================================================================
+
+def test_bad_size_tier_raises_schemaerror_not_keyerror():
+    """잘못된 size_tier 로 preset() 을 부르면 KeyError 가 validate 를 빠져나가
+    오류 목록이 유실된다 — 반드시 SchemaError 로 모아야 한다."""
+    with pytest.raises(schema.SchemaError, match="size_tier"):
+        schema.from_dict(minimal(deploy={"target": "eks", "size_tier": "t9"},
+                                 images={"tag": "1.0"}))
+
+
+def test_bad_sizing_value_raises_schemaerror_not_typeerror():
+    """sizing 값이 비-int 면 오류는 잡히지만 dict 에 남아 병합/예산 계산이
+    TypeError/ValueError 로 크래시했다 — 계산형 검사를 게이트한다."""
+    doc = minimal(deploy={"target": "eks", "size_tier": "t3",
+                          "sizing": {"gateway-proxy": {"min_replicas": "abc",
+                                                     "max_replicas": 3}}},
+                  images={"tag": "1.0"})
+    with pytest.raises(schema.SchemaError, match="정수"):
+        schema.from_dict(doc)
+
+
+def test_sizing_scalar_raises_schemaerror():
+    """deploy.sizing: "x" — dict("x") 가 ValueError 로 날아들던 경로."""
+    with pytest.raises(schema.SchemaError, match="sizing"):
+        schema.from_dict(minimal(deploy={"target": "eks", "size_tier": "t3",
+                                         "sizing": "x"},
+                                 images={"tag": "1.0"}))
+
+
+def test_nonlist_fields_raise_schemaerror_not_typeerror():
+    """int/dict 형태의 list 필드는 TypeError/침묵키순회 대신 명시 오류."""
+    for field_path in (
+            {"aws": {"allowed_roles": 5}},
+            {"infra": {"azs": 5}},
+            {"infra": {"cognito_groups": {"a": 1}}},
+            {"network": {"allowed_cidrs": 5}},
+    ):
+        doc = minimal()
+        for k, v in field_path.items():
+            doc.setdefault(k, {}).update(v)
+        with pytest.raises(schema.SchemaError):
+            schema.from_dict(doc)
+
+
+def test_version_float_rejected():
+    """version: 1.0 — 1.0 == 1 이 True 라 형태 검증 없으면 통과된다."""
+    with pytest.raises(schema.SchemaError, match="version"):
+        schema.from_dict(minimal(version=1.0))
+
+
+def test_bool_numeric_fields_rejected():
+    """min_acu: true → 1.0, smtp_port: true → 1 같은 bool-숫자 혼용 차단."""
+    doc = minimal(features={"notifications": {"provider": "smtp",
+                                              "smtp_host": "h",
+                                              "smtp_port": True}})
+    with pytest.raises(schema.SchemaError):
+        schema.from_dict(doc)
+    doc2 = minimal(deploy={"target": "ecs", "size_tier": "t1"},
+                   images={"tag": "1.0"},
+                   infra={"db": {"min_acu": True}})
+    with pytest.raises(schema.SchemaError):
+        schema.from_dict(doc2)
+
+
+def test_domain_and_account_id_format():
+    """캡처/수작업 쓰레기 값이 ingress/ACM 으로 번지는 걸 선언 단계에서 차단."""
+    with pytest.raises(schema.SchemaError, match="domain.name"):
+        schema.from_dict(minimal(
+            domain={"mode": "route53-acm", "name": "bad,name,"}))
+    with pytest.raises(schema.SchemaError, match="zone_id"):
+        schema.from_dict(minimal(
+            domain={"mode": "route53-acm", "name": "ok.io",
+                    "zone_id": "not-a-zone"}))
+    with pytest.raises(schema.SchemaError, match="account_id"):
+        schema.from_dict(minimal(aws={"account_id": "1234"}))

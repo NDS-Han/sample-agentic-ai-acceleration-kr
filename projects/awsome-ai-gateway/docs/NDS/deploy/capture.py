@@ -63,10 +63,14 @@ def capture_compose(out_dir: Path, unknown: set[str] | None = None
         raise CaptureError(f"{compose_path} 파싱 실패: {exc}")
     if not isinstance(composed, dict):
         raise CaptureError(f"{compose_path} 의 최상위가 mapping 이 아닙니다")
-    services = composed.get("services") or {}
+    services = _dmap(composed.get("services"))
     env = parse_env_file(out_dir / ".env")
     caddy_path = out_dir / "Caddyfile"
-    caddy = caddy_path.read_text() if caddy_path.exists() else ""
+    try:
+        caddy = caddy_path.read_text() if caddy_path.exists() else ""
+    except (OSError, UnicodeDecodeError):
+        caddy = ""
+        notes.append("Caddyfile 읽기 실패(인코딩/권한) — domain/cidrs 추론 불가")
     if not caddy_path.exists():
         notes.append("Caddyfile 없음 — allowed_cidrs/domain 은 추론 불가로 둡니다")
 
@@ -96,7 +100,7 @@ def capture_compose(out_dir: Path, unknown: set[str] | None = None
     # images — 앱 서비스의 image: 핀 여부 (build: 면 레지스트리 없음)
     registry, tag = "", ""
     for name in ("gateway-proxy", "admin-api", "admin-ui"):
-        img = (services.get(name) or {}).get("image", "")
+        img = _dmap(services.get(name)).get("image", "")
         if img and "/" in img and ":" in img:
             registry = img.rsplit("/", 1)[0]
             tag = img.rsplit(":", 1)[1]
@@ -117,12 +121,16 @@ def capture_compose(out_dir: Path, unknown: set[str] | None = None
     # features — 스키마 키를 전부 기록한다. 라이브 신호를 못 읽은 기능은
     # false 로 명시해야 캡처 결과가 "기능 목록" 역할을 한다(키가 아예
     # 빠지면 사용자는 그 옵션이 존재하는지 알 수 없다).
-    api_env = (services.get("admin-api") or {}).get("environment") or {}
-    if isinstance(api_env, list):
-        api_env = dict(e.split("=", 1) for e in api_env if "=" in e)
-    ui_env = (services.get("admin-ui") or {}).get("environment") or {}
-    if isinstance(ui_env, list):
-        ui_env = dict(e.split("=", 1) for e in ui_env if "=" in e)
+    def _env_map(svc: str) -> dict:
+        e = _dmap(services.get(svc)).get("environment")
+        if isinstance(e, list):
+            # compose 의 list 형식 — 비-str 항목(environment: [123])은 건너뛴다
+            return dict(x.split("=", 1) for x in e
+                        if isinstance(x, str) and "=" in x)
+        return _dmap(e)
+
+    api_env = _env_map("admin-api")
+    ui_env = _env_map("admin-ui")
     # SERVICE_KEYS_ENABLED — 렌더러는 .env(env_file)에만 쓰고 environment: 블록은
     # override 라 api_env 우선. 둘 다 부재면 앱 기본 false(fail-closed)가
     # 진리다 — 보안 플래그는 "못 읽으면 꺼짐" 쪽으로 기록해야 채택이 안전하다.
@@ -245,11 +253,18 @@ def _aws_json(argv: list[str], region: str) -> dict:
         raise CaptureError(f"aws {' '.join(argv[:2])} 출력 파싱 실패: {e}")
 
 
-def _taskdef_env(region: str, task_arn: str) -> dict[str, str]:
+def _taskdef_env(region: str, task_arn: str,
+                 container_name: str = "") -> dict[str, str]:
     td = _aws_json(["ecs", "describe-task-definition", "--task-definition", task_arn], region)
     try:
-        cenv = td["taskDefinition"]["containerDefinitions"][0].get("environment") or []
-        return {e["name"]: e.get("value", "") for e in cenv}
+        defs = td["taskDefinition"]["containerDefinitions"]
+        # 사이드카(firelens/otel 등)가 첫 번째 정의면 container[0] 이 앱이 아니다 —
+        # 논리 서비스명과 같은 컨테이너를 우선 고른다.
+        c = next((x for x in defs
+                  if container_name and x.get("name") == container_name), defs[0])
+        cenv = c.get("environment") or []
+        return {e["name"]: e.get("value", "") for e in cenv
+                if isinstance(e, dict) and "name" in e}
     except (KeyError, IndexError):
         return {}
 
@@ -290,39 +305,93 @@ def capture_ecs(env_dir: Path, region: str,
             ["ecs", "describe-services", "--cluster", cluster,
              "--services", name_map.get("admin-api", "admin-api")],
             region)["services"][0]["taskDefinition"]
-        sizing_env = _taskdef_env(region, api_arn)
+        sizing_env = _taskdef_env(region, api_arn, "admin-api")
         sender_type = sizing_env.get("EMAIL_SENDER_TYPE", "mock")
     except (CaptureError, KeyError, IndexError) as e:
         api_env_ok = False
         notes.append(f"admin-api task def 조회 실패 — env 기반 항목은 추정입니다: {e}")
-        notes.append("service_keys 는 읽기 실패로 false 기록 — 실제 값은 "
+        # task def env 에서 오는 기능키 전부 "못 읽음"이다 — false 로 두면
+        # 채택 apply 가 켜진 기능을 끈다. 특히 body_logging=false 는
+        # Firehose/S3 managed 리소스 destroy 라 반드시 unknown 표기.
+        notes.append("service_keys/bi_insight/pricing_lambda/web_search/"
+                     "body_logging/dev_login 은 읽기 실패로 false 기록 — 실제 값은 "
                      "ECS 콘솔/task def 에서 확인하세요")
         if unknown is not None:
-            unknown.add("features.service_keys")
+            unknown.update({"features.service_keys", "features.bi_insight",
+                            "features.pricing_lambda", "features.web_search",
+                            "features.body_logging", "features.dev_login"})
 
-    # 이미지 태그 + 레지스트리
+    # 이미지 태그 + 레지스트리 — 서비스별 태그가 다르면(단일 서비스 hotfix 등)
+    # 스키마가 표현 못 하므로 gateway-proxy 를 대표로 쓰고 차이는 노트로 남긴다.
+    # 마지막 순회 서비스 태그를 쓰면 임의 서비스 태그가 전체에 고정된다.
+    image_registry, tag_by_svc = "", {}
     try:
-        gws = _aws_json(["ecs", "describe-services", "--cluster", cluster,
-                         "--services", *(service_names or ["gateway-proxy"])], region)["services"]
+        _resp = _aws_json(["ecs", "describe-services", "--cluster", cluster,
+                           "--services", *(service_names or ["gateway-proxy"])], region)
+        gws = _resp["services"]
+        # services 배열에 없는 항목은 failures(reason=MISSING)로 온다 — 조용히
+        # 비는 sizing/태그 대신 어느 서비스가 부재인지 기록한다.
+        _missing = [f.get("arn", "?").rsplit("/", 1)[-1]
+                    for f in (_resp.get("failures") or [])]
+        if _missing:
+            notes.append(f"⚠ ECS 서비스 부재(MISSING): {', '.join(_missing)} — "
+                         "해당 서비스의 sizing/태그는 캡처되지 않습니다")
         live_to_logical = {v: k for k, v in name_map.items()}
         for s in gws:
             td_arn = s.get("taskDefinition", "")
             td = _aws_json(["ecs", "describe-task-definition",
                             "--task-definition", td_arn], region)["taskDefinition"]
-            img = td["containerDefinitions"][0].get("image", "")
-            if ":" in img:
-                image_tag = img.rsplit(":", 1)[1]
-            # deploy.sizing 키는 논리 서비스명 — 라이브명이 커스텀이면 역매핑
             logical = live_to_logical.get(s["serviceName"], s["serviceName"])
+            defs = td["containerDefinitions"]
+            # 사이드카가 첫 번째면 image/env 를 잘못 읽는다 — 논리명 컨테이너 우선
+            cdef = next((c for c in defs
+                         if c.get("name") == logical), defs[0])
+            img = cdef.get("image", "")
+            if ":" in img:
+                tag_by_svc[logical] = img.rsplit(":", 1)[1]
+                if "/" in img and not image_registry:
+                    image_registry = img.rsplit("/", 1)[0]
+            # deploy.sizing 키는 논리 서비스명 — 라이브명이 커스텀이면 역매핑
             sizing[logical] = {
                 "cpu": _safe_int(td.get("cpu")),
                 "memory": _safe_int(td.get("memory")),
                 "desired_count": s.get("desiredCount", 0),
             }
+        image_tag = tag_by_svc.get("gateway-proxy", "")
+        if not image_tag and tag_by_svc:
+            image_tag = next(iter(tag_by_svc.values()))
+        diverged = {k: t for k, t in tag_by_svc.items() if t != image_tag}
+        if diverged:
+            notes.append(f"⚠ 서비스별 이미지 태그가 다릅니다: {tag_by_svc} — "
+                         "ecs 스키마는 단일 images.tag 라 gateway-proxy 기준으로 "
+                         "기록했습니다. 채택 apply 시 나머지 태그가 통일됩니다")
+        # 라이브 오토스케일 상한 — 캡처가 버리면 render 가 desired×factor 로
+        # 재계산해 수동으로 올려둔 max_count 가 내려간다.
+        if sizing and cluster:
+            try:
+                targets = _aws_json(
+                    ["application-autoscaling", "describe-scalable-targets",
+                     "--service-namespace", "ecs"], region)
+                for t in (targets.get("ScalableTargets") or []):
+                    rid = str(t.get("ResourceId") or "")
+                    # service/<cluster>/<service>
+                    parts = rid.split("/")
+                    if len(parts) >= 3 and parts[-2] == cluster:
+                        logical = live_to_logical.get(parts[-1], parts[-1])
+                        if logical in sizing:
+                            for src, dst in (("MinCapacity", "min_count"),
+                                             ("MaxCapacity", "max_count")):
+                                if isinstance(t.get(src), int):
+                                    sizing[logical][dst] = t[src]
+            except CaptureError:
+                pass
     except (CaptureError, KeyError, IndexError) as e:
         notes.append(f"서비스 상태 조회 실패 — sizing 은 비워둡니다: {e}")
 
     notif = {"provider": sender_type if sender_type in ("mock", "ses", "smtp") else "mock"}
+    if sender_type not in ("mock", "ses", "smtp"):
+        notes.append(f"EMAIL_SENDER_TYPE={sender_type} 는 스키마에 없는 값 — "
+                     "provider 를 mock 으로 기록했으니 채택 전 확인하세요")
     if sender_type == "ses":
         notif["ses_from"] = sizing_env.get("EMAIL_SENDER_ADDRESS", "")
     elif sender_type == "smtp":
@@ -344,6 +413,10 @@ def capture_ecs(env_dir: Path, region: str,
             ep = (c.get("Endpoint") or "")
             if db_ep and ep and ep in db_ep:
                 sc = c.get("ServerlessV2ScalingConfiguration") or {}
+                # EngineVersion 핀 생략은 parameter-group family 드리프트를
+                # 만든다 (render 가 engine_version 키로만 방출) — 기존 env 의
+                # 실측 버전을 기록해 다음 plan 이 family 를 바꾸지 않게 한다.
+                eng_ver = str(c.get("EngineVersion") or "")
                 if sc:
                     db_acu_max = float(sc.get("MaxCapacity") or 0)
                     infra_doc["db"] = {
@@ -360,6 +433,8 @@ def capture_ecs(env_dir: Path, region: str,
                     }
                     tier_signals.append(
                         f"Aurora provisioned {c.get('DBClusterInstanceClass','?')}")
+                if eng_ver:
+                    infra_doc["db"]["engine_version"] = eng_ver
                 break
     except (CaptureError, KeyError, ValueError):
         pass
@@ -433,13 +508,19 @@ def capture_ecs(env_dir: Path, region: str,
             oidc["authorize_url"] = f"https://{hosted}/oauth2/authorize"
             oidc["token_url"] = f"https://{hosted}/oauth2/token"
 
-    # ALB SG 인바운드 → allowed_cidrs 역산: Route53 alias → ALB → SG 규칙
+    # ALB SG 인바운드 → allowed_cidrs 역산 + Scheme → network.mode:
+    # Route53 alias → ALB → SG 규칙. internal ALB 를 public 으로 기록하면
+    # 채택 apply(alb_internal=false 렌더)가 인터넷 노출로 되돌린다.
     allowed_cidrs: list[str] = []
+    net_mode = "public"
     if domain.get("zone_id") and domain.get("name"):
         alb_dns = _r53_alias_target(domain["zone_id"],
                                     f"admin.{domain['name']}", region)
         if alb_dns:
-            allowed_cidrs = _alb_ingress_cidrs(alb_dns, region)
+            allowed_cidrs, alb_scheme = _alb_ingress_cidrs(alb_dns, region)
+            if alb_scheme == "internal":
+                net_mode = "private"
+                notes.append("ALB Scheme=internal — network.mode=private 로 기록합니다")
             if allowed_cidrs:
                 notes.append(f"allowed_cidrs={allowed_cidrs} 를 ALB SG 에서 역산했습니다")
     if not allowed_cidrs:
@@ -460,22 +541,48 @@ def capture_ecs(env_dir: Path, region: str,
     tv = _tfvars(env_dir)
     if tv.get("bedrock_allowed_model_arns"):
         infra_doc["bedrock_allowed_model_arns"] = tv["bedrock_allowed_model_arns"]
+    if isinstance(tv.get("cognito_groups"), list) and tv["cognito_groups"]:
+        infra_doc["cognito_groups"] = [str(g) for g in tv["cognito_groups"]]
     models_profile = str(tv.get("models_profile") or "global")
     if not tv.get("models_profile"):
         notes.append("clients.models_profile 을 tfvars 에서 못 읽어 'global' 로 "
                      "둡니다 — regional/다른 프로필이면 채택 전 수정하세요")
 
+    # render 가 무조건 다시 쓰는 보안/권한 키 — 캡처가 버리면 채택 apply 가
+    # fail-closed/lockout 을 일으킨다 (allowed_iam_roles=[] → CLI VK 전면 403,
+    # admin_groups=기본값 → 커스텀 관리자 그룹 권한 상실).
+    allowed_roles = ([str(r) for r in tv["allowed_iam_roles"]]
+                     if isinstance(tv.get("allowed_iam_roles"), list) else [])
+    if allowed_roles:
+        notes.append(f"aws.allowed_roles={allowed_roles} 를 tfvars 에서 복원했습니다")
+    elif "allowed_iam_roles" in tv:
+        notes.append("tfvars 의 allowed_iam_roles 가 list 가 아닙니다 — "
+                     "aws.allowed_roles 를 수동 확인하세요")
+    oidc_tfvars = {}
+    if isinstance(tv.get("admin_groups"), list) and tv["admin_groups"]:
+        oidc_tfvars["admin_groups"] = [str(g) for g in tv["admin_groups"]]
+    for tfk, dk in (("oidc_group_prefix", "group_prefix"),
+                    ("oidc_groups_claim", "groups_claim"),
+                    ("oidc_reject_unmatched_groups", "reject_unmatched_groups")):
+        if tv.get(tfk) not in (None, ""):
+            oidc_tfvars[dk] = tv[tfk]
+
+    # tfvars 유래 oidc 키 병합 — task-def env 유래 키(issuer/client_id)를 덮지 않는다
+    for k, v2 in oidc_tfvars.items():
+        oidc.setdefault(k, v2)
+
     doc = {
         "version": 1,
         "env": env_name,
-        "aws": {"region": region},
+        "aws": {"region": region,
+                **({"allowed_roles": allowed_roles} if allowed_roles else {})},
         # 라이브 desired/cpu/memory 를 그대로 기록 — 채택 후 apply 가 task 수를
         # 프리셋으로 되돌리지 않고, DB 커넥션 예산 검증도 실제 수요로 계산된다
         "deploy": {"target": "ecs", "size_tier": tier, "sizing": sizing,
                    **tfstate},
         # allowed_cidrs 는 읽은 값이 있을 때만 쓴다 — 빈 리스트를 기록하면 채택
         # 후 apply 가 모듈 기본(0.0.0.0/0) 대신 ALB 인그레스 0개를 만든다
-        "network": {"mode": "public",
+        "network": {"mode": net_mode,
                     **({"allowed_cidrs": allowed_cidrs} if allowed_cidrs else {})},
         "domain": domain,
         # features — 스키마 키를 전부 기록한다 (못 읽은 기능 = false 명시,
@@ -510,7 +617,10 @@ def capture_ecs(env_dir: Path, region: str,
                    if tv.get("alert_emails") else {}),
             },
         },
-        "images": {"tag": image_tag},
+        "images": {"tag": image_tag,
+                   # 이미지 URI 의 레지스트리 — 계정/리전 경계 신호. 비우면
+                   # 채택본이 모듈 생성 ECR 로 리포지토리를 되돌린다
+                   **({"registry": image_registry} if image_registry else {})},
         "clients": {"models_profile": models_profile},
     }
     if api_env_ok and sizing_env.get("SERVICE_KEYS_ENABLED") is None:
@@ -585,6 +695,24 @@ def _val(d: dict, *path, default=""):
             return default
         cur = cur.get(p)
     return cur if cur is not None else default
+
+
+def _dmap(node) -> dict:
+    """leaf 가 dict 가 아니면(str/list/int) {} — `x or {}` 는 truthy 스칼라를
+    그대로 통과시켜 이후 .get 이 AttributeError 로 죽는 함정을 막는다."""
+    return node if isinstance(node, dict) else {}
+
+
+def _instance_items(items: list, release: str) -> list:
+    """공유 ns 의 다른 릴리스가 이름 접미(-gateway 등)로 우리 것처럼 보인다 —
+    doctor 와 같은 계약으로 app.kubernetes.io/instance == release 만 고르고,
+    라벨 없는 레거시 채택은 타 릴리스 소유가 명시되지 않은 것만 폴백한다."""
+    items = [i for i in items if isinstance(i, dict)]
+    def _inst(i) -> str:
+        return str((_dmap(_dmap(i.get("metadata")).get("labels")))
+                   .get("app.kubernetes.io/instance") or "")
+    ours = [i for i in items if _inst(i) == release]
+    return ours or [i for i in items if not _inst(i)]
 
 
 def _kube_context_cluster(context: str = "") -> str:
@@ -770,26 +898,30 @@ def _r53_alias_target(zone_id: str, host: str, region: str) -> str:
     return ""
 
 
-def _alb_ingress_cidrs(alb_dns: str, region: str) -> list[str]:
-    """ALB DNS 이름으로 LB 를 찾아 SG 인바운드 CIDR 을 모은다.
+def _alb_ingress_cidrs(alb_dns: str, region: str) -> tuple[list[str], str]:
+    """ALB DNS 이름으로 LB 를 찾아 (SG 인바운드 CIDR, scheme) 을 모은다.
 
     모듈이 여는 포트는 모드마다 다르다 — https_ready=[80,443], http_mode=
     [8000,8080,3000], http=[80] (ecs-gateway/main.tf alb_ingress_ports). 세
     모드 포트를 전부 보며, IpProtocol -1(all traffic) 규칙의 IpRanges 도
-    인입 허용으로 간주한다."""
+    인입 허용으로 간주한다. scheme 은 "internet-facing"|"internal"|"" —
+    network.mode 역산에 쓴다 (internal ALB 를 public 으로 기록하면 채택
+    apply 가 인터넷 노출 ALB 로 되돌린다)."""
     try:
         lbs = _aws_json(["elbv2", "describe-load-balancers"], region)
         sg_ids: list[str] = []
+        scheme = ""
         for lb in lbs.get("LoadBalancers", []):
             if (lb.get("DNSName") or "") == alb_dns:
                 sg_ids = lb.get("SecurityGroups") or []
+                scheme = str(lb.get("Scheme") or "")
                 break
         if not sg_ids:
-            return []
+            return [], scheme
         sgs = _aws_json(["ec2", "describe-security-groups",
                          "--group-ids", *sg_ids], region)
     except CaptureError:
-        return []
+        return [], ""
     cidrs: list[str] = []
     for sg in sgs.get("SecurityGroups", []):
         for p in sg.get("IpPermissions", []):
@@ -802,7 +934,7 @@ def _alb_ingress_cidrs(alb_dns: str, region: str) -> list[str]:
                     cidrs.append(c)
     # 미커버 규칙: Ipv6Ranges/PrefixListIds 는 읽지 않는다 — 호출부가 cidrs
     # 비어 있을 때 수동 확인 notes 를 낸다.
-    return cidrs
+    return cidrs, scheme
 
 
 def capture_eks(namespace: str = "llm-gateway", release: str = "llm-gateway",
@@ -818,15 +950,15 @@ def capture_eks(namespace: str = "llm-gateway", release: str = "llm-gateway",
         if found:
             env_dir = found
             notes.append(f"tf_env_dir 을 자동 탐지했습니다: {found.name}")
-    genv = _val(v, "gatewayProxy", "env", default={}) or {}
+    genv = _dmap(_val(v, "gatewayProxy", "env", default={}))
 
     # ── 라이브 대조용 수집 ─────────────────────────────────────────────────
     live = _kubectl_json("ingress", namespace, context)
     deploys = _kubectl_json("deployments", namespace, context)
 
     # ── ingress → domain / allowed_cidrs ───────────────────────────────────
-    ing = v.get("ingress") or {}
-    ann = dict(ing.get("annotations") or {})
+    ing = _dmap(v.get("ingress"))
+    ann = dict(_dmap(ing.get("annotations")))
     cidrs_raw = ann.get("alb.ingress.kubernetes.io/inbound-cidrs", "")
     cidrs = [c.strip() for c in str(cidrs_raw).split(",") if c.strip()]
 
@@ -854,26 +986,43 @@ def capture_eks(namespace: str = "llm-gateway", release: str = "llm-gateway",
                      "못했습니다 — domain.mode=none 으로 기록합니다. 정식 "
                      f"도메인이면 name/zone_id + hosts({_live})를 채우세요")
 
-    # 라이브 ingress 와 values 의 host 가 다른지 (kubectl 패치 드리프트)
+    # 라이브 ingress 와 values 의 host 가 다른지 (kubectl 패치 드리프트).
+    # 공유 ns 의 다른 릴리스는 instance 라벨로 걸러낸다 — 타 릴리스의
+    # <other>-gateway ingress 를 우리 것으로 읽으면 채택 yaml 이 scheme/cidr
+    # 까지 외부 배포 것으로 뒤집힌다.
     live_hosts = []
     live_schemes: dict[str, str] = {}
-    for item in live.get("items", []):
-        anns = (item.get("metadata") or {}).get("annotations") or {}
-        for rule in (item.get("spec") or {}).get("rules") or []:
-            live_hosts.append((item["metadata"]["name"], rule.get("host", "")))
+    live_cidr_map: dict[str, str] = {}
+    for item in _instance_items(live.get("items", []), release):
+        anns = _dmap(_dmap(item.get("metadata")).get("annotations"))
+        iname = str(_dmap(item.get("metadata")).get("name") or "")
+        rules = _dmap(item.get("spec")).get("rules") or []
+        for rule in rules:
+            if isinstance(rule, dict):
+                live_hosts.append((iname, rule.get("host", "")))
         scheme = anns.get("alb.ingress.kubernetes.io/scheme")
         if scheme:
-            live_schemes[item["metadata"]["name"]] = scheme
+            live_schemes[iname] = scheme
         live_cidrs = anns.get("alb.ingress.kubernetes.io/inbound-cidrs")
-        if live_cidrs and live_cidrs != cidrs_raw:
-            notes.append(f"⚠ ingress/{item['metadata']['name']} 의 live inbound-cidrs "
-                         f"({live_cidrs})가 helm values 와 다릅니다 — kubectl 패치 드리프트")
+        if live_cidrs:
+            live_cidr_map[iname] = live_cidrs
+            if live_cidrs != cidrs_raw:
+                notes.append(f"⚠ ingress/{iname} 의 live inbound-cidrs "
+                             f"({live_cidrs})가 helm values 와 다릅니다 — "
+                             "kubectl 패치 드리프트. 라이브 값으로 캡처합니다")
+    # 시행 중인 값은 helm values 가 아니라 라이브 어노테이션이다 — live 가 더
+    # 좁은 제한을 패치해 둔 경우 values 값 채택은 ALB 를 다시 연다.
+    if live_cidr_map:
+        live_set = {c for v2 in live_cidr_map.values()
+                    for c in str(v2).split(",") if c.strip()}
+        if live_set and live_set != set(cidrs):
+            cidrs = sorted(live_set)
 
     def _scheme(suffix: str, values_sec: str) -> str:
         for nm, sc in live_schemes.items():
             if nm.endswith(f"-{suffix}"):
                 return sc
-        sec_anns = _val(ing, values_sec, "annotations", default={}) or {}
+        sec_anns = _dmap(_val(ing, values_sec, "annotations", default={}))
         return str(sec_anns.get("alb.ingress.kubernetes.io/scheme", ""))
 
     gw_scheme = _scheme("gateway", "gateway") or str(ann.get(
@@ -902,17 +1051,23 @@ def capture_eks(namespace: str = "llm-gateway", release: str = "llm-gateway",
     # 라이브 태그가 곧 유효 태그다 — 기록하지 않으면 채택본 apply 가 폴백 대상
     # 서비스를 global images.tag 로 덮어쓴다.
     live_tags: dict[str, str] = {}
-    for item in deploys.get("items", []):
-        name = item["metadata"]["name"]
+    for item in _instance_items(deploys.get("items", []), release):
+        name = str(_dmap(item.get("metadata")).get("name") or "")
         svc_key = next((s for s in helm_keys if name.endswith(f"-{s}")), "")
         if not svc_key:
             continue
-        containers = ((item.get("spec") or {}).get("template") or {}).get("spec", {}).get("containers") or []
-        for c in containers:
-            img = c.get("image", "")
-            live_tag = img.rsplit(":", 1)[-1] if ":" in img else ""
-            if live_tag:
-                live_tags[svc_key] = live_tag
+        containers = _dmap(_dmap(item.get("spec")).get("template"))
+        containers = _dmap(containers.get("spec")).get("containers") or []
+        # 앱 컨테이너는 차트가 svc 이름으로 명명한다 — 컨테이너를 무차별 순회하면
+        # otel-collector 같은 사이드카 이미지 태그가 앱 태그를 덮어쓴다.
+        pick = next((c for c in containers
+                     if isinstance(c, dict) and c.get("name") == svc_key), None)
+        if pick is None and containers:
+            pick = containers[0]
+        img = str((pick or {}).get("image") or "") if isinstance(pick, dict) else ""
+        live_tag = img.rsplit(":", 1)[-1] if ":" in img else ""
+        if live_tag:
+            live_tags[svc_key] = live_tag
 
     # values 미명시 + 라이브 없음(migration Job 등)의 최종 폴백 = 차트 appVersion
     app_version = _helm_app_version(release, namespace, context)
@@ -927,21 +1082,25 @@ def capture_eks(namespace: str = "llm-gateway", release: str = "llm-gateway",
         elif live_tag and not declared and app_version and live_tag != app_version:
             notes.append(f"⚠ {svc} 라이브 이미지 태그 {live_tag} ≠ 차트 appVersion "
                          f"{app_version} 폴백 — 수동 set image 추정. 라이브 값으로 캡처")
-        # 캡처는 현재 상태 기준 — 라이브 > values 명시 > 차트 폴백 순
-        tags[svc] = live_tag or declared or app_version
+        # 캡처는 현재 상태 기준 — 라이브 > values 명시 > 차트 폴백 순.
+        # migration 은 hook Job(deployment 에 없음) + 독립 버전 라인(headNNNN)
+        # 이라 appVersion 폴백을 하면 존재하지 않는 migration 태그가 고정돼
+        # 채택 apply 의 migration Job 이 ImagePull 실패한다.
+        tags[svc] = live_tag or declared or (
+            "" if svc == "migration" else app_version)
     unique = {t for t in tags.values() if t}
     tag = tags.get("gateway-proxy", "")
     per_service = ({helm_keys[s]: t for s, t in tags.items() if t}
                    if len(unique) > 1 else {})
 
     # ── features ────────────────────────────────────────────────────────────
-    email = _val(v, "notificationWorker", "email", default={}) or {}
+    email = _dmap(_val(v, "notificationWorker", "email", default={}))
     provider = str(email.get("provider", "mock"))
     notif = {"provider": provider}
     if provider == "ses":
         notif["ses_from"] = str(_val(email, "ses", "fromAddress"))
     elif provider == "smtp":
-        smtp = _val(email, "smtp", default={}) or {}
+        smtp = _dmap(_val(email, "smtp", default={}))
         notif.update({
             "smtp_host": str(smtp.get("host", "")),
             "smtp_port": smtp.get("port", 587),
@@ -949,7 +1108,7 @@ def capture_eks(namespace: str = "llm-gateway", release: str = "llm-gateway",
             "smtp_credentials_secret": str(smtp.get("credentialsSecretName", "")),
         })
     elif provider == "internal_api":
-        ia = _val(email, "internalApi", default={}) or {}
+        ia = _dmap(_val(email, "internalApi", default={}))
         notif.update({
             "internal_api_url": str(ia.get("url", "")),
             "internal_api_from": str(ia.get("fromAddress", "")),
@@ -959,7 +1118,7 @@ def capture_eks(namespace: str = "llm-gateway", release: str = "llm-gateway",
                      "notifications.provider 를 직접 맞추세요")
 
     otel_mode = str(_val(v, "observability", "otel", "mode"))
-    aenv = _val(v, "adminApi", "env", default={}) or {}
+    aenv = _dmap(_val(v, "adminApi", "env", default={}))
     # 스키마 키를 전부 기록한다 — 못 읽은 기능은 false 로 명시. 키가 빠지면
     # 캡처된 yaml 을 보는 사용자가 그 옵션의 존재 자체를 모른다.
     features = {
@@ -1008,7 +1167,7 @@ def capture_eks(namespace: str = "llm-gateway", release: str = "llm-gateway",
     oidc = {}
     issuer = str(_val(v, "adminApi", "oidc", "issuerUrl") or _val(v, "gatewayProxy", "oidc", "issuerUrl"))
     if issuer:
-        ui_env = _val(v, "adminUi", "env", default={}) or {}
+        ui_env = _dmap(_val(v, "adminUi", "env", default={}))
         oidc = {
             "issuer_url": issuer,
             "client_id": str(ui_env.get("OIDC_CLIENT_ID", "")),
@@ -1018,6 +1177,20 @@ def capture_eks(namespace: str = "llm-gateway", release: str = "llm-gateway",
             "required_group": str(_val(v, "adminApi", "oidc", "requiredGroup") or
                                   _val(v, "gatewayProxy", "oidc", "requiredGroup")),
         }
+        # render 가 무조건 다시 쓰는 키(audience=client_id, groupsClaim=파생)를
+        # 못 읽으면 채택 apply 가 라이브 JWT 검증 규칙을 바꾼다 — 라이브 값 기록.
+        for vk_, dk in (("audience", "audience"),
+                        ("groupsClaim", "groups_claim"),
+                        ("groupPrefix", "group_prefix"),
+                        ("rejectUnmatchedGroups", "reject_unmatched_groups")):
+            lv = _val(v, "adminApi", "oidc", vk_)
+            if lv not in (None, ""):
+                oidc[dk] = lv
+        ab = _dmap(_val(v, "adminApi", "adminBootstrap", default={}))
+        if isinstance(ab.get("groups"), list) and ab["groups"]:
+            oidc["admin_groups"] = [str(g) for g in ab["groups"]]
+        if isinstance(ab.get("emails"), list) and ab["emails"]:
+            oidc["admin_emails"] = [str(x) for x in ab["emails"]]
         vk_ttl = _val(v, "adminApi", "oidc", "vkTtlHours")
         if vk_ttl not in (None, ""):
             oidc["vk_ttl_hours"] = vk_ttl
@@ -1120,7 +1293,9 @@ def capture_eks(namespace: str = "llm-gateway", release: str = "llm-gateway",
     try:
         es_items = _kubectl_json("externalsecrets", namespace, context).get("items", [])
         if es_items:
-            names = sorted(i["metadata"]["name"] for i in es_items)
+            names = sorted(n for n in (
+                str(_dmap(i.get("metadata")).get("name") or "")
+                for i in es_items if isinstance(i, dict)) if n)
             notes.append(f"ESO ExternalSecret 감지: {', '.join(names)} — "
                          "시크릿 백엔드(SM) 값은 의도적으로 캡처하지 않습니다")
     except CaptureError:
@@ -1158,7 +1333,7 @@ def capture_eks(namespace: str = "llm-gateway", release: str = "llm-gateway",
     # ── deploy 용량 — 라이브 HPA/pool 역산. 실측이 밴드와 정확히 일치하면
     #    capacity_tier(의도 선언)로, 아니면 명시 sizing 으로 기록한다 ────────
     sizing: dict = {}
-    asc = _val(v, "gatewayProxy", "autoscaling", default={}) or {}
+    asc = _dmap(_val(v, "gatewayProxy", "autoscaling", default={}))
     gp: dict = {}
     # enabled=false + replicaCount 고정 운영(loadtest 등)도 helm values 에는
     # 차트 기본 min/max(2/20)가 남아 있다 — 그대로 역산하면 채택 후 apply 가
@@ -1207,16 +1382,28 @@ def capture_eks(namespace: str = "llm-gateway", release: str = "llm-gateway",
     notes.append("size_tier 는 eks=t3 으로 둡니다 — eks 에서는 문서용 키라 라이브 "
                  "신호가 없어 의도적으로 역산하지 않습니다 (스펙은 HPA/requests 참조)")
 
+    # allowedAwsAccounts 가 계정 경계(VK 발급 대상 role 의 계정 고정)를 잡는
+    # 보안 키다 — 캡처가 버리면 다음 apply 가 제한을 풀어 타 계정 role 도 허용된다.
+    # 스키마는 단일 account_id 만 표현하므로 첫 계정을 기록하되, 다중 계정은
+    # 나머지가 유실됨을 노트로 남긴다 (리스트 외 값은 방어적으로 무시).
+    _allowed = _dmap(v.get("aws")).get("allowedAwsAccounts")
+    _acct = ""
+    if isinstance(_allowed, list) and _allowed:
+        _acct = str(_allowed[0])
+        if len(_allowed) > 1:
+            notes.append(
+                f"allowedAwsAccounts 에 계정 {len(_allowed)}개가 있습니다: "
+                f"{_allowed} — 스키마는 account_id 1개만 표현해 첫 항목만 기록합니다. "
+                "다계정 허용이 의도면 env values 로 관리하세요")
+    elif _allowed:
+        notes.append(f"allowedAwsAccounts 가 list 가 아닙니다({_allowed!r}) — "
+                     "account_id 기록을 건너뜁니다")
+
     doc = {
         "version": 1,
         "env": env,
-        # allowedAwsAccounts 가 계정 경계(VK 발급 대상 role 의 계정 고정)를 잡는
-        # 보안 키다 — 캡처가 버리면 다음 apply 가 제한을 풀어 타 계정 role 도
-        # 허용된다. helm values 의 라이브 리스트에서 복원한다.
         "aws": {"region": region,
-                **({"account_id": str((v.get("aws") or {})
-                                      .get("allowedAwsAccounts", [""])[0])}
-                   if (v.get("aws") or {}).get("allowedAwsAccounts") else {})},
+                **({"account_id": _acct} if _acct else {})},
         # 실제 릴리스/namespace/env_dir 를 기록 — 기본값이 아닌 배포도
         # 채택 후 apply 가 같은 대상을 가리키도록
         "deploy": {"target": "eks", "size_tier": "t3",

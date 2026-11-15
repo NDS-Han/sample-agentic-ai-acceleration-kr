@@ -795,7 +795,7 @@ def test_alb_ingress_cidrs_all_traffic_and_httpmode_ports(monkeypatch):
         ]}]},
     ])
     monkeypatch.setattr(capture, "_aws_json", lambda *a, **kw: next(calls))
-    cidrs = capture._alb_ingress_cidrs("alb-1.elb.amazonaws.com", "r")
+    cidrs, scheme = capture._alb_ingress_cidrs("alb-1.elb.amazonaws.com", "r")
     assert cidrs == ["10.0.0.0/8", "172.16.0.0/12"]
 
 
@@ -873,3 +873,272 @@ def test_tfvars_skips_heredoc_and_crossline_keys(tmp_path):
     assert "inner" not in tv and "desc" not in tv
     assert tv["mantle_regions"] == ["us-east-1"]
     assert tv["num"] == 3
+
+
+# ==============================================================================
+# R18 회귀 — 공유 ns 흡수/사이드카/ALB scheme/읽기실패 unknown/미읽기 키 복원
+# ==============================================================================
+
+def test_eks_capture_ignores_foreign_release_resources(monkeypatch):
+    """공유 ns 의 타 릴리스(instance=other) ingress/deployment 를 우리 것으로
+    흡수하면 안 된다 — scheme/cidr/태그 전부 타 배포 값으로 오염된다."""
+    vals = {
+        "global": {"environment": "dev"},
+        "aws": {"region": "ap-northeast-2"},
+        "ingress": {"annotations": {}, "gateway": {"host": "gateway.acme.io"}},
+        "gatewayProxy": {"env": {}}, "redis": {}, "adminApi": {"env": {}},
+    }
+    monkeypatch.setattr(capture, "_helm_values", lambda *a, **kw: vals)
+    monkeypatch.setattr(capture, "_helm_app_version", lambda *a, **kw: "1.0.0")
+
+    foreign = {"app.kubernetes.io/instance": "other-rel"}
+    ours = {"app.kubernetes.io/instance": "llm-gateway"}
+
+    def _kubectl(resource, *a, **kw):
+        if resource == "ingress":
+            return {"items": [
+                {"metadata": {"name": "other-rel-gateway", "labels": foreign,
+                              "annotations": {
+                                  "alb.ingress.kubernetes.io/scheme": "internal"}},
+                 "spec": {"rules": [{"host": "other.example.com"}]}},
+                {"metadata": {"name": "llm-gateway-gateway", "labels": ours,
+                              "annotations": {
+                                  "alb.ingress.kubernetes.io/scheme":
+                                  "internet-facing"}},
+                 "spec": {"rules": [{"host": "gateway.acme.io"}]}},
+            ]}
+        if resource == "deployments":
+            return {"items": [
+                {"metadata": {"name": "other-rel-gateway-proxy",
+                              "labels": foreign},
+                 "spec": {"template": {"spec": {"containers": [
+                     {"name": "gateway-proxy", "image": "reg/gw:BAD"}]}}}},
+                {"metadata": {"name": "llm-gateway-gateway-proxy",
+                              "labels": ours},
+                 "spec": {"template": {"spec": {"containers": [
+                     {"name": "gateway-proxy", "image": "reg/gw:7.7.7"}]}}}},
+            ]}
+        return {}
+    monkeypatch.setattr(capture, "_kubectl_json", _kubectl)
+    monkeypatch.setattr(capture, "_aws_json", lambda *a, **kw: {})
+
+    doc, _ = capture.capture_eks()
+    assert doc["network"]["mode"] == "public"   # 타 릴리스 internal 미흡수
+    assert doc["images"]["tag"] == "7.7.7"       # BAD 태그 미흡수
+
+
+def test_eks_capture_sidecar_does_not_overwrite_app_tag(monkeypatch):
+    """차트는 otel-collector 사이드카를 두 번째 컨테이너로 싣는다 — 무차별
+    순회하면 사이드카 이미지 태그가 앱 태그를 덮어쓴다."""
+    vals = {
+        "global": {"environment": "dev"},
+        "aws": {"region": "ap-northeast-2"},
+        "ingress": {},
+        "gatewayProxy": {"env": {}}, "redis": {}, "adminApi": {"env": {}},
+    }
+    monkeypatch.setattr(capture, "_helm_values", lambda *a, **kw: vals)
+    monkeypatch.setattr(capture, "_helm_app_version", lambda *a, **kw: "1.0.0")
+
+    def _kubectl(resource, *a, **kw):
+        if resource == "deployments":
+            return {"items": [{
+                "metadata": {"name": "llm-gateway-gateway-proxy"},
+                "spec": {"template": {"spec": {"containers": [
+                    {"name": "gateway-proxy",
+                     "image": "reg.example.com/gw:2.0.0"},
+                    {"name": "otel-collector",
+                     "image": "otel/opentelemetry-collector:0.91.0"}]}}}},
+            ]}
+        return {}
+    monkeypatch.setattr(capture, "_kubectl_json", _kubectl)
+    monkeypatch.setattr(capture, "_aws_json", lambda *a, **kw: {})
+
+    doc, _ = capture.capture_eks()
+    assert doc["images"]["tag"] == "2.0.0"
+
+
+def test_eks_capture_migration_no_appversion_fallback(monkeypatch):
+    """migration 이미지는 독립 버전 라인(headNNNN) — appVersion 폴백으로
+    존재하지 않는 태그를 고정하면 migration Job 이 ImagePull 실패한다."""
+    vals = {
+        "global": {"environment": "dev"},
+        "aws": {"region": "ap-northeast-2"},
+        "ingress": {},
+        "gatewayProxy": {"env": {}, "image": {"tag": "1.2.3"}},
+        "redis": {}, "adminApi": {"env": {}},
+        "migration": {"image": {}},   # values 미명시 + Job 이라 라이브 없음
+    }
+    monkeypatch.setattr(capture, "_helm_values", lambda *a, **kw: vals)
+    monkeypatch.setattr(capture, "_helm_app_version", lambda *a, **kw: "9.9.9")
+    monkeypatch.setattr(capture, "_kubectl_json", lambda *a, **kw: {})
+    monkeypatch.setattr(capture, "_aws_json", lambda *a, **kw: {})
+
+    doc, _ = capture.capture_eks()
+    tags = doc["images"].get("tags", {})
+    assert tags.get("migration") != "9.9.9"
+    assert "migration" not in tags or not tags["migration"]
+
+
+def test_eks_capture_live_cidrs_preferred_over_values(monkeypatch):
+    """live 어노테이션이 시행 중인 제한 — values 의 더 넓은 목록으로 기록하면
+    채택 apply 가 ALB 를 다시 연다."""
+    vals = {
+        "global": {"environment": "dev"},
+        "aws": {"region": "ap-northeast-2"},
+        "ingress": {"annotations": {
+            "alb.ingress.kubernetes.io/inbound-cidrs": "0.0.0.0/0"}},
+        "gatewayProxy": {"env": {}}, "redis": {}, "adminApi": {"env": {}},
+    }
+    monkeypatch.setattr(capture, "_helm_values", lambda *a, **kw: vals)
+    monkeypatch.setattr(capture, "_helm_app_version", lambda *a, **kw: "")
+
+    def _kubectl(resource, *a, **kw):
+        if resource == "ingress":
+            return {"items": [{
+                "metadata": {"name": "llm-gateway-gateway",
+                             "annotations": {
+                                 "alb.ingress.kubernetes.io/inbound-cidrs":
+                                 "10.0.0.0/8"}},
+                "spec": {"rules": []}}]}
+        return {}
+    monkeypatch.setattr(capture, "_kubectl_json", _kubectl)
+    monkeypatch.setattr(capture, "_aws_json", lambda *a, **kw: {})
+
+    doc, notes = capture.capture_eks()
+    assert doc["network"]["allowed_cidrs"] == ["10.0.0.0/8"]
+    assert any("드리프트" in n for n in notes)
+
+
+def test_ecs_capture_internal_alb_records_private(monkeypatch, tmp_path):
+    """internal ALB 를 public 으로 기록하면 채택 apply(alb_internal=false)
+    가 인터넷 노출로 되돌린다."""
+    outputs = {
+        "ecs_cluster_name": "llm-gateway-acme",
+        "admin_ui_url": "https://admin.acme.io",
+        "https_enabled": True,
+        "service_names": {"admin-api": "admin-api"},
+    }
+    monkeypatch.setattr(capture, "_tf_outputs", lambda *a, **kw: outputs)
+
+    def _aws(argv, region):
+        if argv[0] == "route53" and "list-resource-record-sets" in argv:
+            return [{"Name": "admin.acme.io.", "Type": "A",
+                     "AliasTarget": {"DNSName":
+                                     "dualstack.internal-alb.elb.amazonaws.com."}}]
+        if argv[0] == "route53":
+            return {"HostedZones": [{"Name": "acme.io.", "Id": "Z1",
+                                     "Config": {"PrivateZone": False}}]}
+        if argv[0] == "elbv2":
+            return {"LoadBalancers": [
+                {"DNSName": "internal-alb.elb.amazonaws.com",
+                 "Scheme": "internal", "SecurityGroups": ["sg-1"]}]}
+        if argv[0] == "ec2":
+            return {"SecurityGroups": [{"IpPermissions": [
+                {"IpProtocol": "-1",
+                 "IpRanges": [{"CidrIp": "10.0.0.0/8"}]}]}]}
+        if argv[0] == "ecs" and argv[1] == "describe-services":
+            return {"services": [{"serviceName": "admin-api",
+                                  "taskDefinition": "td:1",
+                                  "desiredCount": 1}]}
+        if argv[0] == "ecs":
+            return {"taskDefinition": {
+                "cpu": "512", "memory": "1024",
+                "containerDefinitions": [{"name": "admin-api",
+                                          "image": "reg/api:1.0",
+                                          "environment": []}]}}
+        return {}
+    monkeypatch.setattr(capture, "_aws_json", _aws)
+    doc, notes = capture.capture_ecs(tmp_path, "ap-northeast-2")
+    assert doc["network"]["mode"] == "private"
+    assert doc["network"]["allowed_cidrs"] == ["10.0.0.0/8"]
+
+
+def test_ecs_capture_taskdef_fail_marks_env_features_unknown(monkeypatch, tmp_path):
+    """admin-api task def 읽기 실패 시 env 유래 기능키는 false 박지 말고
+    unknown 표기해야 한다 — body_logging=false 는 Firehose destroy 경로."""
+    outputs = {
+        "ecs_cluster_name": "llm-gateway-acme",
+        "admin_ui_url": "", "https_enabled": False,
+        "service_names": {"admin-api": "admin-api"},
+    }
+    monkeypatch.setattr(capture, "_tf_outputs", lambda *a, **kw: outputs)
+
+    def _aws(argv, region):
+        if argv[0] == "ecs" and argv[1] == "describe-services":
+            return {"services": [{"serviceName": "admin-api",
+                                  "taskDefinition": "td:missing",
+                                  "desiredCount": 1}]}
+        raise capture.CaptureError("td gone")
+    monkeypatch.setattr(capture, "_aws_json", _aws)
+
+    unknown: set = set()
+    doc, notes = capture.capture_ecs(tmp_path, "r", unknown=unknown)
+    assert "features.body_logging" in unknown
+    assert "features.service_keys" in unknown
+    assert doc["features"]["body_logging"] is False
+
+
+def test_ecs_capture_restores_iam_roles_and_admin_groups(monkeypatch, tmp_path):
+    """render 가 무조건 다시 쓰는 allowed_iam_roles/admin_groups 는 tfvars
+    에서 복원 — 못 읽으면 채택 apply 가 CLI VK 전면 403/관리자 잠김."""
+    outputs = {
+        "ecs_cluster_name": "llm-gateway-acme",
+        "admin_ui_url": "", "https_enabled": False,
+        "service_names": {"admin-api": "admin-api"},
+    }
+    monkeypatch.setattr(capture, "_tf_outputs", lambda *a, **kw: outputs)
+    (tmp_path / "terraform.tfvars").write_text(
+        'allowed_iam_roles = ["arn:aws:iam::111122223333:role/Dev"]\n'
+        'admin_groups = ["Claude_PlatformOps"]\n'
+        'cognito_groups = ["Claude_TeamA"]\n')
+
+    def _aws(argv, region):
+        if argv[0] == "ecs" and argv[1] == "describe-services":
+            return {"services": [{"serviceName": "admin-api",
+                                  "taskDefinition": "td:1",
+                                  "desiredCount": 1}]}
+        if argv[0] == "ecs":
+            return {"taskDefinition": {
+                "cpu": "512", "memory": "1024",
+                "containerDefinitions": [{"name": "admin-api",
+                                          "image": "reg/api:1.0",
+                                          "environment": []}]}}
+        return {}
+    monkeypatch.setattr(capture, "_aws_json", _aws)
+    doc, _ = capture.capture_ecs(tmp_path, "r")
+    assert doc["aws"]["allowed_roles"] == [
+        "arn:aws:iam::111122223333:role/Dev"]
+    assert doc["oidc"]["admin_groups"] == ["Claude_PlatformOps"]
+    assert doc["infra"]["cognito_groups"] == ["Claude_TeamA"]
+
+
+def test_ecs_capture_gateway_proxy_tag_preferred(monkeypatch, tmp_path):
+    """서비스별 태그가 다르면 마지막 순회 서비스가 아니라 gateway-proxy 를
+    대표로 기록하고 차이를 노트로 남긴다."""
+    outputs = {
+        "ecs_cluster_name": "llm-gateway-acme",
+        "admin_ui_url": "", "https_enabled": False,
+        "service_names": {"admin-api": "admin-api", "gateway-proxy": "gw"},
+    }
+    monkeypatch.setattr(capture, "_tf_outputs", lambda *a, **kw: outputs)
+    imgs = {"td:gw": "reg/gw:2.0", "td:api": "reg/api:9.9"}
+
+    def _aws(argv, region):
+        if argv[0] == "ecs" and argv[1] == "describe-services":
+            return {"services": [
+                {"serviceName": "admin-api", "taskDefinition": "td:api",
+                 "desiredCount": 1},
+                {"serviceName": "gw", "taskDefinition": "td:gw",
+                 "desiredCount": 2}]}
+        if argv[0] == "ecs" and "describe-task-definition" in argv:
+            td = argv[-1]
+            return {"taskDefinition": {
+                "cpu": "512", "memory": "1024",
+                "containerDefinitions": [{"name": "app",
+                                          "image": imgs[td],
+                                          "environment": []}]}}
+        return {}
+    monkeypatch.setattr(capture, "_aws_json", _aws)
+    doc, notes = capture.capture_ecs(tmp_path, "r")
+    assert doc["images"]["tag"] == "2.0"
+    assert any("이미지 태그가 다릅니다" in n for n in notes)

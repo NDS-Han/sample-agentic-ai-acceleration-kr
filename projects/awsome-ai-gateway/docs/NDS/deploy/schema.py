@@ -20,7 +20,6 @@ NOTIFICATION_PROVIDERS = ("mock", "smtp", "ses", "internal_api")
 MODEL_PROFILES = ("global", "regional")
 
 _ENV_RE = re.compile(r"^[a-z][a-z0-9-]{1,30}$")
-_REGION_RE = re.compile(r"^[a-z]{2}-[a-z]+-\d+$")
 _EMAIL_RE = re.compile(r"^[^@\s,]+@[^@\s,]+\.[^@\s,]+$")
 
 
@@ -468,7 +467,10 @@ class GatewayConfig:
             e.append(f"aws.region '{self.aws.region}' 이 리전 형식이 아닙니다 (예: ap-northeast-2).")
         if self.deploy.target not in DEPLOY_TARGETS:
             e.append(f"deploy.target 은 {DEPLOY_TARGETS} 중 하나여야 합니다: {self.deploy.target}")
-        if self.deploy.size_tier not in SIZE_TIERS:
+        # 잘못된 tier 로 preset() 을 호출하면 KeyError 가 validate 를 빠져나가
+        # 모아둔 오류 목록이 유실된다 — tier 의존 검사는 전부 이 플래그로 게이트.
+        _tier_ok = self.deploy.size_tier in SIZE_TIERS
+        if not _tier_ok:
             e.append(f"deploy.size_tier 는 {SIZE_TIERS} 중 하나여야 합니다: {self.deploy.size_tier}")
         if self.deploy.target == "compose" and self.deploy.size_tier != "t0":
             e.append(f"compose 형태는 최저 티어(t0)로만 배포 가능합니다 — "
@@ -549,25 +551,27 @@ class GatewayConfig:
             e.append(f"infra.cache.num_node_groups 범위는 1~90: {cache.num_node_groups}")
         if cache.replicas_per_node_group is not None and not (1 <= cache.replicas_per_node_group <= 5):
             e.append(f"infra.cache.replicas_per_node_group 범위는 1~5: {cache.replicas_per_node_group}")
-        # 토폴로지 키가 mode 와 어긋나면 terraform 변수가 조용히 무시된다 — 경고로 노출
+        # 토폴로지 키가 mode 와 어긋나면 terraform 변수가 조용히 무시된다 — 경고로 노출.
+        # tier 가 잘못되면 preset() 자체가 KeyError 라 검사 자체를 건너뛴다.
         from .tiers import preset as _preset
-        _t = _preset(self.deploy.size_tier)
-        _tmode = ("single" if _t.cache_mode == "elasticache-single"
-                  else "cluster" if _t.cache_spec.get("cluster_mode")
-                  else "replicated")
-        _eff_mode = cache.mode or _tmode
-        if _eff_mode == "cluster":
-            if cache.num_clusters is not None:
-                e.append("infra.cache.num_clusters 는 cluster mode 에서 무시됩니다 "
-                         "— num_node_groups/replicas_per_node_group 을 쓰세요.")
-        elif cache.num_node_groups is not None or cache.replicas_per_node_group is not None:
-            e.append(f"infra.cache.num_node_groups/replicas_per_node_group 은 cluster "
-                     f"mode 전용입니다 (effective mode={_eff_mode!r}).")
-        # replicated 에서 num_clusters=1 은 모듈이 max(1,2) 로 조용히 올린다 —
-        # 선언과 실제가 갈리는 것을 차단
-        if _eff_mode == "replicated" and cache.num_clusters == 1:
-            e.append("infra.cache.num_clusters=1 은 replicated 와 맞지 않습니다 "
-                     "(모듈이 최소 2 로 강제합니다) — 2 이상이나 mode=single 을 쓰세요.")
+        _t = _preset(self.deploy.size_tier) if _tier_ok else None
+        if _t is not None:
+            _tmode = ("single" if _t.cache_mode == "elasticache-single"
+                      else "cluster" if _t.cache_spec.get("cluster_mode")
+                      else "replicated")
+            _eff_mode = cache.mode or _tmode
+            if _eff_mode == "cluster":
+                if cache.num_clusters is not None:
+                    e.append("infra.cache.num_clusters 는 cluster mode 에서 무시됩니다 "
+                             "— num_node_groups/replicas_per_node_group 을 쓰세요.")
+            elif cache.num_node_groups is not None or cache.replicas_per_node_group is not None:
+                e.append(f"infra.cache.num_node_groups/replicas_per_node_group 은 cluster "
+                         f"mode 전용입니다 (effective mode={_eff_mode!r}).")
+            # replicated 에서 num_clusters=1 은 모듈이 max(1,2) 로 조용히 올린다 —
+            # 선언과 실제가 갈리는 것을 차단
+            if _eff_mode == "replicated" and cache.num_clusters == 1:
+                e.append("infra.cache.num_clusters=1 은 replicated 와 맞지 않습니다 "
+                         "(모듈이 최소 2 로 강제합니다) — 2 이상이나 mode=single 을 쓰세요.")
         if (db.mode or db.min_acu is not None or db.max_acu is not None
                 or db.instance_class or db.engine_version
                 or cache.mode or cache.node_type
@@ -582,11 +586,25 @@ class GatewayConfig:
             e.append(f"domain.mode 은 {DOMAIN_MODES} 중 하나여야 합니다.")
         if self.domain.mode == "route53-acm" and not self.domain.name:
             e.append("domain.mode=route53-acm 이면 domain.name 이 필수입니다.")
+        # 캡처/수작업 입력의 쓰레기 값이 ingress host·ACM·Route53 으로 번지는 걸
+        # 선언 단계에서 차단 — Caddyfile 파생 이름(후행 콤마 등)이 대표 사례.
+        if self.domain.name and not _HOSTNAME_RE.match(self.domain.name):
+            e.append(f"domain.name '{self.domain.name}' 이 hostname 형식이 아닙니다.")
+        if self.domain.zone_id and not re.fullmatch(r"Z[0-9A-Z]+", self.domain.zone_id):
+            e.append(f"domain.zone_id '{self.domain.zone_id}' 이 hosted zone ID "
+                     "형식(Z...)이 아닙니다.")
+        if (self.aws.account_id
+                and not re.fullmatch(r"\d{12}", self.aws.account_id)):
+            e.append(f"aws.account_id '{self.aws.account_id}' 는 12자리 숫자여야 합니다.")
         if (self.domain.mode == "route53-acm"
                 and self.deploy.target == "ecs"
                 and not self.domain.zone_id):
             e.append("ecs 의 route53-acm 은 domain.zone_id(hosted zone)가 필수입니다 — "
                      "ACM 검증·레코드 생성에 필요. eks 는 env values 의 기존 인증서를 씁니다.")
+        # 비-int sizing 값은 위에서 오류로 잡히지만 dict 에 남아 있다 —
+        # 병합 검사/DB 예산이 그 값으로 int()/비교를 하면 TypeError/ValueError 가
+        # validate 를 빠져나가므로 아래 계산형 검사는 이 플래그로 게이트한다.
+        _sizing_ints_ok = True
         if self.deploy.sizing:
             is_eks = self.deploy.target == "eks"
             allowed_svc = EKS_SIZING if is_eks else {s: _ECS_SIZING_KEYS for s in ECS_SERVICES}
@@ -594,19 +612,23 @@ class GatewayConfig:
             if unknown:
                 e.append(f"deploy.sizing 에 알 수 없는 서비스: {unknown} "
                          f"(허용: {sorted(allowed_svc)})")
+                _sizing_ints_ok = False
             for svc, ov in self.deploy.sizing.items():
                 if not isinstance(ov, dict):
                     e.append(f"deploy.sizing.{svc} 는 mapping 이어야 합니다: {ov!r}")
+                    _sizing_ints_ok = False
                     continue
                 keys = allowed_svc.get(svc, frozenset())
                 bad = sorted(set(ov) - keys)
                 if bad:
                     e.append(f"deploy.sizing.{svc} 에 알 수 없는 키: {bad} "
                              f"(허용: {sorted(keys)})")
+                    _sizing_ints_ok = False
                     continue
                 for k, val in ov.items():
                     if not isinstance(val, int) or isinstance(val, bool) or val <= 0:
                         e.append(f"deploy.sizing.{svc}.{k} 는 양의 정수여야 합니다: {val!r}")
+                        _sizing_ints_ok = False
             if self.deploy.target not in ("ecs", "eks"):
                 e.append(f"deploy.sizing 은 ecs/eks 경로에서만 적용됩니다 "
                          f"(deploy.target={self.deploy.target}).")
@@ -618,7 +640,8 @@ class GatewayConfig:
         from .tiers import EKS_CAPACITY_TIERS as _BANDS
         _bad_tier = (self.deploy.capacity_tier
                      and self.deploy.capacity_tier not in _BANDS)
-        if (self.deploy.target == "eks" and not _bad_tier
+        if (self.deploy.target == "eks" and _tier_ok and not _bad_tier
+                and _sizing_ints_ok
                 and (self.deploy.sizing or self.deploy.capacity_tier)):
             from .tiers import eks_capacity_sizing
             _gp = eks_capacity_sizing(self).get("gateway-proxy") or {}
@@ -628,7 +651,8 @@ class GatewayConfig:
                          f"min_replicas({_mn}) > max_replicas({_mx}) — "
                          f"함께 선언하세요 (env overlay 기본값과의 합성은 "
                          f"render 에서 최종 검증됩니다)")
-        if (self.deploy.target == "ecs" and not _bad_tier
+        if (self.deploy.target == "ecs" and _tier_ok and not _bad_tier
+                and _sizing_ints_ok
                 and (self.deploy.sizing or self.deploy.capacity_tier)):
             from .tiers import ecs_service_sizing
             for _svc, _s in ecs_service_sizing(self).items():
@@ -655,7 +679,7 @@ class GatewayConfig:
                     e.append(f"deploy.capacity_tier 가 목록에 없습니다: "
                              f"{self.deploy.capacity_tier!r} "
                              f"(허용: {sorted(EKS_CAPACITY_TIERS)})")
-        if self.deploy.target == "ecs":
+        if self.deploy.target == "ecs" and _tier_ok and _sizing_ints_ok:
             # 오토스케일(max_count)을 포함한 worst-case pool 수요가 Aurora 천장을
             # 넘으면 스케일아웃이 DB 를 고갈시킨다 — 선언 단계에서 막는다.
             from .tiers import ecs_db_budget
@@ -728,6 +752,14 @@ class GatewayConfig:
 
 
 def _safe_int(v: Any, errors: list[str], path: str) -> int:
+    # bool 은 int 의 서브클래스라 int(True)=1 이 통과된다 — min_acu: true 가
+    # 1.0 으로 새는 걸 차단. 비정수 float(587.9)의 침묵 절삭도 거부한다.
+    if isinstance(v, bool):
+        errors.append(f"{path} 는 정수여야 합니다: {v!r}")
+        return 0
+    if isinstance(v, float) and not v.is_integer():
+        errors.append(f"{path} 는 정수여야 합니다(소수점 값 불가): {v!r}")
+        return 0
     try:
         return int(v)
     except (TypeError, ValueError):
@@ -738,6 +770,12 @@ def _safe_int(v: Any, errors: list[str], path: str) -> int:
 def _safe_int_or_none(v: Any, errors: list[str], path: str) -> int | None:
     if v in (None, ""):
         return None
+    if isinstance(v, bool):
+        errors.append(f"{path} 는 정수여야 합니다: {v!r}")
+        return None
+    if isinstance(v, float) and not v.is_integer():
+        errors.append(f"{path} 는 정수여야 합니다(소수점 값 불가): {v!r}")
+        return None
     try:
         return int(v)
     except (TypeError, ValueError):
@@ -747,6 +785,9 @@ def _safe_int_or_none(v: Any, errors: list[str], path: str) -> int | None:
 
 def _safe_float_or_none(v: Any, errors: list[str], path: str) -> float | None:
     if v in (None, ""):
+        return None
+    if isinstance(v, bool):
+        errors.append(f"{path} 는 숫자여야 합니다: {v!r}")
         return None
     try:
         return float(v)
@@ -847,8 +888,10 @@ def from_dict(raw: dict) -> GatewayConfig:
     if not isinstance(raw, dict):
         raise SchemaError("gateway.yaml 최상위는 mapping 이어야 합니다.")
     version = raw.get("version", SCHEMA_VERSION)
-    if version != SCHEMA_VERSION:
-        errors.append(f"version 은 {SCHEMA_VERSION} 이어야 합니다 (got {version!r}).")
+    # 1.0 == 1 이 True 라 float/string "1" 도 통과한다 — 타입까지 본다.
+    if not isinstance(version, int) or isinstance(version, bool) \
+            or version != SCHEMA_VERSION:
+        errors.append(f"version 은 정수 {SCHEMA_VERSION} 이어야 합니다 (got {version!r}).")
 
     aws = _require_mapping(raw.get("aws"), "aws", errors)
     deploy = _require_mapping(raw.get("deploy"), "deploy", errors)
@@ -901,17 +944,19 @@ def from_dict(raw: dict) -> GatewayConfig:
         aws=AwsConfig(
             region=str(aws.get("region", "ap-northeast-2")),
             account_id=str(aws.get("account_id", "")),
-            # 스칼라("DevRole")를 넣으면 문자 단위로 쪼개진다 — 리스트로 감싼다.
-            allowed_roles=[str(r) for r in
-                (([aws["allowed_roles"]] if isinstance(aws.get("allowed_roles"), str)
-                  else aws.get("allowed_roles")) or [])],
+            # 스칼라("DevRole")는 1-항목 리스트로 감싼다 — int/dict 같은
+            # 비-list 는 순회 불가/키 순회 침묵오용이라 명시 오류로 둔다.
+            allowed_roles=_str_items(aws.get("allowed_roles"),
+                                     "aws.allowed_roles", errors),
         ),
         deploy=DeployConfig(
             # `or` 패턴 — yaml null(`release:`)도 기본값으로. `str(None)` 은
             # "None" 리터럴이 돼 release/namespace 이름이 쓰레기가 된다
             target=str(deploy.get("target") or "compose"),
             size_tier=str(deploy.get("size_tier") or "t1"),
-            sizing=dict(deploy.get("sizing") or {}),
+            # dict("x")/dict([1]) 같은 비-mapping 은 TypeError/ValueError 로
+            # 날아든다 — 스키마 오류로 변환해야 CLI 가 깔끔하게 거절한다.
+            sizing=_require_mapping(deploy.get("sizing"), "deploy.sizing", errors),
             capacity_tier=str(deploy.get("capacity_tier") or ""),
             tfstate_bucket=str(deploy.get("tfstate_bucket") or ""),
             tfstate_table=str(deploy.get("tfstate_table") or ""),
@@ -921,10 +966,10 @@ def from_dict(raw: dict) -> GatewayConfig:
         ),
         network=NetworkConfig(
             mode=str(network.get("mode", "public")),
-            # 문자열을 넣으면 list() 가 글자 단위로 분해하므로 단일 항목으로 감싼다
-            allowed_cidrs=([network["allowed_cidrs"]]
-                           if isinstance(network.get("allowed_cidrs"), str)
-                           else list(network.get("allowed_cidrs") or [])),
+            # 스칼라 str 은 1-항목으로 감싼다 — int/dict 비-list 는 침묵 순회
+            # (dict 는 키 목록이 CIDR 로 들어감)가 아니라 명시 오류.
+            allowed_cidrs=_str_items(network.get("allowed_cidrs"),
+                                     "network.allowed_cidrs", errors),
             admin_internal=_safe_bool(network.get("admin_internal", False), errors,
                                       "network.admin_internal"),
         ),
@@ -982,14 +1027,11 @@ def from_dict(raw: dict) -> GatewayConfig:
             models_profile=str(clients.get("models_profile", "global")),
         ),
         infra=InfraConfig(
-            azs=[str(a) for a in
-                 (([infra["azs"]] if isinstance(infra.get("azs"), str)
-                   else infra.get("azs")) or [])],
+            azs=_str_items(infra.get("azs"), "infra.azs", errors),
             vpc_cidr=str(infra.get("vpc_cidr", "")),
             cognito_domain_suffix=str(infra.get("cognito_domain_suffix", "")),
-            cognito_groups=[str(g) for g in
-                (([infra["cognito_groups"]] if isinstance(infra.get("cognito_groups"), str)
-                  else infra.get("cognito_groups")) or [])],
+            cognito_groups=_str_items(infra.get("cognito_groups"),
+                                      "infra.cognito_groups", errors),
             bedrock_allowed_model_arns=_str_items(
                 infra.get("bedrock_allowed_model_arns"),
                 "infra.bedrock_allowed_model_arns", errors,

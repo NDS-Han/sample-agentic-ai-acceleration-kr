@@ -1276,7 +1276,13 @@ def _set_path(doc: dict, dotted: str, value) -> None:
     cur = doc
     parts = dotted.split(".")
     for p in parts[:-1]:
-        cur = cur.setdefault(p, {})
+        nxt = cur.get(p)
+        # 기존 yaml 의 중간 경로가 스칼라/리스트면 setdefault 가 그 값을 돌려
+        # 인덱스 대입이 TypeError 로 죽는다 — 깨진 노드는 dict 로 교체한다.
+        if not isinstance(nxt, dict):
+            nxt = {}
+            cur[p] = nxt
+        cur = nxt
     cur[parts[-1]] = value
 
 
