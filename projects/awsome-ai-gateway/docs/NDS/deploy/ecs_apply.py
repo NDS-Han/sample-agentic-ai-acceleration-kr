@@ -296,6 +296,9 @@ def apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, *, skip_push: bool
                   "진행합니다 (단가 조회는 503 graceful-off)", file=sys.stderr)
     else:
         existing.pop("litellm_pricing_lambda", None)
+    # extra-vars 는 apply 간 영속 저장소 — 키를 메모리에만 두면 저장본과
+    # tfvars 가 어긋나 다음 run 이 var 삭제로 drift 를 낸다
+    _save_extra_vars(gen_dir, existing)
 
     if cfg.features.alerting.enabled:
         # ecs 경로는 ALB 차원 자동 발견이 없다 — enable_alerting 은 SNS+Aurora/
