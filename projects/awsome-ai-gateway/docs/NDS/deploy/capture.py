@@ -789,10 +789,13 @@ def _dmap(node) -> dict:
 
 
 def _release_manifest_names(release: str, namespace: str,
-                            context: str = "") -> set[str] | None:
-    """helm get manifest 에 기록된 오브젝트 이름 — instance 라벨과 달리
+                            context: str = "") -> set[tuple[str, str]] | None:
+    """helm get manifest 에 기록된 (kind, name) 쌍 — instance 라벨과 달리
     네임스페이스 쓰기 권한자가 위조할 수 없는 소유 증명이다.
-    조회 실패(helm 부재/릴리스 없음/권한 오류) 시 None — 라벨 폴백으로 구분."""
+    조회 실패(helm 부재/릴리스 없음/권한 오류) 시 None — 라벨 폴백으로 구분.
+
+    kind 를 섞은 이름 집합으로 반환하면 우리 Deployment 와 동명인 외부
+    Ingress 가 소유로 통과한다 — 소비자는 kind 별로 좁혀 써야 한다."""
     argv = ["helm", "get", "manifest", release, "-n", namespace]
     if context:
         argv += ["--kube-context", context]
@@ -802,7 +805,7 @@ def _release_manifest_names(release: str, namespace: str,
         return None
     if r.returncode != 0:
         return None
-    names: set[str] = set()
+    names: set[tuple[str, str]] = set()
     for chunk in (r.stdout or "").split("\n---"):
         try:
             d = yaml.safe_load(chunk)
@@ -811,8 +814,15 @@ def _release_manifest_names(release: str, namespace: str,
         if isinstance(d, dict) and isinstance(d.get("kind"), str):
             n = (d.get("metadata") or {}).get("name")
             if n:
-                names.add(str(n))
+                names.add((str(d["kind"]), str(n)))
     return names
+
+
+def _manifest_owned(all_names: set[tuple[str, str]] | None,
+                    kind: str) -> set[str] | None:
+    """kind 별 소유 이름 집합 — None(조회 실패)은 그대로 라벨 폴백 신호."""
+    return None if all_names is None else \
+        {n for k, n in all_names if k == kind}
 
 
 def _instance_items(items: list, release: str,
@@ -825,7 +835,7 @@ def _instance_items(items: list, release: str,
     찍은 위조 ingress/deployment 가 캡처된 cidr/scheme/image tag 를 주조해
     채택본이 공격자 네트워크 상태로 배포되는 것을 막는다."""
     items = [i for i in items if isinstance(i, dict)]
-    if owned is not None:
+    if owned:
         return [i for i in items
                 if str(_dmap(i.get("metadata")).get("name") or "") in owned]
     def _inst(i) -> str:
@@ -1146,7 +1156,8 @@ def capture_eks(namespace: str = "llm-gateway", release: str = "llm-gateway",
     # instance 라벨은 위조 가능 — helm 매니페스트 기록의 이름만 소유로 인정
     # (위조 ingress 의 cidr/scheme/host 가 캡처돼 채택본에 심어지는 것을 막는다).
     # 조회 불가(레거시 수작업 배포)면 라벨 폴백 — 채택 경로의 기존 계약.
-    owned = _release_manifest_names(release, namespace, context)
+    owned_all = _release_manifest_names(release, namespace, context)
+    owned = _manifest_owned(owned_all, "Ingress")
     live_hosts = []
     live_schemes: dict[str, str] = {}
     live_cidr_map: dict[str, str] = {}
@@ -1208,7 +1219,8 @@ def capture_eks(namespace: str = "llm-gateway", release: str = "llm-gateway",
     # 라이브 태그가 곧 유효 태그다 — 기록하지 않으면 채택본 apply 가 폴백 대상
     # 서비스를 global images.tag 로 덮어쓴다.
     live_tags: dict[str, str] = {}
-    for item in _instance_items(deploys.get("items", []), release, owned):
+    for item in _instance_items(deploys.get("items", []), release,
+                                _manifest_owned(owned_all, "Deployment")):
         name = str(_dmap(item.get("metadata")).get("name") or "")
         svc_key = next((s for s in helm_keys if name.endswith(f"-{s}")), "")
         if not svc_key:

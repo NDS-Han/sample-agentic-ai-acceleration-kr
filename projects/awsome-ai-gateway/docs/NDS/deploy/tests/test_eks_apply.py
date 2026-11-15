@@ -1795,7 +1795,12 @@ def test_is_release_not_found_precise_matching():
     from deploy import cli
     assert cli._is_release_not_found("Error: release: not found")
     assert cli._is_release_not_found('Error: release "myrel" not found')
-    assert cli._is_release_not_found('Error: release myrel not found')
+    # 비인용 'release <word> not found' 는 helm 출력 형식이 아니다 —
+    # 'release lock/name not found' 류를 부재로 오판해 병렬 install·
+    # destroy 를 진행하는 것을 막기 위해 모호 에러는 fail-closed 로 둔다.
+    assert not cli._is_release_not_found('Error: release myrel not found')
+    assert not cli._is_release_not_found('Error: release lock not found')
+    assert not cli._is_release_not_found('Error: release name not found')
     assert not cli._is_release_not_found(
         'Error: context "release-eu" not found')
     assert not cli._is_release_not_found(

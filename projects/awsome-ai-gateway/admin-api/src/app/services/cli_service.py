@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fnmatch
 import re
 import uuid
 from datetime import date
@@ -133,7 +134,15 @@ class CLIService:
         # IAM user ARN(role_name=None)은 role 검사 자체를 우회할 수 있어 항상 거부.
         if role_name is None:
             raise ForbiddenError("IAM user identities are not allowed")
-        if role_name not in settings.ALLOWED_IAM_ROLES:
+        # allowlist 항목은 bare role 이름(정확) 또는 `*` 와일드카드 패턴 —
+        # `TeamLead*` 같은 prefix 패턴과 role ARN 형태 모두 매칭한다. 정확
+        # `in` 비교만 하면 wildcard/ARN 항목이 영구 불일치로 죽는다.
+        role_arn = f"arn:aws:iam::{account_id}:role/{role_name}"
+        if not any(
+            fnmatch.fnmatchcase(role_name, allowed)
+            or fnmatch.fnmatchcase(role_arn, allowed)
+            for allowed in settings.ALLOWED_IAM_ROLES
+        ):
             raise ForbiddenError(f"IAM role not allowed: {role_name}")
 
         # ── Auto-provisioning ──

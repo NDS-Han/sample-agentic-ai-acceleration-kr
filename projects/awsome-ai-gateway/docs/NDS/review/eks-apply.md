@@ -160,3 +160,25 @@ _tf_init reconfigure·load_meta·managed plan·teardown 가드·ECR 태그.
   최단 이름(정규 {fullname}-svc) 우선으로 결정화.
 - **`_manifest_docs` 주석 스트립 과잉**(LOW): lstrip '#' 이 블록 스칼라 안
   '#!' 줄까지 지워 diff 가 '변경 없음' 을 거짓 보고 — 컬럼0 주석만 제거.
+
+## 29차 적용 (2인 독립 리뷰 — 28차 diff 회귀·마스킹·경계)
+
+- **plan 마스킹 우회 3종**(MEDIUM): ①마지막 문서에 붙은 helm `NOTES:` 꼬리가
+  safe_load 를 깨뜨려 dict 마스킹 우회 → `_HELM_SECTION_RE` 섹션 헤더 선제거
+  ②파싱 불가 문서가 `kind: Secret` 문자열이 없으면 비-Secret(Deployment env
+  평문)이라도 원문 출력 → manifest 형태면 전부 `_redact_chunk_text` 적용
+  ③`value: |` 블록스칼라 본문·`- {name: X, value: y}` 플로우 env·인라인
+  `data: {k: v}` 미마스킹 → 블록스칼라 계속행·플로우 같은줄·인라인 data
+  각각 텍스트 마스킹. `_mask_doc` 은 ephemeralContainers·kind:List 추가.
+- **`_pod_spec` 비-dict 크래시**(MED-LOW): `spec: "x"`/`jobTemplate: "y"`
+  가 AttributeError 로 plan/apply 전체 사망 → isinstance 가드.
+- **chat_agent_name 신호 사멸**(MEDIUM): managed apply 가 output 을
+  `enable_chat_agent=false` 로 재저장하면 elif 신호가 죽어 Runtime 고아 —
+  ensure_infra 전 `pre_chat_name` 스냅샷.
+- **hook 문서 거짓 diff**(LOW): dry-run 의 hook Job 은 get manifest 에 없어
+  매 plan 이 '+added' — `helm.sh/hook` annotation 문서 제외.
+- **`_live_deploy_env` 비문자 값**(LOW): `value: 8000` numeric 이
+  re.fullmatch 에 TypeError — `str()` 변환.
+- **`_mark_pending` 침묵 실패**(LOW-MED): 마커 기록 OSError 삼킴 → 유료
+  리소스 추적 증거 유실 — 원자 교체 + 경고.
+

@@ -71,3 +71,18 @@ ECS 경로를 타므로 아래는 코드 검증으로 수정됐다:
   재개 시 라이브 검증 필수.
 - compose 는 프로덕션 배포 대상이 아님(평가용) — 운영 모니터링/
   백업 계약은 문서 영역.
+
+## 29차 적용 (추적키 생명주기·module 실측 스냅샷)
+
+- **추적키 조기 저장**(HIGH): ws/bi/pricing 추적키를 teardown 전에
+  pop+저장 — 그 사이 abort(SystemExit/ctrl-C)가 살아 있는 유료 리소스의
+  마지막 추적 증거를 영구 소실 → render 는 메모리 pop 상태로 하고 저장은
+  off-teardown 수렴(실패 복원 포함) 후 단 한 번.
+- **human-declared ARN 유실**(HIGH): 사람이 enable_chat_agent 를 tfvars 로
+  소유한 env 에서 ARN 을 지우면 사람 소유 Runtime 이 살아 있는 채 /chat 이
+  영구 503 — `_human_declared_chat_agent` 를 pop 전에 평가해 주입 유지.
+- **`module_alive` 사멸**(MEDIUM): bootstrap targeted apply 가 outputs 를
+  `enable_chat_agent=false` 로 재저장해 apply 후 읽은 module_alive 가 항상
+  false — ARN 미기록 Runtime 의 teardown 신호가 죽음. init(백엔드 정렬) 후
+  apply 전 `pre_module_name` 스냅샷으로 대체.
+

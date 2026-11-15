@@ -152,6 +152,8 @@ def test_eks_apply_websearch_provision_failure_continues(monkeypatch, tmp_path, 
 def _ecs_apply_stubs(monkeypatch):
     monkeypatch.setattr(ecs_apply, "terraform_apply", lambda *a, **k: {})
     monkeypatch.setattr(ecs_apply, "tf_outputs", lambda d: {})
+    # 29차 — module 실측 스냅샷용 init 호출도 스텁 (실 subprocess 차단)
+    monkeypatch.setattr(ecs_apply, "_tf_init", lambda *a, **k: None)
     monkeypatch.setattr(ecs_apply, "push_images", lambda *a, **k: None)
     monkeypatch.setattr(ecs_apply, "wait_services", lambda *a, **k: None)
 
@@ -209,3 +211,46 @@ def test_ecs_apply_websearch_teardown_failure_restores_key(monkeypatch, tmp_path
     cfg = _cfg(deploy={"target": "ecs", "size_tier": "t1"})
     ecs_apply.apply(cfg, tmp_path, tmp_path)
     assert saved.get("agentcore_gateway_url") == "https://old/mcp"
+
+
+def test_ecs_apply_human_declared_chat_agent_keeps_arn(monkeypatch, tmp_path):
+    """29차 — 사람이 enable_chat_agent 를 env tfvars 로 소유한 env 에서
+    선언-off apply 가 agentcore_runtime_arn 을 지우면, 살아 있는 사람 소유
+    Runtime 으로 가는 /chat 배선이 영구 끊긴다 — ARN 주입을 유지한다."""
+    saved = {}
+    monkeypatch.setattr(
+        ecs_apply, "load_extra_vars",
+        lambda g: {"agentcore_runtime_arn": "arn:aws:bedrock-agentcore:x"})
+    monkeypatch.setattr(ecs_apply, "_save_extra_vars",
+                        lambda g, e: saved.update(dict(e)))
+    _ecs_apply_stubs(monkeypatch)
+    import deploy.render.ecs as ecs_render
+    import deploy.eks_apply as eks_apply
+    monkeypatch.setattr(ecs_render, "render", lambda *a, **k: None)
+    monkeypatch.setattr(eks_apply, "_human_declared_chat_agent",
+                        lambda *a, **k: True)
+    cfg = _cfg(deploy={"target": "ecs", "size_tier": "t1"})
+    ecs_apply.apply(cfg, tmp_path, tmp_path)
+    assert saved.get("agentcore_runtime_arn") == "arn:aws:bedrock-agentcore:x"
+
+
+def test_ecs_apply_off_pops_arn_only_when_not_human(monkeypatch, tmp_path):
+    """29차 — 사람 선언이 없으면 선언-off 수렴으로 ARN 을 지운다 (teardown
+    성공 시 저장본에서 영구 제거)."""
+    saved = {}
+    monkeypatch.setattr(
+        ecs_apply, "load_extra_vars",
+        lambda g: {"agentcore_runtime_arn": "arn:aws:bedrock-agentcore:x"})
+    monkeypatch.setattr(ecs_apply, "_save_extra_vars",
+                        lambda g, e: saved.update(dict(e)))
+    _ecs_apply_stubs(monkeypatch)
+    import deploy.render.ecs as ecs_render
+    import deploy.eks_apply as eks_apply
+    import deploy.chatagent as chatagent_mod
+    monkeypatch.setattr(ecs_render, "render", lambda *a, **k: None)
+    monkeypatch.setattr(eks_apply, "_human_declared_chat_agent",
+                        lambda *a, **k: False)
+    monkeypatch.setattr(chatagent_mod, "teardown", lambda *a, **k: True)
+    cfg = _cfg(deploy={"target": "ecs", "size_tier": "t1"})
+    ecs_apply.apply(cfg, tmp_path, tmp_path)
+    assert saved.get("agentcore_runtime_arn") is None

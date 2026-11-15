@@ -100,3 +100,15 @@ env 스크럽·READY 요구·신뢰 정책·격리·fn_name·보존 경로.
   timeout 없어 kill 반복 — build 1200s/push 300s 내부 cap.
 - **teardown 마커(eks)**: off-teardown 실패를 `.pending-provisioner-teardown`
   에 기록해 env 증거 소실 후에도 재시도 (eks-apply.md 28차 참조).
+
+## 29차 적용 (프로비저너 teardown 도출명·매칭)
+
+- **chatagent teardown custom project 무시**(MED-LOW): chat_agent_name 비어
+  재시도(pending 마커)할 때 도출명이 llm-gateway 고정 — custom project env
+  에서 NotFound→ok→마커 해제로 실측 Runtime 이 영구 누수. teardown 에
+  env_dir 추가해 `_agent_name`(outputs→tfvars project→기본값)으로 도출.
+- **ALLOWED_IAM_ROLES 와일드카드/ARN 불일치**(LOW): `role_name not in
+  list` 정확 비교라 `TeamLead*`·role ARN 항목이 영구 불일치(스키마는
+  허용) — admin-api cli_service 를 이름+파생 role ARN 에 대한 fnmatch
+  매칭으로 수정.
+

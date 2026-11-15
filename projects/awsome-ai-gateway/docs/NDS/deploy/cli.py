@@ -124,7 +124,9 @@ _RELEASE_NOT_FOUND_RE = re.compile(
     # helm v3 'release: not found'·v2 'release "X" not found' 정확 패턴 —
     # 'release'+'not found' 단어 동시 존재로는 context "release-eu"
     # not found 류를 release 부재로 오판해 destroy/apply 를 진행한다.
-    r"release:\s*not found|release\s+\"?[a-z0-9][-a-z0-9.]*\"?\s+not found")
+    # 따옴표 없는 `release <word> not found` 는 받지 않는다 — "release lock
+    # not found"/"release name not found" 류가 release 부재로 오인된다.
+    r"release:\s*not found|release\s+\"[^\"\n]+\"\s+not found")
 
 
 def _is_release_not_found(out: str) -> bool:
@@ -1202,7 +1204,7 @@ def _teardown_ecs(cfg: schema.GatewayConfig, args) -> int:
         # 프로비저너 소유 Runtime — terraform 모듈 밖이라 destroy 가 못 지운다
         from . import chatagent
         if chatagent.teardown(REPO_ROOT, cfg.env, region=cfg.aws.region,
-                              chat_agent_name=chat_name):
+                              chat_agent_name=chat_name, env_dir=env_dir):
             extra.pop("agentcore_runtime_arn", None)
     ecs_apply._save_extra_vars(out, extra)
     console.print("[green]teardown 완료 — AWS 리소스가 삭제됐습니다")
@@ -1348,6 +1350,7 @@ def _teardown_eks(cfg: schema.GatewayConfig, args) -> int:
         # --infra 의 VPC destroy 가 의존성에 막히지 않는다
         eks_apply._run(["helm", "uninstall", meta["release"], "-n",
                         meta["namespace"], "--wait", *ctx_args], cwd=REPO_ROOT)
+        eks_apply._invalidate_manifest_cache(meta, context)
         uninstalled = True
         # teardown 후 같은 env 이름 재배포 시 gen 의 stale ALB dimension 이
         # bootstrap env_apply 에 적용돼 죽은 ALB 를 가리키는 알람이 생긴다.
@@ -1388,7 +1391,8 @@ def _teardown_eks(cfg: schema.GatewayConfig, args) -> int:
         # env 에선 도출 이름과 실측이 어긋나 Runtime 이 새어나가므로 실측 우선.
         from . import chatagent
         chatagent.teardown(REPO_ROOT, cfg.env, region=cfg.aws.region,
-                           chat_agent_name=outs.get("chat_agent_name", ""))
+                           chat_agent_name=outs.get("chat_agent_name", ""),
+                           env_dir=env_dir)
     # 플래그가 현재 꺼져 있어도 detach 는 시도한다 — 켰다 끈 env 의
     # LitellmPricingInvoke 인라인 정책이 admin-api IRSA role(terraform 소유)에
     # 남아 있으면 terraform destroy 의 role 삭제가 DeleteConflict 로 중간에

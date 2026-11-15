@@ -147,6 +147,61 @@ class TestIAMRoleCheck:
             with pytest.raises(ForbiddenError, match="ForbiddenRole"):
                 await cli_service.verify_sts_and_issue_key(mock_session, data=data)
 
+    @pytest.mark.parametrize("allowed", ["TeamLead*", "arn:aws:iam::123456789:role/TeamLeadDev"])
+    async def test_accepts_wildcard_and_arn_role_patterns(
+        self, allowed: str, cli_service: CLIService, mock_session: AsyncMock
+    ):
+        """29차 — allowed_roles 항목이 정확 `in` 비교만 되면 wildcard/ARN
+        항목이 영구 불일치로 죽는다(스키마는 허용). fnmatch 로 이름·role ARN
+        양쪽에 매칭한다."""
+        data = VirtualKeyIssueRequest(
+            sts_request=STSRequestPayload(
+                url="https://sts.ap-northeast-2.amazonaws.com/?Action=GetCallerIdentity",
+                headers={},
+            ),
+            device_name="test",
+        )
+
+        sts_xml = """<GetCallerIdentityResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
+            <GetCallerIdentityResult>
+                <Arn>arn:aws:sts::123456789:assumed-role/TeamLeadDev/user</Arn>
+            </GetCallerIdentityResult>
+        </GetCallerIdentityResponse>"""
+
+        with patch("app.services.cli_service.get_settings") as mock_settings, \
+             patch("app.services.cli_service.httpx") as mock_httpx:
+            settings = mock_settings.return_value
+            settings.ALLOWED_STS_REGIONS = ["ap-northeast-2"]
+            settings.ALLOWED_IAM_ROLES = [allowed]
+            settings.ALLOWED_AWS_ACCOUNTS = ["123456789"]
+            settings.DEFAULT_TEAM_ID = str(uuid.uuid4())
+            settings.DEFAULT_USER_BUDGET_USD = 100.0
+
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            mock_resp.text = sts_xml
+
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(return_value=mock_resp)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock()
+            mock_httpx.AsyncClient.return_value = mock_client
+
+            with patch("app.services.cli_service.UserRepository") as MockUserRepo, \
+                 patch("app.services.cli_service.BudgetRepository") as MockBudgetRepo:
+                user = MagicMock(spec=User)
+                user.id = uuid.uuid4()
+                user.email = "user@corp.com"
+                user.role = UserRole.DEVELOPER
+                user.team_id = uuid.UUID(settings.DEFAULT_TEAM_ID)
+                user.is_active = True
+                MockUserRepo.return_value.get_by_sso_subject = AsyncMock(return_value=user)
+                MockBudgetRepo.return_value.get_first_active_config = AsyncMock(return_value=None)
+
+                result = await cli_service.verify_sts_and_issue_key(mock_session, data=data)
+
+        assert result.user_id == str(user.id)
+
 
 class TestAutoProvisioning:
     async def test_auto_provisions_new_user(self, cli_service: CLIService, mock_session: AsyncMock):

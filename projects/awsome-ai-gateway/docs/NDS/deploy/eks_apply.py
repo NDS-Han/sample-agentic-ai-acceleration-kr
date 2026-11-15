@@ -156,18 +156,33 @@ def _pending_teardown(gen_dir: Path) -> set[str]:
 
 
 def _mark_pending(gen_dir: Path, key: str, failed: bool) -> None:
+    """off-teardown 실패/해제 기록 — 이 파일은 teardown 재시도의 유일한
+    증거일 수 있으므로(live env 는 upgrade 가 지움) 기록 실패를 침묵시키면
+    유료 Gateway/Lambda/Runtime 이 경고 없이 고아화된다."""
     p = _pending_teardown_path(gen_dir)
     cur = _pending_teardown(gen_dir)
     (cur.add if failed else cur.discard)(key)
     try:
         if cur:
-            fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write("\n".join(sorted(cur)) + "\n")
+            # 원자 교체 — 크래시/동시 apply 가 반쯤 쓴 파일을 읽지 않게.
+            fd, tmp = tempfile.mkstemp(dir=str(gen_dir), prefix=".pending-",
+                                       suffix=".tmp")
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    f.write("\n".join(sorted(cur)) + "\n")
+                os.chmod(tmp, 0o600)
+                os.replace(tmp, p)
+            except BaseException:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+                raise
         elif p.exists():
             p.unlink()
-    except OSError:
-        pass
+    except OSError as exc:
+        print(f"⚠ teardown 재시도 마커 {p} 기록 실패({exc}) — 실패한 "
+              "프로비저너 리소스가 추적되지 않습니다", file=sys.stderr)
 
 
 def _release_kind_names(meta: dict, kind: str, context: str = "") -> set[str]:
@@ -210,7 +225,7 @@ def _live_deploy_env(meta: dict, deploy_suffix: str, var: str,
                     and c.get("name") == deploy_suffix), None) \
             or (containers[0] if containers else {})
         env = app.get("env") or []
-        return next((e.get("value", "") for e in env
+        return next((str(e.get("value") or "") for e in env
                      if isinstance(e, dict) and e.get("name") == var), "")
     return ""
 
@@ -1552,14 +1567,13 @@ def _manifest_docs(text: str) -> dict[str, dict]:
     text = re.split(r"^NOTES:\s*$", text, flags=re.M)[0]
     # HOOKS:/MANIFEST:/HOOKS SUCCEEDED: 같은 대문자 섹션 마커는 YAML 키로
     # 흡수돼 허위 diff 를 만든다 — k8s 매니페스트에 all-caps 최상위 키는 없다.
-    marker = re.compile(r"^[A-Z][A-Z0-9 _-]+:\s*$")
     docs: dict[str, dict] = {}
     for chunk in re.split(r"^---\s*$", text, flags=re.M):
         body = "\n".join(
             l for l in chunk.splitlines()
             # '#' 주석은 컬럼0 만 — 블록 스칼라(|) 안의 '#!'/'#' 들여쓰기 줄을
             # 지우면 스크립트 내용이 훼손돼 diff 가 '변경 없음' 을 거짓 보고한다.
-            if not l.startswith("#") and not marker.match(l)
+            if not l.startswith("#") and not _HELM_SECTION_RE.match(l)
         ).strip()
         if not body:
             continue
@@ -1570,23 +1584,36 @@ def _manifest_docs(text: str) -> dict[str, dict]:
         if not isinstance(obj, dict):
             continue
         kind, name = obj.get("kind"), (obj.get("metadata") or {}).get("name")
-        if kind and name:
-            docs[f"{kind}/{name}"] = obj
+        if not (kind and name):
+            continue
+        # helm hook 리소스(pre-upgrade migration Job·RBAC)는 helm get
+        # manifest 에 기록되지 않으므로 plan 대상에서 빼야 매 실행마다
+        # '+added' 거짓 diff 가 나지 않는다.
+        anns = (obj.get("metadata") or {}).get("annotations") or {}
+        if "helm.sh/hook" in anns:
+            continue
+        docs[f"{kind}/{name}"] = obj
     return docs
 
 
 _SENSITIVE_ENV_RE = re.compile(
     r"(?i)(secret|token|passw|_pw\b|apikey|api_key|private[_-]?key|credential)")
 
+# helm 출력의 비-문서 섹션 헤더 — NAME:/HOOKS:/MANIFEST:/NOTES: 등.
+_HELM_SECTION_RE = re.compile(r"^[A-Z][A-Z0-9 _-]+:\s*$")
+
 
 def _pod_spec(d: dict) -> dict | None:
     """Deployment/StatefulSet/DaemonSet/Job/CronJob/Pod 의 컨테이너 spec."""
-    spec = d.get("spec") or {}
+    spec = d.get("spec")
+    if not isinstance(spec, dict):
+        return None
     tpl = spec.get("template")
     if isinstance(tpl, dict) and isinstance(tpl.get("spec"), dict):
         return tpl["spec"]
-    jt = (spec.get("jobTemplate") or {}).get("spec") or {}
-    tpl = jt.get("template")
+    jt = spec.get("jobTemplate")
+    jts = jt.get("spec") if isinstance(jt, dict) else None
+    tpl = jts.get("template") if isinstance(jts, dict) else None
     if isinstance(tpl, dict) and isinstance(tpl.get("spec"), dict):
         return tpl["spec"]
     return spec if isinstance(spec.get("containers"), list) else None
@@ -1597,6 +1624,10 @@ def _mask_doc(d: dict) -> None:
     민감 이름 value 평문(차트가 사용자 env map 을 value: 로 렌더한다)."""
     if not isinstance(d, dict):
         return
+    if d.get("kind") == "List":
+        for item in d.get("items") or []:
+            _mask_doc(item)
+        return
     if d.get("kind") == "Secret":
         for field in ("data", "stringData"):
             if isinstance(d.get(field), dict):
@@ -1605,7 +1636,7 @@ def _mask_doc(d: dict) -> None:
     ps = _pod_spec(d)
     if not isinstance(ps, dict):
         return
-    for cl in ("containers", "initContainers"):
+    for cl in ("containers", "initContainers", "ephemeralContainers"):
         for c in ps.get(cl) or []:
             if not isinstance(c, dict):
                 continue
@@ -1627,43 +1658,86 @@ def _canon(obj: dict) -> str:
 
 
 def _redact_chunk_text(chunk: str) -> str:
-    """파싱 불가 chunk 의 data:/stringData: 블록 값 줄을 텍스트로 마스킹 —
-    렌더된 값이 YAML 을 깨뜨려 safe_load 가 실패한 Secret 문서가 그대로
-    출력되는 fail-open 을 막는다."""
-    lines, out, in_block, base = chunk.splitlines(), [], False, 0
+    """파싱 불가 chunk 의 텍스트 마스킹 — 렌더된 값이 YAML 을 깨뜨려
+    safe_load 가 실패한 문서가 그대로 출력되는 fail-open 을 막는다.
+    Secret 의 data:/stringData: 블록과 Deployment 등의 env `- name:`
+    /`value:` 평문 쌍을 모두 처리한다(차트가 사용자 env map 을 value: 로
+    렌더하므로 kind 가 Secret 이 아니어도 크리덴셜이 들어간다)."""
+    lines, out, in_block, base, env_sensitive, cont_base = \
+        chunk.splitlines(), [], False, 0, False, -1
     for l in lines:
-        m = re.match(r"^(\s*)(data|stringData)\s*:", l)
+        indent = len(l) - len(l.lstrip())
+        if cont_base >= 0:
+            # `value: |` 블록스칼라의 본문 — 더 깊은 들여쓰기 줄 전부 마스킹.
+            if l.strip() and indent > cont_base:
+                out.append(" " * indent + "***")
+                continue
+            cont_base = -1
+        m = re.match(r"^(\s*)(data|stringData)\s*:(.*)$", l)
         if m:
-            in_block, base = True, len(m.group(1))
-            out.append(l)
+            base = len(m.group(1))
+            if m.group(3).strip():
+                # 인라인 플로우 `data: {k: v}` — 같은 줄 값을 마스킹하고
+                # 이어지는 블록은 없다.
+                in_block = False
+                out.append(m.group(1) + m.group(2) + ": ***")
+            else:
+                in_block = True
+                out.append(l)
+            env_sensitive = False
             continue
         if in_block:
-            indent = len(l) - len(l.lstrip())
             if l.strip() and indent > base:
                 out.append(" " * indent + l.split(":", 1)[0] + ": ***")
                 continue
             in_block = False
+        nm = re.match(r"^\s*-?\s*\{?\s*name\s*:\s*([^,}\s]+)", l)
+        if nm:
+            # env 항목의 민감 이름 — `- {name: X, value: y}` 플로우는 같은
+            # 줄의 value 를, 블록 형태는 바로 다음 value: 줄을 마스킹한다.
+            env_sensitive = bool(_SENSITIVE_ENV_RE.search(nm.group(1)))
+            if env_sensitive and re.search(r"\bvalue\s*:", l):
+                out.append(re.sub(r"(value\s*:\s*)[^,}]+", r"\1***", l))
+                env_sensitive = False
+            else:
+                out.append(l)
+            continue
+        if env_sensitive and re.match(r"^\s*value\s*:(.*)$", l):
+            vm = re.match(r"^(\s*value\s*:)\s*([|>])?\s*$", l)
+            out.append(re.sub(r":.*$", ": ***", l))
+            env_sensitive = False
+            # `value: |`/`>` 블록스칼라면 본문 줄도 마스킹해야 한다.
+            if vm and vm.group(2):
+                cont_base = indent
+            continue
         out.append(l)
     return "\n".join(out)
 
 
 def _redact_secret_docs(text: str) -> str:
     """매니페스트 덤프 텍스트의 Secret data/stringData·민감 env value 를
-    마스킹한다. 파싱 불가 Secret 문서는 텍스트 마스킹으로 처리한다."""
+    마스킹한다. 파싱 불가 문서는 텍스트 마스킹으로 처리한다."""
     if not re.search(r"(?m)^kind\s*:", text or ""):
         return text  # YAML 매니페스트가 아닌 출력은 그대로
     out = []
     for chunk in re.split(r"(?m)^---\s*$", text):
+        # helm dry-run 출력의 섹션 헤더(NAME:/HOOKS:/MANIFEST:/NOTES:)는
+        # 문서가 아니다 — 마지막 문서에 붙은 NOTES 꼬리는 parse 를 깨뜨려
+        # dict 마스킹을 우회하므로 먼저 떼어낸다.
+        body = "\n".join(l for l in chunk.splitlines()
+                         if not _HELM_SECTION_RE.match(l))
         try:
-            d = yaml.safe_load(chunk)
+            d = yaml.safe_load(body)
         except Exception:
             d = None
         if isinstance(d, dict):
             _mask_doc(d)
-            if d.get("kind") == "Secret" or _pod_spec(d) is not None:
+            if d.get("kind") in ("Secret", "List") or _pod_spec(d) is not None:
                 chunk = yaml.dump(d, allow_unicode=True)
-        elif re.search(r"(?m)^\s*kind\s*:\s*Secret\s*$", chunk):
-            chunk = _redact_chunk_text(chunk)
+        elif re.search(r"(?m)^\s*kind\s*:", body):
+            # 파싱 불가 문서 — Secret 이라는 문자열이 없어도 env 평문을 실은
+            # Deployment/Job 일 수 있으므로 manifest 형태면 전부 텍스트 마스킹.
+            chunk = _redact_chunk_text(body)
         out.append(chunk)
     return "---".join(out)
 
@@ -2118,6 +2192,10 @@ def apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "")
                   "  새 머신이라면 deploy.tfstate_bucket/tfstate_table 선언을 "
                   "확인하세요", file=sys.stderr)
     outs = tf_outputs(env_dir) if env_dir else {}
+    # ensure_infra 의 managed apply 가 enable_chat_agent=false 로 output 을
+    # 재저장하면 아래 off-teardown 신호(chat_agent_name 실측)가 지워져 유료
+    # Runtime 이 고아화된다 — 수렴 전 실측을 스냅샷한다.
+    pre_chat_name = outs.get("chat_agent_name", "") or ""
     _check_context_cluster(outs, context, hard=True)
     if env_dir and not outs and _infra_missing(cfg, outs):
         # outputs 가 전혀 비어 있는데 helm release 가 살아 있다 = tfstate 가
@@ -2201,6 +2279,8 @@ def apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "")
     # kubectl pod(migration 이미지)으로 ALTER ROLE 을 실행한다.
     # 실패해도 배포를 중단하지 않는다 — env 미주입으로 라우터가 503 graceful-off.
     if cfg.features.bi_insight:
+        # 기능이 다시 켜지면 teardown 마커는 무의미 — Runtime 이 ensure 된다.
+        _mark_pending(gen_dir, "chatagent", False)
         arn = chatagent.ensure_runtime_arn(
             repo_root, outs, meta=meta,
             migration_image=_migration_image(cfg, meta, gen_dir, repo_root),
@@ -2237,8 +2317,8 @@ def apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "")
         else:
             print("⚠ bi_insight: Runtime ARN 을 얻지 못했습니다 — /chat 은 "
                   "503 (미구성) 상태로 진행합니다", file=sys.stderr)
-    elif outs.get("chat_agent_name") or "chatagent" in _pending_teardown(
-            gen_dir):
+    elif outs.get("chat_agent_name") or pre_chat_name \
+            or "chatagent" in _pending_teardown(gen_dir):
         # 선언 off 인데 모듈이 아직 살아 있다 = 켰던 적이 있는 첫 off apply.
         # 단 env tfvars 에 enable_chat_agent=true 를 사람이 선언한 경우는
         # 사람 소유 — 매 apply 삭제/재생 루프가 되므로 건드리지 않는다.
@@ -2255,7 +2335,11 @@ def apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "")
             # 건너뛴다 — agentcore 권한 없는 배포에서 매번 경고가 나오는 것 방지.
             ok = chatagent.teardown(
                 repo_root, cfg.env, region=cfg.aws.region,
-                chat_agent_name=outs.get("chat_agent_name", ""))
+                # ensure_infra 가 output 을 지웠을 수 있으므로 수렴 전
+                # 스냅샷을 실측 fallback 으로 둔다.
+                chat_agent_name=(outs.get("chat_agent_name")
+                                 or pre_chat_name),
+                env_dir=env_dir)
             _mark_pending(gen_dir, "chatagent", not ok)
 
     # web_search/pricing_lambda 도 off 면 수렴 삭제 — bi_insight 의 off-teardown

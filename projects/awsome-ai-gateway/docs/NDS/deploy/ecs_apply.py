@@ -74,13 +74,19 @@ def terraform_plan(cfg: GatewayConfig, gen_dir: Path, repo_root: Path) -> None:
           f"-var-file={gen_dir / 'terraform.tfvars'}"], cwd=env_dir)
 
 
+def _tf_init(cfg: GatewayConfig, gen_dir: Path, env_dir: Path) -> None:
+    # -reconfigure: 모든 ecs env 가 같은 env 디렉토리를 공유하고 env 마다
+    # backend key 가 다르다 — 다른 env 의 캐시가 있으면 reconfigure 없는
+    # init 은 "Backend configuration changed" 로 멈춘다.
+    _run(["terraform", "init", "-input=false", "-reconfigure",
+          f"-backend-config={gen_dir / 'backend.hcl'}"], cwd=env_dir)
+
+
 def terraform_apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, *, bootstrap: bool) -> dict:
     env_dir = repo_root / ENV_DIR
     var_file = gen_dir / "terraform.tfvars"
-    backend = gen_dir / "backend.hcl"
 
-    _run(["terraform", "init", "-input=false", "-reconfigure",
-          f"-backend-config={backend}"], cwd=env_dir)
+    _tf_init(cfg, gen_dir, env_dir)
     if bootstrap:
         # ECR repo 만 먼저 — 이미지 push 대상이 있어야 task def/migration 이 pull 성공한다
         _run(["terraform", "apply", "-auto-approve", "-input=false",
@@ -335,10 +341,9 @@ def apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, *, skip_push: bool
     if not cfg.features.web_search:
         ws_prev_url = existing.pop("agentcore_gateway_url", "") or ""
         ws_popped = bool(ws_prev_url)
-        if ws_popped:
-            # 선언을 껐으면 잔여 URL 도 지운다 — taskdef 의
-            # agentcore_gateway_url != "" → WEB_SEARCH_ENABLED=true 조건을 되돌림
-            _save_extra_vars(gen_dir, existing)
+    # 추적키 pop 은 teardown 결과를 본 뒤까지 메모리에만 둔다 — 여기서
+    # 저장하면 중간 실패(SystemExit/ctrl-C)가 살아 있는 유료 리소스의
+    # 마지막 추적 증거를 지운다. 수렴이 끝난 뒤 한 번에 저장한다.
 
     # 도메인 모드를 none/cloudfront-temp → route53-acm 으로 올리면 이전에 기록한
     # ALB-DNS 파생 URL 이 남아 모듈의 도메인 유도 URL 을 덮어쓴다 — 로그인
@@ -350,14 +355,25 @@ def apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, *, skip_push: bool
 
     bi_popped = False
     bi_prev_arn = ""
+    human_bi = False
     if not cfg.features.bi_insight:
-        bi_prev_arn = existing.pop("agentcore_runtime_arn", "") or ""
-        bi_popped = bool(bi_prev_arn)
-        if bi_popped:
+        # 사람이 enable_chat_agent 를 env tfvars 로 선언해 둔 경우 module 과
+        # Runtime 을 우리가 수렴하지 않는다(아래 teardown 가드와 같은 판단)
+        # — 저장된 ARN 주입도 유지한다. pop 하면 taskdef env 에서 빠져,
+        # 살아 있는 사람 소유 Runtime 으로 가는 /chat 이 영구 503 이 된다.
+        from .eks_apply import _human_declared_chat_agent
+        human_bi = _human_declared_chat_agent(repo_root / ENV_DIR)
+        if human_bi:
+            if existing.get("agentcore_runtime_arn"):
+                print("ⓘ enable_chat_agent=true 가 env tfvars 에 선언돼 있어 "
+                      "agentcore_runtime_arn 주입을 유지합니다",
+                      file=sys.stderr)
+        else:
+            bi_prev_arn = existing.pop("agentcore_runtime_arn", "") or ""
+            bi_popped = bool(bi_prev_arn)
             # 선언을 껐으면 잔여 ARN 도 지운다 — agentcore_runtime_arn != ""
             # 조건이 taskdef 에 AGENTCORE_RUNTIME_ARN env 를 남겨 라우터가
             # 삭제된 Runtime 을 계속 호출하는 것을 되돌림 (web_search 패턴).
-            _save_extra_vars(gen_dir, existing)
 
     # ops/NDS-01 자동화 — 함수 자체는 terraform 모듈 밖 리소스라 boto3 로 보장.
     # task-role invoke 권한과 LITELLM_PRICING_LAMBDA env 는
@@ -385,9 +401,8 @@ def apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, *, skip_push: bool
                       "진행합니다 (단가 조회는 503 graceful-off)", file=sys.stderr)
     else:
         pricing_popped = bool(existing.pop("litellm_pricing_lambda", None))
-    # extra-vars 는 apply 간 영속 저장소 — 키를 메모리에만 두면 저장본과
-    # tfvars 가 어긋나 다음 run 이 var 삭제로 drift 를 낸다
-    _save_extra_vars(gen_dir, existing)
+    # extra-vars 저장은 아래 off-teardown 수렴 뒤 한 번 — 지금 저장하면
+    # teardown 전 중간 실패로 추적키가 영구 유실된다.
 
     if cfg.features.alerting.enabled:
         # ecs 경로는 ALB 차원 자동 발견이 없다 — enable_alerting 은 SNS+Aurora/
@@ -429,33 +444,45 @@ def apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, *, skip_push: bool
                     f"`aws secretsmanager restore-secret --secret-id {sname}` "
                     "로 복원하거나 유예 종료를 기다리세요")
 
+    pre_module_name = ""
+    if not cfg.features.bi_insight:
+        # module 실측은 apply 가 enable_chat_agent=false 로 output 을
+        # 재저장하기 '전'에 읽어야 한다 — bootstrap 의 targeted apply 도
+        # outputs 를 전부 갱신하므로 apply 후 읽으면 module_alive 가 항상
+        # false 가 돼 ARN 없이 만들어진 Runtime 의 정리 신호가 죽는다.
+        # init(백엔드 정렬) 후 apply 전에 스냅샷 — init 전 stale .terraform
+        # 캐시가 다른 env 의 이름을 돌려주는 사고 방지 규약은 유지한다.
+        env_dir = repo_root / ENV_DIR
+        _tf_init(cfg, gen_dir, env_dir)
+        try:
+            pre_module_name = (tf_outputs(env_dir).get("chat_agent_name")
+                               or "")
+        except SystemExit:
+            pass  # outputs 조회 실패 — bi_popped 증거로 teardown 이 진행된다
+
     terraform_apply(cfg, gen_dir, repo_root, bootstrap=True)
     partial = tf_outputs(repo_root / ENV_DIR)
 
     if not cfg.features.bi_insight:
-        # 켰던 흔적(stale ARN 또는 아직 살아있는 모듈 outputs)이 있을 때만
+        # 켰던 흔적(stale ARN 또는 apply 전 실측 module output)이 있을 때만
         # 프로비저너 소유 Runtime 을 멱등 정리 — 한 번도 안 켰으면 agentcore
-        # API 호출/권한 경고를 내지 않게 건너뛴다. 반드시 위 terraform_apply
-        # 의 init 이후에 읽는다 — init 전 stale .terraform 캐시가 다른 env 의
-        # chat_agent_name 을 돌려줘 남의 Runtime 을 지울 수 있다.
-        module_alive = bool(partial.get("chat_agent_name"))
+        # API 호출/권한 경고를 내지 않게 건너뛴다.
+        module_alive = bool(pre_module_name)
         # ecs env dir 는 사람 소유 채널 — 사람이 enable_chat_agent=true 를
         # tfvars 에 선언해 둔 경우 module_alive 가 영구 참이 돼 매 apply 가
         # 그 Runtime 을 삭제/재생하는 루프가 된다(eks 와 같은 가드).
-        from .eks_apply import _human_declared_chat_agent
-        if (bi_popped or module_alive) and not _human_declared_chat_agent(
-                repo_root / ENV_DIR):
+        if (bi_popped or module_alive) and not human_bi:
             from . import chatagent
             ok = chatagent.teardown(
                 repo_root, cfg.env, region=cfg.aws.region,
                 # project 변수를 바꾼 env 에선 도출 이름과 실측이 어긋나
-                # Runtime 이 새어나간다 — outputs 실측을 우선한다.
-                chat_agent_name=partial.get("chat_agent_name", ""))
+                # Runtime 이 새어나간다 — apply 전 실측을 우선한다.
+                chat_agent_name=pre_module_name,
+                env_dir=repo_root / ENV_DIR)
             if bi_popped and not ok:
                 # teardown 실패 — 추적키를 되살려 다음 apply 가 재시도하게
                 # 한다. 키가 지워진 채면 Runtime 이 영구 고아가 된다.
                 existing["agentcore_runtime_arn"] = bi_prev_arn
-                _save_extra_vars(gen_dir, existing)
                 print("⚠ bi_insight teardown 실패 — 추적키를 보존해 다음 "
                       "apply 에서 재시도합니다", file=sys.stderr)
     if ws_popped:
@@ -465,7 +492,6 @@ def apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, *, skip_push: bool
         from . import websearch as _ws
         if not _ws.teardown(cfg.env, repo_root):
             existing["agentcore_gateway_url"] = ws_prev_url
-            _save_extra_vars(gen_dir, existing)
             print("⚠ web_search teardown 실패 — 추적키를 보존해 다음 "
                   "apply 에서 재시도합니다", file=sys.stderr)
     if pricing_popped:
@@ -473,9 +499,11 @@ def apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, *, skip_push: bool
         from . import pricinglambda as _pl
         if not _pl.teardown(cfg, detach_invoke=False):
             existing["litellm_pricing_lambda"] = _pl.fn_name(cfg.env)
-            _save_extra_vars(gen_dir, existing)
             print("⚠ pricing Lambda teardown 실패 — 추적키를 보존해 다음 "
                   "apply 에서 재시도합니다", file=sys.stderr)
+    # 추적키 저장은 수렴 후 단 한 번 — teardown 실패 복원분까지 포함해
+    # 중간 abort 가 추적 증거를 지우는 창이 없다.
+    _save_extra_vars(gen_dir, existing)
     if not skip_push:
         push_images(cfg, partial, repo_root)
     outputs = terraform_apply(cfg, gen_dir, repo_root, bootstrap=False)

@@ -55,3 +55,12 @@ sanitize 실 dev 파일 검증(마커 0건, us-east-1 보존, oidc 재정렬/손
   검토 필요(LOW).
 - AD/SAML 은 OIDC 계약 위에서 동작 — 실 AD IdP 연동 검증은 라이브 환경
   필요.
+
+## 29차 적용 (CLI role allowlist 매칭)
+
+- **allowed_roles 와일드카드/ARN 불일치**(LOW): `cli_service` 의
+  `role_name not in ALLOWED_IAM_ROLES` 정확 비교라 `TeamLead*`·
+  `arn:aws:iam::…:role/X` 항목이 영구 불일치로 로그인 403 — 스키마가
+  허용하는 형태를 소비자가 못 쓰던 계약 갭. fnmatch 로 role 이름 +
+  파생 role ARN(`arn:aws:iam::<acct>:role/<name>`) 양쪽 매칭.
+

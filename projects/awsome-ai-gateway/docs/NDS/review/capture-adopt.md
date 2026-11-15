@@ -99,3 +99,14 @@ dropped_keys·gen overlay·backend 불일치·소스 선택·스칼라 잎.
   `--query` 를 주조 — `_HOSTNAME_RE` 통과분만 보간.
 - **cmd_capture 기본 release/namespace**(LOW-MED): 채택 yaml 의
   deploy.release/namespace 를 우선 — 기본 "llm-gateway" 오질의 해소.
+
+## 29차 적용 (cross-kind 소유 증명)
+
+- **kind 병합 이름 집합 충돌**(MEDIUM): `_release_manifest_names` 가 전
+  kind 의 이름을 한 집합으로 병합해, 우리 Deployment 와 동명인 외부
+  Ingress 가 소유로 통과해 cidr/scheme/host 주조 가능 — (kind,name) 쌍
+  집합 + `_manifest_owned(kind)` per-kind 필터(Ingress/Deployment).
+- **빈 owned 집합의 strict 처리**(LOW): 매니페스트 조회 성공+해당 kind 0건
+  일 때 strict-공집합으로 전부 누락 — doctor 와 같은 truthy 계약(빈 집합은
+  라벨 폴백)으로 정합.
+
