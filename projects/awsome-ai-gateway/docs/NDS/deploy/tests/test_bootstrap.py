@@ -338,7 +338,14 @@ def test_push_images_tag_per_service(monkeypatch, tmp_path):
     monkeypatch.setattr(bootstrap, "_run",
                         lambda argv, **k: builds.append(argv))
     monkeypatch.setattr(bootstrap, "ensure_ecr_repos", lambda r: None)
-    monkeypatch.setattr(bootstrap.subprocess, "run", lambda *a, **k: _cp(0, "pw"))
+
+    def _stub(*a, **k):
+        # describe-images 가 rc=0 이면 immutable 스킵으로 빌드가 안 돈다 —
+        # 미존재(rc!=0)로 흉내 낸다 (docker login 은 성공).
+        if "describe-images" in a[0]:
+            return _cp(1, "not found")
+        return _cp(0, "pw")
+    monkeypatch.setattr(bootstrap.subprocess, "run", _stub)
     cfg = _cfg(images={"tag": "v1",
                        "tags": {"gatewayProxy": "gw-9", "migration": "mig-7"}})
     bootstrap.push_images_eks(cfg, {}, tmp_path, "ap-northeast-2")
@@ -552,7 +559,14 @@ def test_push_images_eks_scheduler_pin(monkeypatch, tmp_path):
     """images.tags.scheduler 핀 → admin-api 를 그 태그로도 build/push."""
     ran = []
     monkeypatch.setattr(bootstrap, "ensure_ecr_repos", lambda r: None)
-    monkeypatch.setattr(bootstrap, "_quiet", lambda a, **k: _cp(0, "pw"))
+
+    def _quiet_stub(a, **k):
+        if "describe-images" in a:
+            return _cp(1, "not found")  # 미존재 → push 진행
+        if a[0] == "docker":
+            ran.append(" ".join(str(x) for x in a))
+        return _cp(0, "pw")
+    monkeypatch.setattr(bootstrap, "_quiet", _quiet_stub)
     monkeypatch.setattr(
         bootstrap, "_run",
         lambda a, **k: ran.append(" ".join(str(x) for x in a)) or _cp(0))
@@ -871,7 +885,7 @@ def test_push_images_non_ecr_registry_skips_ecr(monkeypatch, tmp_path):
     monkeypatch.setattr(bootstrap, "ensure_ecr_repos",
                         lambda r: calls.append(["ensure-ecr", r]))
     monkeypatch.setattr(bootstrap.subprocess, "run",
-                        lambda *a, **k: calls.append(["aws"]) or _cp(0, "pw"))
+                        lambda *a, **k: calls.append(list(a[0])) or _cp(0, "pw"))
     cfg = schema.from_dict({"version": 1, "env": "dev",
                             "aws": {"region": "us-east-1",
                                     "account_id": "123456789012"},

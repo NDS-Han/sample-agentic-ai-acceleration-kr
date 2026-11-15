@@ -706,10 +706,25 @@ def ensure_ecr_repos(region: str, services: tuple = EKS_SERVICES) -> None:
              f"llm-gateway/{repo}",
              "--image-scanning-configuration", "scanOnPush=true",
              "--encryption-configuration", "encryptionType=AES256",
+             "--image-tag-mutability", "IMMUTABLE",
              "--region", region])
-        if r.returncode != 0 and "RepositoryAlreadyExists" not in r.stderr:
-            raise SystemExit(f"ECR repo 생성 실패 (llm-gateway/{repo}): "
-                             f"{(r.stderr or '').strip()}")
+        if r.returncode != 0:
+            if "RepositoryAlreadyExists" in r.stderr:
+                # 기존 repo 의 mutability 도 수렴한다 — mutable 로 남으면
+                # 핀 태그가 조용히 덮어씌워져 같은 태그가 다른 이미지를
+                # 가리키는 배포 drift 가 된다(ecs 모듈은 IMMUTABLE 강제).
+                m = _quiet(
+                    ["aws", "ecr", "put-image-tag-mutability",
+                     "--repository-name", f"llm-gateway/{repo}",
+                     "--image-tag-mutability", "IMMUTABLE",
+                     "--region", region])
+                if m.returncode != 0:
+                    print(f"⚠ llm-gateway/{repo} 를 IMMUTABLE 로 못 바꿨습니다 — "
+                          "같은 태그 재push 가 허용됩니다 "
+                          f"({(m.stderr or '').strip()[:100]})", file=sys.stderr)
+            else:
+                raise SystemExit(f"ECR repo 생성 실패 (llm-gateway/{repo}): "
+                                 f"{(r.stderr or '').strip()}")
 
 
 def push_images_eks(cfg: GatewayConfig, outs: dict, repo_root: Path,
@@ -741,24 +756,43 @@ def push_images_eks(cfg: GatewayConfig, outs: dict, repo_root: Path,
               "로그인을 건너뜁니다. 대상 레지스트리에 docker login 돼 있어야 "
               "push 가 성공합니다", file=sys.stderr)
 
+    def _push_if_absent(repo: str, tag: str, ctx: str) -> None:
+        image = f"{registry}/llm-gateway/{repo}:{tag}"
+        # IMMUTABLE repo — 같은 태그 재push 는 ImageTagAlreadyExists 로 죽는다.
+        # 재시도 apply 가 매번 여기서 멈추지 않게 이미 있으면 건너뛴다.
+        if ecr_m:
+            chk = _quiet(
+                ["aws", "ecr", "describe-images", "--repository-name",
+                 f"llm-gateway/{repo}", "--image-ids", f"imageTag={tag}",
+                 "--region", reg_region, "--output", "json"], timeout=30)
+            if chk.returncode == 0:
+                print(f"ⓘ {image} — 이미 존재 (immutable repo) — push 건너뜀. "
+                      "내용이 바뀌었으면 images.tag 를 올리세요", file=sys.stderr)
+                return
+        _run(["docker", "build", "--platform", "linux/amd64",
+              "-t", image, str(repo_root / ctx)], cwd=repo_root)
+        p = _quiet(["docker", "push", image])
+        if p.returncode != 0:
+            # 동시 apply 레이스 — 상대가 먼저 같은 태그를 push 한 경우는 성공으로.
+            if "AlreadyExists" in (p.stderr or ""):
+                print(f"ⓘ {image} — push 레이스로 이미 존재 — 건너뜀",
+                      file=sys.stderr)
+                return
+            raise SystemExit(f"docker push 실패 ({image}): "
+                             f"{(p.stderr or p.stdout or '').strip()[:200]}")
+
     for helm_key, repo, ctx in EKS_SERVICES:
         tag = (cfg.images.tags or {}).get(helm_key) or cfg.images.tag
         if not tag:
             raise SystemExit("images.tag (또는 images.tags 전체 핀)이 필요합니다 — "
                              "빌드할 태그를 gateway.yaml 에 선언하십시오")
-        image = f"{registry}/llm-gateway/{repo}:{tag}"
-        _run(["docker", "build", "--platform", "linux/amd64",
-              "-t", image, str(repo_root / ctx)], cwd=repo_root)
-        _run(["docker", "push", image], cwd=repo_root)
+        _push_if_absent(repo, tag, ctx)
     # scheduler 는 admin-api 이미지를 별도 태그로 당길 수 있다 —
     # images.tags.scheduler 핀이 있으면 그 태그도 만들어 둬야 pull 이 성공.
     sched = (cfg.images.tags or {}).get("scheduler")
     api_tag = (cfg.images.tags or {}).get("adminApi") or cfg.images.tag
     if sched and sched != api_tag:
-        image = f"{registry}/llm-gateway/admin-api:{sched}"
-        _run(["docker", "build", "--platform", "linux/amd64",
-              "-t", image, str(repo_root / "admin-api")], cwd=repo_root)
-        _run(["docker", "push", image], cwd=repo_root)
+        _push_if_absent("admin-api", sched, "admin-api")
 
 
 def update_kubeconfig(outs: dict, region: str, context: str = "") -> None:
@@ -1068,11 +1102,15 @@ def persist_bootstrap_answers(config_path: Path, answers: dict) -> bool:
                   f"저장하지 않습니다 (배포는 기본값으로 계속 진행):\n{exc}",
                   file=sys.stderr)
             return False
+    # oidc.client_secret 을 담을 수 있는 파일 — umask 기본(0644) tmp 를
+    # replace 하고 chmod 하면 잠깐 world-readable 창이 생긴다. 처음부터
+    # 0600 으로 연다(write_env_file 과 같은 패턴).
     tmp = config_path.with_name(config_path.name + ".tmp")
-    tmp.write_text(
-        "# gateway.yaml — 이 배포의 source of truth.\n"
-        "# infra.* 는 deploy bootstrap wizard 가 기록한 신규 설치 입력.\n"
-        + yaml.safe_dump(doc, sort_keys=False, allow_unicode=True))
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(
+            "# gateway.yaml — 이 배포의 source of truth.\n"
+            "# infra.* 는 deploy bootstrap wizard 가 기록한 신규 설치 입력.\n"
+            + yaml.safe_dump(doc, sort_keys=False, allow_unicode=True))
     tmp.replace(config_path)  # 원자적 교체 — 중간 크래시가 yaml 을 반만 남기지 않게
-    config_path.chmod(0o600)
     return True

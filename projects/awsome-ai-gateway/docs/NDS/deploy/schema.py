@@ -565,9 +565,10 @@ class GatewayConfig:
                              f"(허용: {sorted(EKS_TAGGABLE_SERVICES)})")
         # registry 비우면 ecs 는 모듈이 ECR repo 를 만들고, eks 는 apply 가
         # <account>.dkr.ecr.<region> 으로 추론한다 (install-eks.sh 와 동일)
-        if len(self.infra.azs) > 54:
-            # 파생 서브넷의 세 번째 옥텟이 255 를 넘어 무효 CIDR 이 된다.
-            e.append("infra.azs 는 54개를 초과할 수 없습니다 — "
+        if len(self.infra.azs) > 45:
+            # 파생 서브넷의 세 번째 옥텟이 255 를 넘어 무효 CIDR 이 된다 —
+            # elasticache 가 211+i 로 가장 빡빡하다(211+44=255).
+            e.append("infra.azs 는 45개를 초과할 수 없습니다 — "
                      "파생 서브넷 규약이 /24 옥텟을 초과합니다")
         if self.infra.azs and len(self.infra.azs) < 2:
             e.append("infra.azs 는 2개 이상이어야 합니다 — "
@@ -656,7 +657,10 @@ class GatewayConfig:
         if self.deploy.sizing:
             is_eks = self.deploy.target == "eks"
             allowed_svc = EKS_SIZING if is_eks else {s: _ECS_SIZING_KEYS for s in ECS_SERVICES}
-            unknown = sorted(set(self.deploy.sizing) - set(allowed_svc))
+            # 비-문자열 키({5: ...})는 sorted 가 TypeError 로 죽는다 —
+            # errors 에 담기지 않고 traceback 으로 나간다. key=str 로 정렬.
+            unknown = sorted(set(self.deploy.sizing) - set(allowed_svc),
+                             key=str)
             if unknown:
                 e.append(f"deploy.sizing 에 알 수 없는 서비스: {unknown} "
                          f"(허용: {sorted(allowed_svc)})")
@@ -667,7 +671,7 @@ class GatewayConfig:
                     _sizing_ints_ok = False
                     continue
                 keys = allowed_svc.get(svc, frozenset())
-                bad = sorted(set(ov) - keys)
+                bad = sorted(set(ov) - keys, key=str)
                 if bad:
                     e.append(f"deploy.sizing.{svc} 에 알 수 없는 키: {bad} "
                              f"(허용: {sorted(keys)})")
@@ -849,6 +853,14 @@ def _safe_float_or_none(v: Any, errors: list[str], path: str) -> float | None:
         return None
 
 
+def _opt_str(v: object, dflt: str = "") -> str:
+    """null 을 기본값으로 — `key: null` 을 str(None)="None" 으로 코어션해
+    필수값 검사를 통과시키고 CLIENT_ID="None" 같은 값이 배포되는 사고 방지.
+    false/0 같은 다른 falsy 도 코어션하지 않는다 — target: false 가
+    조용히 compose 배포가 되는 걸 막고 검증에서 거절시킨다."""
+    return dflt if v is None else str(v)
+
+
 def _safe_bool(v: Any, errors: list[str], path: str, default: bool = False) -> bool:
     """yaml 의 unquoted true/false/on/off 는 이미 bool 로 온다. 인용된 문자열
     ("false")은 bool() 이 True 로 평가해 플래그가 조용히 켜지므로 명시적으로 거절한다.
@@ -996,10 +1008,10 @@ def from_dict(raw: dict) -> GatewayConfig:
                                   "replicas_per_node_group"), "infra.cache", errors)
 
     cfg = GatewayConfig(
-        env=str(raw.get("env", "")),
+        env=_opt_str(raw.get("env"), ""),
         aws=AwsConfig(
-            region=str(aws.get("region", "ap-northeast-2")),
-            account_id=str(aws.get("account_id", "")),
+            region=_opt_str(aws.get("region"), "ap-northeast-2"),
+            account_id=_opt_str(aws.get("account_id"), ""),
             # 스칼라("DevRole")는 1-항목 리스트로 감싼다 — int/dict 같은
             # 비-list 는 순회 불가/키 순회 침묵오용이라 명시 오류로 둔다.
             allowed_roles=_str_items(aws.get("allowed_roles"),
@@ -1008,20 +1020,20 @@ def from_dict(raw: dict) -> GatewayConfig:
         deploy=DeployConfig(
             # `or` 패턴 — yaml null(`release:`)도 기본값으로. `str(None)` 은
             # "None" 리터럴이 돼 release/namespace 이름이 쓰레기가 된다
-            target=str(deploy.get("target") or "compose"),
-            size_tier=str(deploy.get("size_tier") or "t1"),
+            target=_opt_str(deploy.get("target"), "compose"),
+            size_tier=_opt_str(deploy.get("size_tier"), "t1"),
             # dict("x")/dict([1]) 같은 비-mapping 은 TypeError/ValueError 로
             # 날아든다 — 스키마 오류로 변환해야 CLI 가 깔끔하게 거절한다.
             sizing=_require_mapping(deploy.get("sizing"), "deploy.sizing", errors),
-            capacity_tier=str(deploy.get("capacity_tier") or ""),
-            tfstate_bucket=str(deploy.get("tfstate_bucket") or ""),
-            tfstate_table=str(deploy.get("tfstate_table") or ""),
-            release=str(deploy.get("release") or "llm-gateway"),
-            namespace=str(deploy.get("namespace") or "llm-gateway"),
-            tf_env_dir=str(deploy.get("tf_env_dir") or ""),
+            capacity_tier=_opt_str(deploy.get("capacity_tier"), ""),
+            tfstate_bucket=_opt_str(deploy.get("tfstate_bucket"), ""),
+            tfstate_table=_opt_str(deploy.get("tfstate_table"), ""),
+            release=_opt_str(deploy.get("release"), "llm-gateway"),
+            namespace=_opt_str(deploy.get("namespace"), "llm-gateway"),
+            tf_env_dir=_opt_str(deploy.get("tf_env_dir"), ""),
         ),
         network=NetworkConfig(
-            mode=str(network.get("mode", "public")),
+            mode=_opt_str(network.get("mode"), "public"),
             # 스칼라 str 은 1-항목으로 감싼다 — int/dict 비-list 는 침묵 순회
             # (dict 는 키 목록이 CIDR 로 들어감)가 아니라 명시 오류.
             allowed_cidrs=_str_items(network.get("allowed_cidrs"),
@@ -1030,23 +1042,23 @@ def from_dict(raw: dict) -> GatewayConfig:
                                       "network.admin_internal"),
         ),
         domain=DomainConfig(
-            mode=str(domain.get("mode", "none")),
-            name=str(domain.get("name", "")),
-            zone_id=str(domain.get("zone_id", "")),
+            mode=_opt_str(domain.get("mode"), "none"),
+            name=_opt_str(domain.get("name"), ""),
+            zone_id=_opt_str(domain.get("zone_id"), ""),
             hosts={str(k): str(v) for k, v in _domain_hosts.items()},
         ),
         features=FeaturesConfig(
             notifications=NotificationConfig(
-                provider=str(notif.get("provider", "mock")),
-                smtp_host=str(notif.get("smtp_host", "")),
+                provider=_opt_str(notif.get("provider"), "mock"),
+                smtp_host=_opt_str(notif.get("smtp_host"), ""),
                 smtp_port=_safe_int(notif.get("smtp_port", 587), errors,
                                     "features.notifications.smtp_port"),
-                smtp_from=str(notif.get("smtp_from", "")),
-                ses_from=str(notif.get("ses_from", "")),
-                sender_name=str(notif.get("sender_name", "")),
-                internal_api_url=str(notif.get("internal_api_url", "")),
-                internal_api_from=str(notif.get("internal_api_from", "")),
-                smtp_credentials_secret=str(notif.get("smtp_credentials_secret", "")),
+                smtp_from=_opt_str(notif.get("smtp_from"), ""),
+                ses_from=_opt_str(notif.get("ses_from"), ""),
+                sender_name=_opt_str(notif.get("sender_name"), ""),
+                internal_api_url=_opt_str(notif.get("internal_api_url"), ""),
+                internal_api_from=_opt_str(notif.get("internal_api_from"), ""),
+                smtp_credentials_secret=_opt_str(notif.get("smtp_credentials_secret"), ""),
             ),
             alerting=AlertingConfig(
                 enabled=_safe_bool(alerting.get("enabled", False), errors,
@@ -1074,18 +1086,18 @@ def from_dict(raw: dict) -> GatewayConfig:
                                     "features.service_keys"),
         ),
         images=ImagesConfig(
-            registry=str(images.get("registry", "")),
-            tag=str(images.get("tag", "")),
+            registry=_opt_str(images.get("registry"), ""),
+            tag=_opt_str(images.get("tag"), ""),
             tags={str(k): str(v) for k, v in
                   _require_mapping(images.get("tags"), "images.tags", errors).items()},
         ),
         clients=ClientsConfig(
-            models_profile=str(clients.get("models_profile", "global")),
+            models_profile=_opt_str(clients.get("models_profile"), "global"),
         ),
         infra=InfraConfig(
             azs=_str_items(infra.get("azs"), "infra.azs", errors),
-            vpc_cidr=str(infra.get("vpc_cidr", "")),
-            cognito_domain_suffix=str(infra.get("cognito_domain_suffix", "")),
+            vpc_cidr=_opt_str(infra.get("vpc_cidr"), ""),
+            cognito_domain_suffix=_opt_str(infra.get("cognito_domain_suffix"), ""),
             cognito_groups=_str_items(infra.get("cognito_groups"),
                                       "infra.cognito_groups", errors),
             bedrock_allowed_model_arns=_str_items(
@@ -1096,17 +1108,17 @@ def from_dict(raw: dict) -> GatewayConfig:
                 infra.get("mantle_regions"), "infra.mantle_regions", errors,
                 item_re=_REGION_RE, item_desc="리전 ID"),
             db=InfraDbConfig(
-                mode=str(_infra_db.get("mode", "")),
+                mode=_opt_str(_infra_db.get("mode"), ""),
                 min_acu=_safe_float_or_none(_infra_db.get("min_acu"), errors,
                                             "infra.db.min_acu"),
                 max_acu=_safe_float_or_none(_infra_db.get("max_acu"), errors,
                                             "infra.db.max_acu"),
-                instance_class=str(_infra_db.get("instance_class", "")),
-                engine_version=str(_infra_db.get("engine_version", "")),
+                instance_class=_opt_str(_infra_db.get("instance_class"), ""),
+                engine_version=_opt_str(_infra_db.get("engine_version"), ""),
             ),
             cache=InfraCacheConfig(
-                mode=str(_infra_cache.get("mode", "")),
-                node_type=str(_infra_cache.get("node_type", "")),
+                mode=_opt_str(_infra_cache.get("mode"), ""),
+                node_type=_opt_str(_infra_cache.get("node_type"), ""),
                 num_clusters=_safe_int_or_none(_infra_cache.get("num_clusters"),
                                                errors, "infra.cache.num_clusters"),
                 num_node_groups=_safe_int_or_none(_infra_cache.get("num_node_groups"),
@@ -1117,16 +1129,16 @@ def from_dict(raw: dict) -> GatewayConfig:
             ),
         ),
         oidc=OidcConfig(
-            issuer_url=str(oidc.get("issuer_url", "")),
-            audience=str(oidc.get("audience", "")),
-            client_id=str(oidc.get("client_id", "")),
-            authorize_url=str(oidc.get("authorize_url", "")),
-            token_url=str(oidc.get("token_url", "")),
-            client_secret=str(oidc.get("client_secret", "")),
-            provider_name=str(oidc.get("provider_name", "oidc:cognito")),
-            required_group=str(oidc.get("required_group", "")),
-            groups_claim=str(oidc.get("groups_claim", "")),
-            group_prefix=str(oidc.get("group_prefix", "")),
+            issuer_url=_opt_str(oidc.get("issuer_url"), ""),
+            audience=_opt_str(oidc.get("audience"), ""),
+            client_id=_opt_str(oidc.get("client_id"), ""),
+            authorize_url=_opt_str(oidc.get("authorize_url"), ""),
+            token_url=_opt_str(oidc.get("token_url"), ""),
+            client_secret=_opt_str(oidc.get("client_secret"), ""),
+            provider_name=_opt_str(oidc.get("provider_name"), "oidc:cognito"),
+            required_group=_opt_str(oidc.get("required_group"), ""),
+            groups_claim=_opt_str(oidc.get("groups_claim"), ""),
+            group_prefix=_opt_str(oidc.get("group_prefix"), ""),
             reject_unmatched_groups=(
                 None if oidc.get("reject_unmatched_groups") is None
                 else _safe_bool(oidc.get("reject_unmatched_groups"), errors,
@@ -1162,9 +1174,15 @@ def subnet_cidrs(vpc_cidr: str, n: int) -> dict[str, list[str]]:
         "elasticache_subnet_cidrs": [f"{base}.{211 + i}.0/24" for i in range(n)],
     }
     try:
+        gen = [ipaddress.ip_network(c) for lst in out.values() for c in lst]
+    except ValueError as exc:
+        # 파생 규약이 무효 CIDR 자체를 만들면(azs 과다 등) 조용히 방출하면
+        # 안 된다 — terraform 이 plan 에서 죽기 전에 스키마가 잡는다.
+        raise SchemaError(
+            f"파생 서브넷 CIDR 이 무효합니다(azs={n}개): {exc}") from exc
+    try:
         vpc_net = ipaddress.ip_network(vpc_cidr, strict=False)
-        outside = [c for lst in out.values() for c in lst
-                   if not ipaddress.ip_network(c).subnet_of(vpc_net)]
+        outside = [str(c) for c in gen if not c.subnet_of(vpc_net)]
     except (ValueError, TypeError):
         # 형식 오류는 infra.vpc_cidr 스키마 검증이 잡는다 — subnet_of 의
         # IPv4↔IPv6 비교 TypeError 도 여기서 삼킨다.

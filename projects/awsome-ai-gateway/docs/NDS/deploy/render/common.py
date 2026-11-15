@@ -66,10 +66,12 @@ def tfvars_clean(text: str) -> str:
         if text[i:i + 2] == "<<":
             # <<-TAG 는 종결자 들여쓰기를 허용하고 <<- 는 0컬럼을 요구한다 —
             # 들여쓴 종결자를 못 찾으면 heredoc 이후 전부가 지워져 그 뒤의
-            # environment= 같은 선언이 보이지 않게 된다.
-            m = re.match(r"<<(-?)(\w[\w-]*)", text[i:])
+            # environment= 같은 선언이 보이지 않게 된다. <<"TAG"/<<-"TAG"
+            # (인용 구분자 — interpolation 비활성)도 같은 규칙으로 인식한다 —
+            # 놓치면 본문의 key=value 가 유령 선언으로 살아난다.
+            m = re.match(r"<<(-?)(?:[\"'](\w[\w-]*)[\"']|(\w[\w-]*))", text[i:])
             if m:
-                tag = re.escape(m.group(2))
+                tag = re.escape(m.group(2) or m.group(3))
                 pat = (rf"(?m)^\s*{tag}\s*$" if m.group(1)
                        else rf"(?m)^{tag}\s*$")
                 end = re.search(pat, text[i:])

@@ -613,10 +613,12 @@ def ensure_domain_records(cfg: GatewayConfig, meta: dict, context: str = "") -> 
         "-admin-api": cfg.domain.hosts.get("admin_api")
         or f"admin-api.{cfg.domain.name}"}
     changes = []
+    our_albs: set[str] = set()
     for suffix, host in suffix_to_host.items():
         alb = _alb_hostname_by_suffix(meta, suffix, context)
         if not alb:
             continue
+        our_albs.add(alb)
         z = _run_quiet(
             ["aws", "elbv2", "describe-load-balancers", "--region", cfg.aws.region,
              "--query", f"LoadBalancers[?DNSName=='{alb}']"
@@ -625,6 +627,26 @@ def ensure_domain_records(cfg: GatewayConfig, meta: dict, context: str = "") -> 
         zone = (z.stdout or "").strip()
         if not zone or zone == "None":
             continue
+        # 선언 호스트에 이미 다른 내용의 레코드가 있으면 덮어쓰기 전에 경고 —
+        # domain.hosts 오타 하나로 남의 운영 레코드를 우리 ALB 로 돌리는
+        # 사고를 조용히 넘기지 않는다.
+        ex = _run_quiet(
+            ["aws", "route53", "list-resource-record-sets",
+             "--hosted-zone-id", cfg.domain.zone_id,
+             "--query", f"ResourceRecordSets[?Name=='{host}.'"
+                        " && Type=='A'] | [0]",
+             "--output", "json"], timeout=30)
+        try:
+            ex_rec = json.loads(ex.stdout or "null")
+        except json.JSONDecodeError:
+            ex_rec = None
+        if isinstance(ex_rec, dict):
+            ex_tgt = ((ex_rec.get("AliasTarget") or {}).get("DNSName") or
+                      str(ex_rec.get("ResourceRecords") or ""))
+            if ex_tgt and alb not in str(ex_tgt):
+                print(f"⚠ route53: {host} 에 기존 레코드({ex_tgt})가 있습니다 "
+                      f"— {alb} 로 덮어씁니다. 오타가 아닌지 확인하세요",
+                      file=sys.stderr)
         changes.append({"Action": "UPSERT", "ResourceRecordSet": {
             "Name": host, "Type": "A",
             "AliasTarget": {"HostedZoneId": zone, "DNSName": f"dualstack.{alb}",
@@ -655,9 +677,27 @@ def ensure_domain_records(cfg: GatewayConfig, meta: dict, context: str = "") -> 
         if not (isinstance(tgt, dict) and tgt.get("DNSName")):
             continue
         # ALB alias 가 아니면 우리가 만든 레코드가 아니다 — 같은 도메인 아래
-        # 사람이 둔 다른 용도의 A 레코드를 지우지 않는다.
-        if ".elb.amazonaws.com" not in str(tgt["DNSName"]):
+        # 사람이 둔 다른 용도의 A 레코드를 지우지 않는다. 같은 hosted zone 을
+        # 공유하는 '다른' 배포의 ALB 도 마찬가지 — 우리 클러스터에서 발견한
+        # ALB DNS 를 가리키는 레코드만 지운다.
+        tgt_dns = str(tgt["DNSName"]).removeprefix("dualstack.").rstrip(".")
+        if ".elb.amazonaws.com" not in tgt_dns:
             continue
+        if tgt_dns not in our_albs:
+            # 우리 ALB 가 아니어도 타깃 ALB 자체가 없으면(구 배포의 죽은
+            # ALB) 레코드는 죽은 참조 — 삭제해도 안전하다. 살아 있는 외부
+            # ALB 를 가리키는 레코드는 건드리지 않는다.
+            x = _run_quiet(
+                ["aws", "elbv2", "describe-load-balancers",
+                 "--region", cfg.aws.region,
+                 "--query", f"LoadBalancers[?DNSName=='{tgt_dns}']"
+                            " | length(@)",
+                 "--output", "text"], timeout=30)
+            if (x.stdout or "").strip() != "0":
+                print(f"⚠ route53: {derived} 의 alias target({tgt_dns})이 "
+                      "살아 있는 외부 ALB 입니다 — 다른 배포 소유일 수 있어 "
+                      "삭제하지 않습니다", file=sys.stderr)
+                continue
         changes.append({"Action": "DELETE", "ResourceRecordSet": {
             "Name": derived, "Type": "A",
             "AliasTarget": {
@@ -677,10 +717,17 @@ def ensure_domain_records(cfg: GatewayConfig, meta: dict, context: str = "") -> 
         print(f"⚠ route53 레코드 반영 실패: {r.stderr[:200]}", file=sys.stderr)
 
 
+_HELM_VER: tuple[int, int] | None = None
+
+
 def _helm_version() -> tuple[int, int]:
+    global _HELM_VER
+    if _HELM_VER is not None:
+        return _HELM_VER
     r = _run_quiet(["helm", "version", "--template", "{{.Version}}"], timeout=15)
     m = re.search(r"v(\d+)(?:\.(\d+))?", r.stdout or "")
-    return (int(m.group(1)), int(m.group(2) or 0)) if m else (3, 0)
+    _HELM_VER = (int(m.group(1)), int(m.group(2) or 0)) if m else (3, 0)
+    return _HELM_VER
 
 
 def _rollback_flag() -> str:
@@ -695,6 +742,13 @@ def _dry_run_flag() -> str:
     return "--dry-run=server" if (major, minor) >= (3, 13) else "--dry-run"
 
 
+def _cleanup_flag() -> str:
+    # --cleanup-on-fail 은 helm 3.14+ — 구버전에 쓰면 upgrade 자체가 unknown
+    # flag 로 죽는다. rollback 플래그와 같은 버전 게이트를 둔다.
+    major, minor = _helm_version()
+    return "--cleanup-on-fail" if (major, minor) >= (3, 14) or major >= 4 else ""
+
+
 def _helm_argv(meta: dict, set_args: list[str], *, dry_run: bool = False,
                extra_sets: list[str] | None = None,
                context: str = "") -> list[str]:
@@ -704,7 +758,8 @@ def _helm_argv(meta: dict, set_args: list[str], *, dry_run: bool = False,
     if context:
         argv += ["--kube-context", context]
     if not dry_run:
-        argv += ["--wait", _rollback_flag(), "--cleanup-on-fail"]
+        argv += ["--wait", _rollback_flag(),
+                 *([_cleanup_flag()] if _cleanup_flag() else [])]
     for f in meta.get("values_layers", []):
         argv += ["--values", f]
     argv += set_args
@@ -814,6 +869,7 @@ def strip_es_owned_secrets(meta: dict, context: str = "",
     # 다르다). legacy {release}-{suffix} 도 후보에 남긴다(채택 배포 커버).
     secrets = {f"{rel}-app", f"{rel}-db", f"{rel}-redis"}
     override = ""
+    name_override = ""   # fullname 의 $name 부분 — nameOverride 없으면 Chart.Name
     declared: set[str] = set()  # passwordSecretName 을 어느 레이어든 선언한 섹션
     for lp in meta.get("values_layers") or []:
         p_ = Path(lp)
@@ -825,6 +881,7 @@ def strip_es_owned_secrets(meta: dict, context: str = "",
         if not isinstance(v, dict):
             continue  # 리스트/스칼라 문서 — .get 호출 시 AttributeError
         override = str(v.get("fullnameOverride") or override or "")
+        name_override = str(v.get("nameOverride") or name_override or "")
         for top in ("database", "redis"):
             ext = v.get(top)
             if not isinstance(ext, dict):
@@ -856,7 +913,9 @@ def strip_es_owned_secrets(meta: dict, context: str = "",
             n = (inner.get("passwordSecretName")
                  if isinstance(inner, dict) else None)
             secrets.add(str(n) if n else fallback)
-    chart_name = "llm-gateway"
+    # 차트의 llm-gateway.fullname 은 default .Chart.Name .Values.nameOverride —
+    # nameOverride 를 놓치면 {rel}-{override}-app 시크릿을 후보에서 놓친다.
+    chart_name = name_override or "llm-gateway"
     if override:
         fullname = override[:63].rstrip("-")
     elif chart_name in rel:
@@ -1230,7 +1289,15 @@ def _inspect_managed_plan(env_dir: Path, plan_path: Path,
         if rc_.get("mode") != "managed":
             continue
         addr = str(rc_.get("address", ""))
-        acts = (rc_.get("change") or {}).get("actions") or []
+        change = rc_.get("change") or {}
+        acts = change.get("actions") or []
+        # moved/import 변경은 actions=["no-op"] 로 나타나 검사를 빠져나가지만
+        # apply 는 state 이동/import 를 실제 수행한다 — 사람이 둔 moved 블록이
+        # yaml 수렴 안에서 조용히 리소스를 재배치하지 못하게 표면화한다.
+        if rc_.get("previous_address") or change.get("importing"):
+            bad.append(f"{addr} — moved/import 변경은 managed apply 에서 "
+                       "검증할 수 없습니다 (terraform 단독 실행 필요)")
+            continue
         # 의존성 리소스는 변경 없이 no-op/read 로 plan 에 나타난다 — 범위 검사
         # 전에 걸러야 한다(걸리면 모든 수렴이 "범위 밖" 오진으로 중단된다).
         if not acts or acts == ["no-op"] or acts == ["read"]:

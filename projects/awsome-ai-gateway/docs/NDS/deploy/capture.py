@@ -917,8 +917,10 @@ def _tfvars(env_dir: Path, extra_files: list[Path] | None = None) -> dict[str, o
                 continue
             if not isinstance(doc, dict):
                 continue
+            # HCL 식별자가 아닌 키는 의사 할당을 합성한다 — 걸러낸다.
             text = "\n".join(f"{k} = {json.dumps(v)}"
-                             for k, v in doc.items())
+                             for k, v in doc.items()
+                             if re.fullmatch(r"[A-Za-z_]\w*", str(k)))
         texts.append(text)
     if not texts:
         return {}

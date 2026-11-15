@@ -557,9 +557,12 @@ def _env_tfvars_texts(env_dir: Path | None) -> list[str]:
             if f.suffix == ".json":
                 doc = json.loads(f.read_text())
                 if isinstance(doc, dict):
+                    # HCL 식별자가 아닌 키(공백·따옴표·개행 포함)는 의사 할당을
+                    # 합성해 스캔을 오염시킨다 — 걸러낸다.
                     out.append("\n".join(
                         f"{k} = {json.dumps(v, ensure_ascii=False)}"
-                        for k, v in doc.items()))
+                        for k, v in doc.items()
+                        if re.fullmatch(r"[A-Za-z_]\w*", str(k))))
             else:
                 out.append(f.read_text())
         except (OSError, json.JSONDecodeError):

@@ -1488,3 +1488,15 @@ def test_tfvars_json_channels_loaded(tmp_path):
     tv = capture._tfvars(tmp_path)
     assert tv["environment"] == "stage"
     assert tv["alert_emails"] == ["a@b.co"] and tv["models_profile"] == "p1"
+
+
+def test_tfvars_quoted_heredoc_terminator(tmp_path):
+    """<<\"TAG\" 인용 구분자도 인식 — 못 읽으면 본문의 key=value 가 유령
+    선언으로 살아나 첫 매치 소비자를 오염시킨다."""
+    (tmp_path / "terraform.tfvars").write_text(
+        'desc = <<-"EOT"\n'
+        'environment = "fake"\n'
+        '  EOT\n'
+        'environment = "prod"\n')
+    tv = capture._tfvars(tmp_path)
+    assert tv["environment"] == "prod"

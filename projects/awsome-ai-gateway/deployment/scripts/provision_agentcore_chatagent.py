@@ -470,7 +470,11 @@ def _runtime_image_uri(ex: dict) -> str:
 
 def _wait_ready(rid: str) -> None:
     for _ in range(60):
-        st = _control().get_agent_runtime(agentRuntimeId=rid).get("status")
+        try:
+            st = _control().get_agent_runtime(agentRuntimeId=rid).get("status")
+        except ClientError as e:
+            # 대기 중 대역 밖 삭제/일시 API 오류 — traceback 대신 명시 실패로.
+            fail(f"Runtime 상태 조회 실패: {e.response['Error']['Code']}")
         if st == "READY":
             return
         if st in ("CREATE_FAILED", "UPDATE_FAILED", "DELETING"):

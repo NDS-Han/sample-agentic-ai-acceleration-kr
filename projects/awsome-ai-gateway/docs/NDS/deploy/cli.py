@@ -1115,8 +1115,12 @@ def _teardown_ecs(cfg: schema.GatewayConfig, args) -> int:
         return 130
     # destroy 후엔 outputs 가 비어 읽을 수 없다 — 사람이 project 변수를 바꾼
     # env 의 실측 Runtime 이름을 미리 확보한다 (eks teardown 과 같은 계약).
+    # 플래그가 꺼져 있어도 extra-vars 의 ARN 흔적이 있으면 teardown 이 발동
+    # 하므로 같은 증거로 프리패치한다 — 도출 이름이 어긋난 채 '없음' 수렴하면
+    # 유료 Runtime 이 누수되고 마지막 증거(ARN 키)까지 지워진다.
+    extra_pre = ecs_apply.load_extra_vars(out)
     chat_name = ""
-    if cfg.features.bi_insight:
+    if cfg.features.bi_insight or extra_pre.get("agentcore_runtime_arn"):
         try:
             chat_name = ecs_apply.tf_outputs(env_dir).get(
                 "chat_agent_name", "")

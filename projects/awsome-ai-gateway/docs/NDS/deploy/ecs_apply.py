@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -147,12 +148,27 @@ def push_images(cfg: GatewayConfig, outputs: dict, repo_root: Path) -> None:
             print(f"ⓘ {image} — 이미 존재 (immutable repo) — push 건너뜀. "
                   "내용이 바뀌었으면 images.tag 를 올리세요", file=sys.stderr)
             continue
-        _run(["docker", "push", image])
+        try:
+            p = subprocess.run(["docker", "push", image],
+                               capture_output=True, text=True)
+        except FileNotFoundError:
+            raise SystemExit("docker 명령을 못 찾았습니다 — 설치와 PATH 확인 필요")
+        if p.returncode != 0:
+            # 조회 실패 후 push 에서 발견되는 AlreadyExists(동시 apply 레이스)
+            # 는 성공으로 친다 — immutable repo 면 내용이 이미 확정돼 있다.
+            if "AlreadyExists" in (p.stderr or ""):
+                print(f"ⓘ {image} — push 레이스로 이미 존재 — 건너뜀",
+                      file=sys.stderr)
+                continue
+            raise SystemExit(f"docker push 실패 ({image}): "
+                             f"{(p.stderr or p.stdout or '').strip()[:200]}")
 
 
 def wait_services(cfg: GatewayConfig, outputs: dict) -> None:
     names = list((outputs.get("service_names") or {}).values())
     if not names:
+        print("⚠ service_names output 없음 — 안정화 대기/배포 검증을 건너뜁니다",
+              file=sys.stderr)
         return
     cluster = outputs.get("ecs_cluster_name")
     if not cluster:
@@ -194,8 +210,11 @@ def wait_services(cfg: GatewayConfig, outputs: dict) -> None:
         svcs = json.loads(d.stdout or "{}").get("services", [])
     except json.JSONDecodeError:
         svcs = []
+    # 과거 배포의 FAILED 잔여 항목은 무시한다 — describe-services 는 이전
+    # 롤백 배포도 목록에 남겨, 현재 PRIMARY 가 건강해도 '배포 실패' 오진을 낸다.
     failed = [s.get("serviceName") for s in svcs
               if any(dep.get("rolloutState") == "FAILED"
+                     and dep.get("status") == "PRIMARY"
                      for dep in (s.get("deployments") or []))]
     if failed:
         raise SystemExit(
@@ -225,7 +244,18 @@ def load_extra_vars(gen_dir: Path) -> dict:
 
 
 def _save_extra_vars(gen_dir: Path, extra: dict) -> None:
-    _extra_path(gen_dir).write_text(json.dumps(extra, indent=2))
+    # 직접 truncate 는 쓰기 중 크래시 시 반쪽 JSON 을 남기고, 깨진 파일은
+    # load 가 {} 로 삼켜 다음 apply 가 발견값 전부를 잃는다 — tmp+rename.
+    import tempfile
+    fd, tmp = tempfile.mkstemp(dir=gen_dir, prefix=".extra-vars-",
+                               suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(json.dumps(extra, indent=2))
+        os.replace(tmp, _extra_path(gen_dir))
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
 
 
 def effective_extra_vars(cfg: GatewayConfig, gen_dir: Path) -> dict:
@@ -364,8 +394,17 @@ def apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, *, skip_push: bool
     ecs_render.render(cfg, gen_dir, extra_vars=existing)
 
     # teardown 후 7일 복구유예 중인 동명 시크릿은 create 에서 'scheduled for
-    # deletion' 으로 죽는다 — plan 이 중간에 실패하기 전에 안내한다
-    for sname in (f"/llm-gateway/{cfg.env}/app", f"/llm-gateway/{cfg.env}/db"):
+    # deletion' 으로 죽는다 — plan 이 중간에 실패하기 전에 안내한다.
+    # 시크릿명은 모듈의 `project` 변수를 따른다 — custom project 선언이면
+    # 고정 llm-gateway 접두 검사가 빈손이 되고, aurora 의 db/gateway-user 도
+    # 같은 유예로 죽는다.
+    try:
+        from .capture import _tfvars as _cap_tfvars
+        _proj = _cap_tfvars(repo_root / ENV_DIR).get("project") or "llm-gateway"
+    except Exception:
+        _proj = "llm-gateway"
+    for sname in (f"/{_proj}/{cfg.env}/app", f"/{_proj}/{cfg.env}/db",
+                  f"/{_proj}/{cfg.env}/db/gateway-user"):
         try:
             chk = subprocess.run(
                 ["aws", "secretsmanager", "describe-secret", "--secret-id",

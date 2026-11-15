@@ -64,8 +64,15 @@ ADVISOR = {"type": "advisor_20260301", "name": "advisor", "model": "claude-fable
 
 
 def post(base: str, key: str, body: dict, betas: str = BETAS) -> tuple[int, str]:
+    # http:// 는 Bearer 키를 평문으로 보내고, urllib 기본 오프너는 리다이렉트
+    # 시 Authorization 헤더를 다른 호스트에 그대로 전달한다 — https 로
+    # 제한하고 리다이렉트는 따르지 않는다(리다이렉트 응답은 오류로 표시).
+    url = base.rstrip("/")
+    if not url.startswith("https://") and not url.startswith(
+            ("http://localhost", "http://127.0.0.1", "http://[::1]")):
+        return -1, f"http:// URL 은 Bearer 키를 평문으로 노출합니다 — https:// 만 허용: {url}"
     req = urllib.request.Request(
-        base.rstrip("/") + "/v1/messages", data=json.dumps(body).encode(),
+        url + "/v1/messages", data=json.dumps(body).encode(),
         method="POST", headers={
             "content-type": "application/json",
             "anthropic-version": "2023-06-01",
@@ -73,16 +80,25 @@ def post(base: str, key: str, body: dict, betas: str = BETAS) -> tuple[int, str]
             "authorization": f"Bearer {key}",
             "user-agent": "claude-cli/2.1.289 (external, sdk-cli)",
             "x-app": "cli"})
+    opener = urllib.request.build_opener(_NoRedirect())
     try:
-        with urllib.request.urlopen(req, timeout=180) as resp:
+        with opener.open(req, timeout=180) as resp:
             return resp.status, resp.read().decode()
     except urllib.error.HTTPError as e:
         return e.code, e.read().decode(errors="replace")
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as e:
+        return -1, f"{type(e).__name__}: {e}"
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
 
 
 def sse_events(text: str) -> list[tuple[str, dict]]:
     out = []
-    for block in text.split("\n\n"):
+    # CRLF 서버도 있다 — \r\n\r\n 경계를 놓치면 이벤트가 하나로 합쳐진다.
+    for block in text.replace("\r\n", "\n").split("\n\n"):
         event, data = None, None
         for line in block.splitlines():
             if line.startswith("event:"):
@@ -101,7 +117,9 @@ def verdict_for(results, tool_id: str) -> str | None:
     """safeguard_results 에서 tool_id 의 판정(outcome)을 꺼낸다. 없으면 None."""
     for r in results or []:
         if isinstance(r, dict) and r.get("type") == "dangerous_tool_use":
-            v = ((r.get("status") or {}).get("tool_uses") or {}).get(tool_id)
+            st = r.get("status")
+            v = (((st if isinstance(st, dict) else {}).get("tool_uses") or {})
+                 .get(tool_id))
             if isinstance(v, dict):
                 return v.get("outcome") or v.get("type")
     return None
@@ -137,11 +155,16 @@ def check_verdict(base, key, model, stream: bool):
                 return "FAIL", f"스트림 오류: {json.dumps(err[0])[:160]}"
             ids = [d["content_block"]["id"] for e, d in evs
                    if e == "content_block_start"
-                   and d.get("content_block", {}).get("type") == "tool_use"]
+                   and isinstance(d.get("content_block"), dict)
+                   and d["content_block"].get("type") == "tool_use"
+                   and "id" in d["content_block"]]
             deltas = [d.get("delta") or {} for e, d in evs if e == "message_delta"]
             results = deltas[-1].get("safeguard_results") if deltas else None
         else:
-            msg = json.loads(text)
+            try:
+                msg = json.loads(text)
+            except ValueError:
+                return "FAIL", f"비-JSON 200 본문 (프록시 응답?): {text[:120]!r}"
             ids = [b["id"] for b in msg.get("content", [])
                    if b.get("type") == "tool_use"]
             results = msg.get("safeguard_results")
