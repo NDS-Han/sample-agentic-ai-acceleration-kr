@@ -156,10 +156,14 @@ def wait_services(cfg: GatewayConfig, outputs: dict) -> None:
               file=sys.stderr)
         return
     print("서비스 안정화 대기 중...", file=sys.stderr)
-    r = subprocess.run(["aws", "ecs", "wait", "services-stable", "--cluster",
-                        cluster, "--services", *names,
-                        "--region", cfg.aws.region],
-                       capture_output=True, text=True, timeout=900)
+    try:
+        r = subprocess.run(["aws", "ecs", "wait", "services-stable", "--cluster",
+                            cluster, "--services", *names,
+                            "--region", cfg.aws.region],
+                           capture_output=True, text=True, timeout=900)
+    except subprocess.TimeoutExpired:
+        r = subprocess.CompletedProcess([], returncode=255, stdout="",
+                                        stderr="waiter timeout")
     if r.returncode != 0:
         # 타임아웃이 곧 실패는 아니다 — 느린 롤아웃이 뒤에서 완료될 수 있어
         # 아래 describe 로 실제 상태를 확인하고 판정한다
@@ -176,7 +180,7 @@ def wait_services(cfg: GatewayConfig, outputs: dict) -> None:
               f"{d.stderr.strip()[:150]}", file=sys.stderr)
         return
     try:
-        svcs = json.loads(d.stdout).get("services", [])
+        svcs = json.loads(d.stdout or "{}").get("services", [])
     except json.JSONDecodeError:
         svcs = []
     failed = [s.get("serviceName") for s in svcs

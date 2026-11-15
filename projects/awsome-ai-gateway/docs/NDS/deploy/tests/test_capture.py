@@ -368,7 +368,9 @@ def test_configure_preserves_unprompted_fields(tmp_path, monkeypatch):
     assert doc["features"]["dev_login"] is True
     # infra.* 는 wizard 가 통째로 덮어쓰면 bootstrap 기록(azs 등)이 소실된다
     assert doc["infra"]["azs"] == ["ap-south-1a", "ap-south-1b"]
-    assert doc["infra"]["db"] == {"max_acu": 8}
+    # infra.db 는 ecs 전용 — eks yaml 에 섞여 있으면 스키마 하드에러라
+    # 유지 시 저장 불가 doc 이 된다. wizard 가 걸러낸다.
+    assert "db" not in doc["infra"]
     # aws.allowed_roles — 비면 admin-api 로그인 전량 403(fail-closed) 이라
     # configure 가 버리면 다음 apply 가 잠금 상태를 만든다 (19차 회귀)
     assert doc["aws"]["allowed_roles"] == ["TeamDevRole"]

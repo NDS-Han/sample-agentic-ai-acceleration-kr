@@ -1526,7 +1526,9 @@ def _declared_environment(env_dir: Path) -> str:
     선언을 취한다. -var-file 전용 파일(prod.tfvars.json 등)은 자동로드가
     아니므로 제외. TF_VAR_environment 는 디렉토리에 영속되지 않아 보지 않는다."""
     from .render.common import tfvars_clean
-    pat = re.compile(r'(?m)^\s*environment\s*=\s*"([^"]+)"')
+    # 숫자/tfvars 문자열변환 값(environment = 5)도 terraform 은 수용한다 —
+    # 인용 없는 값도 '선언됨'으로 봐야 과잉 통과가 아니라 과잉 차단이 된다
+    pat = re.compile(r'(?m)^\s*environment\s*=\s*"?([^"\s]+)"?\s*$')
     found = ""
 
     def _hcl(p: Path) -> None:

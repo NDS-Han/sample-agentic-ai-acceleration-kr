@@ -157,22 +157,24 @@ def _collect_doc(existing: dict | None = None) -> dict:
         console.print("[dim]compose 형태는 최저 티어(t0)로만 배포 가능합니다 — "
                       "테스트·평가용 단일 호스트입니다.[/dim]")
 
+    same_target = target == _g(ex, "deploy", "target")
     tier_choices = [
         Choice(f"{t.name}: {t.label}  [{t.users}, {t.monthly_cost_usd}]", t.name)
         for t in tiers.TIERS.values() if t.backend == target
     ]
     prev_tier = _g(ex, "deploy", "size_tier")
     tier_vals = {c.value for c in tier_choices}
-    if prev_tier and prev_tier not in tier_vals:
+    if same_target and prev_tier and prev_tier not in tier_vals:
         # 스키마가 허용하는 기존 선언(t2 eks 등)이 tier 목록엔 없을 수 있다 —
-        # 선택지에 넣어 두면 default 로 살고, 빼면 첫 선택지로 덮어씌워진다
+        # 선택지에 넣어 두면 default 로 살고, 빼면 첫 선택지로 덮어씌워진다.
+        # target 전환이면 이전 tier 는 신 target 에 무효 — 기본값으로 쓰면
+        # 스키마가 거부해 wizard 전체가 저장 불가가 된다.
         tier_choices.insert(0, Choice(
             f"{prev_tier}: (기존 선언 — 목록에 없는 값, 유지)", prev_tier))
         tier_vals.add(prev_tier)
     size_tier = _unwrap(questionary.select(
         "규모 티어", choices=tier_choices,
         default=prev_tier if prev_tier in tier_vals else tier_choices[0].value).ask())
-    same_target = target == _g(ex, "deploy", "target")
 
     domain_choices = [
         Choice("none — 도메인 없이 시작 (HTTP, Cowork 불가)", "none"),
@@ -326,8 +328,11 @@ def _collect_doc(existing: dict | None = None) -> dict:
             images["tags"] = prev_img["tags"]
     elif _gd(ex, "images"):
         # compose 도 images.registry/tag 의 prebuilt 핀을 지원한다 — 질문은
-        # 안 하지만 선언된 값을 통째로 버리면 다음 render 가 소스빌드로 바뀐다
-        images = _gd(ex, "images")
+        # 안 하지만 선언된 값을 통째로 버리면 다음 render 가 소스빌드로 바뀐다.
+        # images.tags(서비스별 맵)은 eks 전용 — 통째 복사하면 스키마 거부로
+        # wizard 저장이 불가해지므로 compose 유효 키만 가져온다.
+        images = {k: v for k, v in _gd(ex, "images").items()
+                  if k in ("registry", "tag")}
 
     deploy_extra = {}
     if target in ("ecs", "eks"):
@@ -373,7 +378,10 @@ def _collect_doc(existing: dict | None = None) -> dict:
     # infra.* 는 블록 통째 보존이 원칙 (bootstrap wizard 가 기록한 azs/cognito/
     # bedrock 등). ecs 경로에만 DB/캐시 크기 고급 분기를 연다 — 나머지 target
     # 에서는 기존 선언을 그대로 둔다(schema 가 ecs 전용을 강제).
-    infra_doc = _gd(ex, "infra")
+    # infra.db/infra.cache 는 ecs 전용 — ecs→eks/compose 전환에서 통째 복사하면
+    # 스키마 하드에러로 wizard 저장이 불가해진다.
+    infra_doc = {k: v for k, v in _gd(ex, "infra").items()
+                 if target == "ecs" or k not in ("db", "cache")}
     if target == "ecs":
         prev_db = infra_doc.get("db") or {}
         prev_cache = infra_doc.get("cache") or {}
@@ -1138,6 +1146,36 @@ def _teardown_eks(cfg: schema.GatewayConfig, args) -> int:
     if not _confirm_destroy(confirm_name, args):
         return 130
 
+    # outputs 유래 이름으로 out-of-band 리소스를 지우므로 env_dir 의 state 가
+    # 이 env 의 것인지 먼저 검증한다 — 외부 state 의 chat_agent_name/admin_arn
+    # 을 읽으면 남의 Runtime/role 정책을 지운다 (apply 의
+    # _check_env_dir_declared 와 같은 보호, teardown 의 비-infra 경로에도 필요).
+    outs: dict = {}
+    if env_dir:
+        declared = eks_apply._declared_environment(env_dir)
+        if declared and declared != cfg.env:
+            console.print(f"[yellow]⚠ {env_dir} 의 environment 선언({declared})이 "
+                          f"env({cfg.env})와 다릅니다 — output 유래 이름은 도출값으로 대체")
+        else:
+            ini = eks_apply._tf_init(cfg, env_dir)
+            if ini.returncode == 0:
+                outs = eks_apply.tf_outputs(env_dir)
+            else:
+                console.print("[yellow]⚠ terraform init 실패 — output 유래 "
+                              "이름은 도출값으로 대체합니다")
+    # teardown 는 update_kubeconfig 가 context 를 재지정하지 않는다 — helm 이
+    # '그대로' 쓰는 context 가 backend 클러스터인지 먼저 확인한다. 같은 이름의
+    # release 를 가진 남의 클러스터를 uninstall 하지 않게 (current-context 도
+    # 검사 — teardown 에는 re-point 경로가 없으므로 빈 --context 도 위험하다).
+    ctx_cluster = eks_apply._kube_context_cluster(context)
+    tf_cluster = str(outs.get("cluster_name") or "")
+    if ctx_cluster and tf_cluster and ctx_cluster != tf_cluster:
+        console.print(f"[red]kube context '{context or '(current-context)'}' 는 "
+                      f"클러스터 '{ctx_cluster}' 를 가리키는데 terraform backend "
+                      f"의 클러스터는 '{tf_cluster}' 입니다 — 다른 클러스터의 "
+                      "release 를 내리는 것을 막기 위해 중단합니다")
+        return 1
+
     ctx_args = ["--kube-context", context] if context else []
     r = eks_apply._run_quiet(
         ["helm", "status", meta["release"], "-n", meta["namespace"], *ctx_args],
@@ -1176,23 +1214,6 @@ def _teardown_eks(cfg: schema.GatewayConfig, args) -> int:
         # helm/terraform 관리 밖의 프로비저닝 리소스 — 멱등 teardown
         from . import websearch
         websearch.teardown(cfg.env, REPO_ROOT)
-    # outputs 유래 이름으로 out-of-band 리소스를 지우므로 env_dir 의 state 가
-    # 이 env 의 것인지 먼저 검증한다 — 외부 state 의 chat_agent_name/admin_arn
-    # 을 읽으면 남의 Runtime/role 정책을 지운다 (apply 의
-    # _check_env_dir_declared 와 같은 보호, teardown 의 비-infra 경로에도 필요).
-    outs: dict = {}
-    if env_dir:
-        declared = eks_apply._declared_environment(env_dir)
-        if declared and declared != cfg.env:
-            console.print(f"[yellow]⚠ {env_dir} 의 environment 선언({declared})이 "
-                          f"env({cfg.env})와 다릅니다 — output 유래 이름은 도출값으로 대체")
-        else:
-            ini = eks_apply._tf_init(cfg, env_dir)
-            if ini.returncode == 0:
-                outs = eks_apply.tf_outputs(env_dir)
-            else:
-                console.print("[yellow]⚠ terraform init 실패 — output 유래 "
-                              "이름은 도출값으로 대체합니다")
     if cfg.features.bi_insight:
         # 프로비저너 소유 Runtime — helm/terraform 관리 밖, 멱등 teardown.
         # env destroy 전이라 outputs 가 읽힌다 — 사람이 project 변수를 바꾼
@@ -1429,6 +1450,9 @@ def cmd_bootstrap(args) -> int:
     outs = bootstrap.env_apply(env_target, out, backend)
     # 새 클러스터를 kubeconfig 에 등록 — 없으면 helm 이 컨텍스트 부재로
     # 실패하거나 다른 클러스터에 배포된다
+    # --context 가 backend 와 다른 클러스터로 해석되면 update-kubeconfig 의
+    # --alias 가 그 context 를 덮어써 hijack — apply 의 동명 검사보다 먼저 막는다
+    eks_apply._check_context_cluster(outs, context, hard=True)
     bootstrap.update_kubeconfig(outs, cfg.aws.region, context)
     for n in bootstrap.seed_secrets(cfg, REPO_ROOT, outs):
         console.print(f"  ⓘ {n}")

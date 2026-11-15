@@ -1574,3 +1574,68 @@ def test_declared_environment_skips_varfile_only_json(tmp_path):
     # auto.tfvars.json 은 자동로드 — 스캔 대상
     (tmp_path / "x.auto.tfvars.json").write_text('{"environment": "auto"}')
     assert eks_apply._declared_environment(tmp_path) == "auto"
+
+
+def test_teardown_checks_context_before_helm(monkeypatch):
+    """23차 — teardown 은 helm status/uninstall 전에 kube context 가 backend
+    클러스터인지 대조한다. mismatch 면 같은 이름의 release 를 가진 남의
+    클러스터를 내리지 않게 helm 호출 자체가 없어야 한다."""
+    from deploy import cli
+    called = []
+    monkeypatch.setattr(eks_apply, "load_meta",
+                        lambda *a, **k: {"release": "gw", "namespace": "gw",
+                                         "env_dir": "tf/envs/eks/dev",
+                                         "env": "dev"})
+    monkeypatch.setattr(eks_apply, "_declared_environment", lambda d: "")
+    monkeypatch.setattr(eks_apply, "_tf_init",
+                        lambda *a, **k: types.SimpleNamespace(returncode=0))
+    monkeypatch.setattr(eks_apply, "tf_outputs",
+                        lambda d: {"cluster_name": "real-cluster"})
+    monkeypatch.setattr(eks_apply, "_kube_context_cluster", lambda c: "other-cluster")
+    monkeypatch.setattr(eks_apply, "_run_quiet",
+                        lambda argv, **k: (called.append(argv),
+                                           types.SimpleNamespace(returncode=0))[1])
+    from deploy import schema
+    cfg = schema.from_dict({"version": 1, "env": "dev",
+                            "aws": {"region": "us-east-1"},
+                            "deploy": {"target": "eks", "size_tier": "t3"},
+                            "images": {"tag": "v1"}})
+    args = types.SimpleNamespace(context="victim-ctx", infra=False, yes=True)
+    rc = cli._teardown_eks(cfg, args)
+    assert rc == 1
+    assert not any(argv and argv[0] == "helm" for argv in called)
+
+
+def test_bootstrap_checks_context_before_alias(monkeypatch, tmp_path):
+    """23차 — bootstrap 은 update-kubeconfig --alias 가 기존 context 를
+    덮어쓰기 전에 _check_context_cluster 로 대조한다. 불일치면 update_kubeconfig
+    에 도달하면 안 된다."""
+    from deploy import cli, bootstrap
+    from deploy.render import eks as eks_render
+    from deploy import schema
+    cfg_path = tmp_path / "gateway.yaml"
+    cfg_path.write_text("env: dev\n")
+    cfg = schema.from_dict({"version": 1, "env": "dev",
+                            "aws": {"region": "us-east-1"},
+                            "deploy": {"target": "eks", "size_tier": "t3"},
+                            "images": {"tag": "v1"}})
+    monkeypatch.setattr(cli, "_load_config", lambda a: cfg)
+    monkeypatch.setattr(schema, "load", lambda p: cfg)
+    monkeypatch.setattr(bootstrap, "scaffold_eks_env", lambda *a, **k: "envdir")
+    monkeypatch.setattr(eks_render, "render", lambda *a, **k: {"notes": []})
+    monkeypatch.setattr(cli, "_confirm_apply", lambda a: True)
+    monkeypatch.setattr(bootstrap, "ensure_tfstate", lambda *a, **k: ("b", "t"))
+    monkeypatch.setattr(bootstrap, "env_apply",
+                        lambda *a, **k: {"cluster_name": "real-cluster"})
+
+    def boom(outs, context, hard=False):
+        raise SystemExit("context points at other cluster")
+    monkeypatch.setattr(eks_apply, "_check_context_cluster", boom)
+    aliased = []
+    monkeypatch.setattr(bootstrap, "update_kubeconfig",
+                        lambda *a, **k: aliased.append(a))
+    args = types.SimpleNamespace(config=str(cfg_path), context="victim-ctx",
+                                 yes=True, plan=False)
+    with pytest.raises(SystemExit, match="other cluster"):
+        cli.cmd_bootstrap(args)
+    assert aliased == []
