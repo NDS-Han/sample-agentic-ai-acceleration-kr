@@ -38,6 +38,8 @@ import os
 import sys
 import unicodedata
 import urllib.error
+import urllib.error
+import urllib.parse
 import urllib.request
 
 BETAS = ("claude-code-20250219,interleaved-thinking-2025-05-14,"
@@ -68,8 +70,11 @@ def post(base: str, key: str, body: dict, betas: str = BETAS) -> tuple[int, str]
     # 시 Authorization 헤더를 다른 호스트에 그대로 전달한다 — https 로
     # 제한하고 리다이렉트는 따르지 않는다(리다이렉트 응답은 오류로 표시).
     url = base.rstrip("/")
-    if not url.startswith("https://") and not url.startswith(
-            ("http://localhost", "http://127.0.0.1", "http://[::1]")):
+    # 접두사 매칭은 localhost.evil.com / localhost@evil.com 을 통과시킨다 —
+    # 호스트 컴포넌트를 파싱해서 비교한다.
+    _u = urllib.parse.urlparse(url)
+    _local = _u.hostname in ("localhost", "127.0.0.1", "::1")
+    if _u.scheme != "https" and not (_u.scheme == "http" and _local):
         return -1, f"http:// URL 은 Bearer 키를 평문으로 노출합니다 — https:// 만 허용: {url}"
     req = urllib.request.Request(
         url + "/v1/messages", data=json.dumps(body).encode(),

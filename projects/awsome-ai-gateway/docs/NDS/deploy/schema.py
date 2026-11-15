@@ -921,6 +921,25 @@ def _str_items(v: Any, path: str, errors: list[str],
     return out
 
 
+_DOCKER_TAG_RE = re.compile(r"^[\w][\w.-]{0,127}$")
+
+
+def _image_tags(v: Any, errors: list[str]) -> dict[str, str]:
+    """images.tags — 서비스→태그 매핑. str(v) 코어션은 ~ → "None",
+    false → "False", dict → "{'x':1}" 같은 가짜 태그를 만든다 —
+    docker 태그 형식으로 검증해 잘못된 값은 거부한다."""
+    raw = _require_mapping(v, "images.tags", errors)
+    out: dict[str, str] = {}
+    for k, val in raw.items():
+        ks = _opt_str(k)
+        if not isinstance(val, str) or not _DOCKER_TAG_RE.fullmatch(val):
+            errors.append(
+                f"images.tags.{ks} 는 docker 태그 문자열이어야 합니다: {val!r}")
+            continue
+        out[ks] = val
+    return out
+
+
 _TOP_LEVEL_KEYS = frozenset((
     "version", "env", "aws", "deploy", "network", "domain",
     "features", "images", "clients", "oidc", "infra",
@@ -1088,8 +1107,7 @@ def from_dict(raw: dict) -> GatewayConfig:
         images=ImagesConfig(
             registry=_opt_str(images.get("registry"), ""),
             tag=_opt_str(images.get("tag"), ""),
-            tags={str(k): str(v) for k, v in
-                  _require_mapping(images.get("tags"), "images.tags", errors).items()},
+            tags=_image_tags(images.get("tags"), errors),
         ),
         clients=ClientsConfig(
             models_profile=_opt_str(clients.get("models_profile"), "global"),

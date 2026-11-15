@@ -874,6 +874,18 @@ def cmd_apply(args) -> int:
                     f"`helm uninstall {old_rel} -n {old_ns}` 로 정리하고 "
                     "재시도하세요")
                 return 1
+            # rc!=0 은 '없음' 만 의미해야 한다 — context 단절/helm 부재/권한
+            # 오류까지 '없음'으로 보면 apply 가 진행돼 두 release 가 같은
+            # DB/Redis 를 공유하는 병행 설치가 된다. teardown 과 같은 계약으로
+            # not-found 외 오류는 중단한다.
+            _hs_out = ((hs.stdout or "") + (hs.stderr or "")).lower()
+            if "not found" not in _hs_out and "release: not found" not in _hs_out:
+                console.print(
+                    f"[red]이전 release '{old_rel}' 상태를 확인할 수 없습니다 "
+                    f"({(hs.stderr or hs.stdout or '').strip()[:200]}) — "
+                    "kube context/helm 설치를 확인하고 재시도하세요. "
+                    "확인 없이 apply 하면 구 release 고아화 위험이 있습니다")
+                return 1
             console.print(f"ⓘ release 명칭이 {old_rel} → {cfg.deploy.release} "
                           "로 바뀝니다 — 이전 release 는 클러스터에 없어 "
                           "고아화 위험은 없습니다")

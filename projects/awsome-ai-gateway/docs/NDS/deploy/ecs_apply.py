@@ -435,7 +435,12 @@ def apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, *, skip_push: bool
         # 의 init 이후에 읽는다 — init 전 stale .terraform 캐시가 다른 env 의
         # chat_agent_name 을 돌려줘 남의 Runtime 을 지울 수 있다.
         module_alive = bool(partial.get("chat_agent_name"))
-        if bi_popped or module_alive:
+        # ecs env dir 는 사람 소유 채널 — 사람이 enable_chat_agent=true 를
+        # tfvars 에 선언해 둔 경우 module_alive 가 영구 참이 돼 매 apply 가
+        # 그 Runtime 을 삭제/재생하는 루프가 된다(eks 와 같은 가드).
+        from .eks_apply import _human_declared_chat_agent
+        if (bi_popped or module_alive) and not _human_declared_chat_agent(
+                repo_root / ENV_DIR):
             from . import chatagent
             chatagent.teardown(
                 repo_root, cfg.env, region=cfg.aws.region,

@@ -839,3 +839,20 @@ def test_azs_over_54_rejected():
                              for i in range(60)]}}
     with pytest.raises(schema.SchemaError):
         schema.from_dict(doc)
+
+
+def test_image_tags_reject_none_and_dict_coercion():
+    """images.tags 의 YAML null/dict 가 str() 코어션으로 'None'/"{'x':1}"
+    태그가 되면 ImagePullBackOff — 형식 검증으로 거부한다."""
+    with pytest.raises(schema.SchemaError, match="images.tags"):
+        schema.from_dict(minimal(
+            deploy={"target": "eks", "size_tier": "t3"},
+            images={"tags": {"gatewayProxy": None}}))
+    with pytest.raises(schema.SchemaError, match="images.tags"):
+        schema.from_dict(minimal(
+            deploy={"target": "eks", "size_tier": "t3"},
+            images={"tags": {"gatewayProxy": {"x": 1}}}))
+    with pytest.raises(schema.SchemaError, match="images.tags"):
+        schema.from_dict(minimal(
+            deploy={"target": "eks", "size_tier": "t3"},
+            images={"tags": {"gatewayProxy": "bad tag,with"}}))

@@ -687,12 +687,28 @@ def ensure_domain_records(cfg: GatewayConfig, meta: dict, context: str = "") -> 
             # 우리 ALB 가 아니어도 타깃 ALB 자체가 없으면(구 배포의 죽은
             # ALB) 레코드는 죽은 참조 — 삭제해도 안전하다. 살아 있는 외부
             # ALB 를 가리키는 레코드는 건드리지 않는다.
+            # ALB DNS 는 name.<region>.elb.amazonaws.com — alias 타깃은 리전
+            # 무관하므로 타깃이 속한 리전에서 조회해야 한다. 같은 리전만
+            # 보고 '죽은 ALB' 로 판정하면 다른 리전의 살아있는 외부 ALB
+            # 레코드를 지우게 된다.
+            _rm = re.search(
+                r"\.([a-z]{2}(?:-gov)?-[a-z-]+-\d)\.elb\.amazonaws\.com$",
+                tgt_dns)
+            if not _rm:
+                print(f"⚠ route53: {derived} 의 alias target({tgt_dns})에서 "
+                      "리전을 파싱할 수 없습니다 — 외부 ALB 일 수 있어 "
+                      "삭제하지 않습니다", file=sys.stderr)
+                continue
             x = _run_quiet(
                 ["aws", "elbv2", "describe-load-balancers",
-                 "--region", cfg.aws.region,
+                 "--region", _rm.group(1),
                  "--query", f"LoadBalancers[?DNSName=='{tgt_dns}']"
                             " | length(@)",
                  "--output", "text"], timeout=30)
+            if x.returncode != 0:
+                print(f"⚠ route53: {derived} 의 alias target ALB 조회 실패 — "
+                      "외부 ALB 일 수 있어 삭제하지 않습니다", file=sys.stderr)
+                continue
             if (x.stdout or "").strip() != "0":
                 print(f"⚠ route53: {derived} 의 alias target({tgt_dns})이 "
                       "살아 있는 외부 ALB 입니다 — 다른 배포 소유일 수 있어 "

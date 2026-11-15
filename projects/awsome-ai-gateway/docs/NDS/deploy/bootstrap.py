@@ -1116,7 +1116,10 @@ def persist_bootstrap_answers(config_path: Path, answers: dict) -> bool:
     # 0600 으로 연다(write_env_file 과 같은 패턴).
     tmp = config_path.with_name(config_path.name + ".tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as f:
+    # O_CREAT mode 는 신규 생성에만 적용 — 이전 실행의 잔여 tmp(umask 0644)가
+    # 남아 있으면 그 권한을 물려받는다. 무조건 fchmod 한다.
+    os.fchmod(fd, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
         f.write(
             "# gateway.yaml — 이 배포의 source of truth.\n"
             "# infra.* 는 deploy bootstrap wizard 가 기록한 신규 설치 입력.\n"
