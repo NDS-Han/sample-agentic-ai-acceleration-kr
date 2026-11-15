@@ -220,6 +220,15 @@ def _cached_fragment(cache_path: Path, url: str, note) -> dict:
 
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """리다이렉트를 따르지 않는다 — 30x 로 다른 호스트가 응답하면 urllib 이
+    Authorization: Bearer <VK> 헤더를 그대로 재전송해 VK 가 새어나간다.
+    정상 배포에서 /v1/policy 는 게이트웨이 자체가 200 을 돌려야 한다."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 def http_fetch(url: str, vk: str, timeout: float) -> dict:
     """GET the policy with the VK. Non-200 and network errors raise OSError."""
     request = urllib.request.Request(
@@ -231,7 +240,8 @@ def http_fetch(url: str, vk: str, timeout: float) -> dict:
         },
     )
     # The URL comes from the admin-only baseline (env.ANTHROPIC_BASE_URL), not from user input.
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    opener = urllib.request.build_opener(_NoRedirect)
+    with opener.open(request, timeout=timeout) as response:
         return json.loads(response.read().decode("utf-8"))
 
 

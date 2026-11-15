@@ -36,6 +36,12 @@ import urllib.request
 BASE_URL = os.environ.get("LITELLM_BASE_URL", "https://api.litellm.ai").rstrip("/")
 PROVIDER_FILTER = os.environ.get("LITELLM_PROVIDER_FILTER", "bedrock_converse")
 COST_MAP_URL = os.environ.get("LITELLM_COST_MAP_URL", "").strip()
+# 환경변수 실수로 http:// 를 넣으면 카탈로그가 평문/변조 가능 채널로 오고,
+# file:// 같은 비-http 스킴은 urlopen 이 그대로 연다 — https 만 허용.
+for _name, _url in (("LITELLM_BASE_URL", BASE_URL),
+                    ("LITELLM_COST_MAP_URL", COST_MAP_URL)):
+    if _url and not _url.startswith("https://"):
+        raise RuntimeError(f"{_name} must be an https:// URL")
 try:
     PAGE_SIZE = int(os.environ.get("LITELLM_PAGE_SIZE", "100"))
     if not (1 <= PAGE_SIZE <= 1000):
