@@ -243,6 +243,9 @@ def _collect_doc(existing: dict | None = None) -> dict:
     if domain_mode == "route53-acm":
         domain_name = _unwrap(questionary.text(
             "베이스 도메인 (예: example.com → gateway./admin./admin-api. 자동)",
+            # route53-acm 은 domain.name 필수 — 빈값이면 저장 시 SchemaError 로
+            # 답변 전체가 날아간다(env 이름과 같은 즉시검증).
+            validate=lambda t: bool(t.strip()) or "route53-acm 은 도메인이 필수입니다",
             default=str(_g(ex, "domain", "name"))).ask())
         # eks 도 zone_id 가 있어야 ACM 검증 CNAME/호스트 레코드 자동화가 돈다 —
         # ecs 전용으로 물으면 eks 경로는 기존 zone_id 가 "" 로 덮여 DNS 자동화가 죽는다

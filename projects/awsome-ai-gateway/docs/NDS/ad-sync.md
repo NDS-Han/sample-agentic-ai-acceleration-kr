@@ -190,11 +190,11 @@ admin-ui 로그인 콜백은 토큰 검증 후 `POST /v1/auth/provision`으로
 Virtual Key를 발급하지 않으므로 웹 로그인으로 CLI 키가 교체되지 않습니다.
 사용자는 팀 매핑용 그룹과 필요한 관리자 그룹에 가입되어 있어야 합니다.
 
-| 경로 | 사용자 등록 | 키 발급 |
-|---|---|---|
-| `POST /admin/users/sync-cognito` | 풀 그룹 순회 **+ 전체 유저 목록** — 각 유저의 `OIDC_GROUPS_CLAIM` **속성**(custom:groups)도 읽어 팀·역할에 반영 | 없음 |
-| `POST /v1/auth/provision` | 검증된 토큰의 그룹 기반(JIT — 웹 로그인 콜백이 자동 호출) | 없음 |
-| `POST /v1/auth/exchange` | 검증된 토큰의 그룹 기반 | 있음(VK) |
+| 경로 | 사용자 등록 | 키 발급 | SAML 사용자 커버 |
+|---|---|---|---|
+| `POST /admin/users/sync-cognito` | 풀 그룹 순회 **+ 전체 유저 목록** — 각 유저의 `OIDC_GROUPS_CLAIM` **속성**(custom:groups)도 읽어 팀·역할에 반영 | 없음 | ✅ (`groups_claim: custom:groups` 설정 시) |
+| `POST /v1/auth/provision` | 검증된 토큰의 그룹 기반(JIT — 웹 로그인 콜백이 자동 호출) | 없음 | ✅ (토큰의 그룹 클레임) |
+| `POST /v1/auth/exchange` | 검증된 토큰의 그룹 기반 | 있음(VK) | ✅ |
 
 두 경로는 역할이 다릅니다 — **sync = 배치/정합성**(전체 열거·attr_groups
 병합·stale 정리), **provision = JIT**(첫 로그인 자가 등록 — sync 실행을
