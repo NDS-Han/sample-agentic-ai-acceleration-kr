@@ -1,6 +1,7 @@
-# NDS 배포 도구 — 기능별 심층 리뷰 레포트
+# NDS 배포 도구 + 애플리케이션 — 기능별 심층 리뷰 레포트
 
-`docs/NDS/deploy/` (NDS deploy 도구, ~11k LOC)에 대해 진행한 29라운드의
+`docs/NDS/deploy/` (NDS deploy 도구, ~11k LOC)에 대해 진행한 29라운드와
+애플리케이션 컴포넌트(admin-api/gateway-proxy/워커/클라이언트) 최종 리뷰의
 독립 적대 리뷰 결과를 기능 영역별로 정리한 레포트 모음이다.
 
 ## 리뷰 방법론
@@ -49,6 +50,10 @@
 | [features.md](features.md) | 기능 플래그 + boto3 프로비저너(web_search/bi_insight/pricing_lambda) | 수렴 |
 | [sizing-capacity.md](sizing-capacity.md) | size_tier/capacity_tier/sizing·DB/Redis 예산 | 수렴 |
 | [ecs-compose.md](ecs-compose.md) | ECS(배포 보류)·compose 로컬 경로 | 조건부 수렴 |
+| [admin-api.md](admin-api.md) | 관리 API — 인증/인가·VK 라이프사이클·예산·STS 로그인 | 수렴(HIGH 1·MED 1 수정) |
+| [gateway-proxy.md](gateway-proxy.md) | 게이트웨이 프록시 — VK/JWT·인가·레이트리밋·예산·회계 | 조건부 수렴(MED 1·LOW 1 수정, MED 1 문서화) |
+| [workers.md](workers.md) | cost-recorder·notification·pricing-lambda·policy-helper | 수렴(MED 3 등 7건 수정) |
+| [clients-agents.md](clients-agents.md) | gateway-cli·installer·cowork-installer·admin-chat-agent·query_db | 조건부 수렴(MED 1·LOW 3 수정) |
 
 \* 캡처는 라이브 AWS/K8s 에서만 최종 검증 가능 — 코드 경로는 수렴.
 

@@ -510,7 +510,7 @@ async def enforce_rate_limits(
         # 여기서 최악비용을 원자적으로 선예약하고, finalize 의 settle 이 실비로
         # 정산한다(실패/거절 경로는 release_reservations 가 환불).
         from app.periods import request_period
-        from app.services.budget_service import BudgetService
+        from app.services.budget_service import BudgetBackendUnavailableError, BudgetService
 
         # 예약 추정의 출력 상한은 별도 클램프 — 클라이언트 max_tokens 가 매우 크면
         # 비싼 모델에서 worst-case 선예약이 소액 예산을 통째로 잠가 호출이 막힌다.
@@ -559,7 +559,11 @@ async def enforce_rate_limits(
                     logger.warning("cost_unwind_on_budget_reject_failed")
             await svc.undo_rpm(redis, descriptors, request_id, committed_keys=rpm_result.committed_keys)
             _released["rpm"] = True
-            return _build_budget_429(str(exc), metrics)
+            # BudgetBackendUnavailableError 도 PermissionError 서브클래스라 여기에
+            # 잡힌다 — 인프라 장애를 'no_budget_assigned' 429 로 오보하면 BudgetMiddleware
+            # 의 503 계약과 어긋나고 클라이언트가 rate-limit 백오프로 잘못 재시도한다.
+            reason = "budget_backend_unavailable" if isinstance(exc, BudgetBackendUnavailableError) else str(exc)
+            return _build_budget_429(reason, metrics)
         except Exception:
             # 예약 경로 자체의 장애(스크립트 미로드·직렬화 오류 등)는 요청을 막지
             # 않는다 — 예약 없이 진행하면 기존 체크 전용 동작으로 회귀할 뿐이다.

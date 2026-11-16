@@ -191,9 +191,10 @@ def config_cmd(explain_flag: bool) -> None:
     # Best-effort collector base + identity, matching setup — never fail the view.
     otel_endpoint: str | None = None
     try:
-        host = urlparse(resolve_config().gateway_url.rstrip("/")).hostname
-        if host:
-            otel_endpoint = f"http://{host}:80"
+        p = urlparse(resolve_config().gateway_url.rstrip("/"))
+        if p.hostname:
+            scheme = "https" if p.scheme == "https" else "http"
+            otel_endpoint = f"{scheme}://{p.hostname}:{443 if scheme == 'https' else 80}"
     except Exception:  # noqa: BLE001 — a diagnostic view must not abort on config gaps
         pass
     try:

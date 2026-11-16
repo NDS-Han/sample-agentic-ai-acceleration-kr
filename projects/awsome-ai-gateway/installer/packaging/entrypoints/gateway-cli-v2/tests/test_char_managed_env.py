@@ -68,7 +68,8 @@ def test_full_managed_env_is_pinned() -> None:
         "OTEL_METRICS_INCLUDE_VERSION": "true",
         "OTEL_METRICS_INCLUDE_ENTRYPOINT": "true",
         "OTEL_RESOURCE_ATTRIBUTES": f"user.id={_USER}",
-        "OTEL_EXPORTER_OTLP_HEADERS": f"Authorization=Bearer {_TOKEN}",
+        # OTEL_EXPORTER_OTLP_HEADERS 는 더 이상 managed tier(0644)에 실리지
+        # 않는다 — bearer 토큰은 user settings.env 에만 기록한다.
     }
     # NO_PROXY is emitted last, but only when the site build baked a bypass list.
     # A bare build leaves NO_PROXY_VALUE blank ⇒ put() drops the empty CSV and the

@@ -1641,7 +1641,10 @@ class BudgetService:
             raise ValidationError(f"Invalid period format: {period}. Expected YYYY-MM")
 
         repo = BudgetRepository(session)
-        budget_scope = BudgetScope(scope.upper()) if scope else None
+        try:
+            budget_scope = BudgetScope(scope.upper()) if scope else None
+        except ValueError:
+            raise ValidationError(f"Invalid scope: {scope}")
 
         # Active configs indexed by (scope, scope_id_str). Users/teams without an
         # active config are still listed (limit=0) so admins can set/re-set budgets

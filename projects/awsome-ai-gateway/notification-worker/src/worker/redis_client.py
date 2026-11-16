@@ -63,11 +63,19 @@ async def create_redis_client(settings: Settings) -> Redis:
     if settings.redis_tls_enabled:
         kwargs["ssl"] = True
 
-    probe = Redis.from_url(settings.redis_url)
+    # 감지용 probe 에도 TLS/timeout 을 준다 — ElastiCache TLS 엔드포인트에 평문
+    # probe 를 보내면 실패해 mode 가 조용히 "standalone" 으로 떨어진다.
+    probe = Redis.from_url(
+        settings.redis_url,
+        socket_connect_timeout=5,
+        socket_timeout=5,
+        **({"ssl": True} if settings.redis_tls_enabled else {}),
+    )
     try:
         info = await probe.info("server")
         mode = info.get("redis_mode", "standalone")
-    except Exception:
+    except Exception as e:
+        logger.warning("redis_mode_probe_failed", error=str(e))
         mode = "standalone"
     finally:
         await probe.aclose()

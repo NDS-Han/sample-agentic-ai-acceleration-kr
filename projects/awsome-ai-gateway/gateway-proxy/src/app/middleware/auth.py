@@ -13,7 +13,11 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from app.schemas.domain import AuthType
 from app.schemas.errors import anthropic_error
-from app.services.auth_service import AuthBackendUnavailableError, resolve_auth_strategy
+from app.services.auth_service import (
+    AuthBackendUnavailableError,
+    _is_jwt_token,
+    resolve_auth_strategy,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -127,7 +131,7 @@ class AuthMiddleware:
             # (R16: 다운스트림 ValueError 가 401 + forged auth_failure 로 기록됐다).
             if response_started or state.get("auth_context") is not None:
                 raise
-            await self._handle_auth_failure(scope, send, state, path, e)
+            await self._handle_auth_failure(scope, send, state, path, e, authorization)
 
         except (
             RedisError,
@@ -148,7 +152,8 @@ class AuthMiddleware:
             return
 
     async def _handle_auth_failure(
-        self, scope: Scope, send: Send, state: dict, path: str, e: Exception
+        self, scope: Scope, send: Send, state: dict, path: str, e: Exception,
+        authorization: str = "",
     ) -> None:
         """자격증명 거부 공통 경로 — security 이벤트 기록 + 401."""
         error_msg = str(e)
@@ -166,7 +171,10 @@ class AuthMiddleware:
             else:
                 peer = scope.get("client")
                 source_ip = peer[0] if peer else "unknown"
-            auth_type = AuthType.JWT if path.startswith("/v1/") else AuthType.VIRTUAL_KEY
+            # DUAL 경로(/v1/messages 등)는 대부분 VK 인데 경로만 보고 JWT 로 분류하면
+            # VK 브루트포스가 JWT 버킷에 쌓여 탐지가 왜곡된다 — 토큰 형태로 분류한다.
+            token = authorization.split(None, 1)[1] if " " in authorization else authorization
+            auth_type = AuthType.JWT if _is_jwt_token(token) else AuthType.VIRTUAL_KEY
             from app.services.streaming import _spawn
 
             # bare create_task 는 약한 참조라 태스크가 GC 되어 실패 기록이 유실될 수 있다.

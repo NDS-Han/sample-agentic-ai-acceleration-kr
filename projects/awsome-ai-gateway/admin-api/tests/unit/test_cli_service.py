@@ -459,3 +459,93 @@ class TestAwsAccountCheck:
 
             with pytest.raises(ForbiddenError, match="allowlist is empty"):
                 await cli_service.verify_sts_and_issue_key(mock_session, data=data)
+
+
+class TestSTSSchemeEnforcement:
+    """R-final HIGH: scheme 미검증 시 http://sts.* 가 allowlist 를 통과해
+    경로상 공격자가 위조 GetCallerIdentityResponse 를 심어 무인증 VK 발급."""
+
+    async def test_rejects_http_sts_url(self, cli_service: CLIService, mock_session: AsyncMock):
+        data = VirtualKeyIssueRequest(
+            sts_request=STSRequestPayload(
+                url="http://sts.ap-northeast-2.amazonaws.com/?Action=GetCallerIdentity",
+                headers={},
+            ),
+            device_name="test",
+        )
+        with patch("app.services.cli_service.get_settings") as mock_settings:
+            mock_settings.return_value.ALLOWED_STS_REGIONS = ["ap-northeast-2"]
+            with pytest.raises(STSVerificationError, match="https"):
+                await cli_service.verify_sts_and_issue_key(mock_session, data=data)
+
+    async def test_rejects_oversized_sts_response(self, cli_service: CLIService, mock_session: AsyncMock):
+        data = VirtualKeyIssueRequest(
+            sts_request=STSRequestPayload(
+                url="https://sts.ap-northeast-2.amazonaws.com/?Action=GetCallerIdentity",
+                headers={},
+            ),
+            device_name="test",
+        )
+        with patch("app.services.cli_service.get_settings") as mock_settings, \
+             patch("app.services.cli_service.httpx") as mock_httpx:
+            mock_settings.return_value.ALLOWED_STS_REGIONS = ["ap-northeast-2"]
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            mock_resp.content = b"x" * (256 * 1024 + 1)
+            mock_resp.text = "x"
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(return_value=mock_resp)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock()
+            mock_httpx.AsyncClient.return_value = mock_client
+            with pytest.raises(STSVerificationError, match="too large"):
+                await cli_service.verify_sts_and_issue_key(mock_session, data=data)
+
+
+class TestEmailSquatPrevention:
+    """R-final MED: 미검증 session_name 을 신뢰 컬럼 users.email 에 적재하면
+    공격자가 피해자 이메일로 스쿼팅해 verified-email rebind 시 행+VK 가
+    통째 이관된다 — ARN 해시 합성 주소로 차단."""
+
+    async def test_provisioned_email_is_synthetic_not_session_name(
+        self, cli_service: CLIService, mock_session: AsyncMock
+    ):
+        data = VirtualKeyIssueRequest(
+            sts_request=STSRequestPayload(
+                url="https://sts.amazonaws.com/?Action=GetCallerIdentity",
+                headers={},
+            ),
+            device_name="test",
+        )
+        # session_name 이 피해자 이메일 형태
+        sts_xml = """<GetCallerIdentityResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
+            <GetCallerIdentityResult>
+                <Arn>arn:aws:sts::123456789:assumed-role/AllowedRole/victim@corp.com</Arn>
+            </GetCallerIdentityResult>
+        </GetCallerIdentityResponse>"""
+        with patch("app.services.cli_service.get_settings") as mock_settings, \
+             patch("app.services.cli_service.httpx") as mock_httpx:
+            settings = mock_settings.return_value
+            settings.ALLOWED_STS_REGIONS = ["ap-northeast-2"]
+            settings.ALLOWED_IAM_ROLES = ["AllowedRole"]
+            settings.ALLOWED_AWS_ACCOUNTS = ["123456789"]
+            settings.DEFAULT_TEAM_ID = str(uuid.uuid4())
+            settings.DEFAULT_USER_BUDGET_USD = 0
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            mock_resp.content = sts_xml.encode()
+            mock_resp.text = sts_xml
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(return_value=mock_resp)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock()
+            mock_httpx.AsyncClient.return_value = mock_client
+            with patch("app.services.cli_service.UserRepository") as MockUserRepo, \
+                 patch("app.services.cli_service.BudgetRepository") as MockBudgetRepo:
+                MockUserRepo.return_value.get_by_sso_subject = AsyncMock(return_value=None)
+                MockUserRepo.return_value.create_user = AsyncMock(side_effect=lambda u: u)
+                MockBudgetRepo.return_value.get_first_active_config = AsyncMock(return_value=None)
+                await cli_service.verify_sts_and_issue_key(mock_session, data=data)
+        created = MockUserRepo.return_value.create_user.call_args.args[0]
+        assert created.email != "victim@corp.com"
+        assert created.email.startswith("sts-") and created.email.endswith("@unknown")

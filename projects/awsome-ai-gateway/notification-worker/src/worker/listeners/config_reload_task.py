@@ -51,6 +51,9 @@ class ConfigReloadTask:
                     logger.error("config_reload_failed", error=str(exc))
                     # 재시작 불필요 — 다음 메시지에서 재시도
         finally:
-            await pubsub.unsubscribe(self.CHANNEL)
+            try:
+                await pubsub.unsubscribe(self.CHANNEL)
+            except Exception:
+                pass
             await pubsub.aclose()
             logger.info("config_reload_task_unsubscribed")

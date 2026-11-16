@@ -24,8 +24,6 @@ import os
 from bedrock_agentcore.tools.code_interpreter_client import CodeInterpreter
 
 REGION = os.environ.get("AWS_REGION", "ap-northeast-2")
-# dev execution role. prod 는 해당 role ARN 으로 교체.
-DEFAULT_ROLE = "arn:aws:iam::123456789012:role/llm-gateway-dev-chat-agent-execution"
 NAME = "chat_agent_interp"  # [a-zA-Z][a-zA-Z0-9_]{0,47}
 
 
@@ -55,9 +53,13 @@ def delete(interp_id: str) -> None:
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--delete", metavar="ID", help="삭제할 interpreter id")
-    ap.add_argument("--role", default=DEFAULT_ROLE, help="execution role ARN")
+    # 기본값 없음 — 외부계정/무수정 role ARN 을 싣고 실행하는 사고를 막는다.
+    ap.add_argument("--role", required=False,
+                    help="execution role ARN (필수, --delete 시 불요)")
     args = ap.parse_args()
     if args.delete:
         delete(args.delete)
     else:
+        if not args.role:
+            ap.error("--role 이 필요합니다 (예: --role arn:aws:iam::<acct>:role/llm-gateway-<env>-chat-agent-execution)")
         create(args.role)

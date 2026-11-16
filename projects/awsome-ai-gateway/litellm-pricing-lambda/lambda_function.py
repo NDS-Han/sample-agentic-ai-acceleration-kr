@@ -30,6 +30,7 @@ LiteLLMPricingSyncService 가 그대로 수행한다.
 
 import json
 import os
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -51,6 +52,25 @@ except ValueError:
     PAGE_SIZE = 100
 MAX_PAGES = 50  # 방어적 상한 — has_more 가 끊기지 않는 비정상 응답 대비
 REQUEST_TIMEOUT = 20
+# 비동기 invoke payload 제한(256KB)과는 별개로, fetch 측 본문 상한 — runaway/악성
+# 엔드포인트가 Lambda 메모리를 고갈시키는 것을 막는다(cost map 은 ~3MB 가 정상).
+MAX_BODY_BYTES = 16 * 1024 * 1024
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """리다이렉트 미추적 — https 강제를 우회한 30x → http 다운그레이드나
+    외부 호스트로의 fetch 유도를 차단한다."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise urllib.error.HTTPError(req.full_url, code, f"redirect refused: {newurl}", headers, fp)
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
+def _fetch_json(req) -> object:
+    with _OPENER.open(req, timeout=REQUEST_TIMEOUT) as resp:
+        return json.loads(resp.read(MAX_BODY_BYTES + 1))
 
 
 def _fetch_page(page: int) -> dict:
@@ -59,8 +79,7 @@ def _fetch_page(page: int) -> dict:
         params["provider"] = PROVIDER_FILTER
     url = f"{BASE_URL}/model_catalog?{urllib.parse.urlencode(params)}"
     req = urllib.request.Request(url, headers={"Accept": "application/json"})
-    with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
-        return json.loads(resp.read())
+    return _fetch_json(req)
 
 
 def _fetch_cost_map() -> list[dict]:
@@ -74,8 +93,7 @@ def _fetch_cost_map() -> list[dict]:
     """
     providers = {p.strip() for p in PROVIDER_FILTER.split(",") if p.strip()}
     req = urllib.request.Request(COST_MAP_URL, headers={"Accept": "application/json"})
-    with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
-        data = json.loads(resp.read())
+    data = _fetch_json(req)
     if not isinstance(data, dict):
         raise ValueError("cost map top-level is not an object")
     rows = []

@@ -162,12 +162,15 @@ class BaseHandler(ABC):
             #    데려가지 않도록 수신자 단위로 격리한다(예외 전파 시 잔여 수신자
             #    전부 미발송이 되던 결함).
             infra_errors = 0
+            other_errors = 0
             for recipient in recipients:
                 try:
                     await self._deliver_to_recipient(event, recipient)
                 except Exception as exc:
                     if _is_infra_error(exc):
                         infra_errors += 1
+                    else:
+                        other_errors += 1
                     logger.exception(
                         "recipient_processing_failed",
                         event_type=event.type.value,
@@ -185,6 +188,16 @@ class BaseHandler(ABC):
                 raise NotificationInfraError(
                     f"all {infra_errors} recipients failed on infra errors"
                 )
+            # 전 수신자가 비-인프라(렌더 등 결정적) 오류로 실패하면 success 로
+            # 오집계하면 안 된다 — pending 행도 안 남아 sweeper 도 못 거두므로
+            # 실패 집계 + 로그로만 관측 가능하게 한다(쿨다운은 유지 — poison
+            # 페이로드가 동일 이벤트 재시도 폭풍을 만들지 않게).
+            if other_errors == len(recipients):
+                logger.error(
+                    "all_recipients_failed_non_infra",
+                    event_type=event.type.value,
+                    recipients=len(recipients),
+                )
         except NotificationInfraError:
             # 처리를 못 끝냈는데 선점 키가 남으면 재시도가 창 내내 억제된다 —
             # 값이 우리 event_id 일 때만 해제한다(다른 claimer 의 키는 보호).
@@ -194,7 +207,11 @@ class BaseHandler(ABC):
         # 4. 처리 완료 메트릭
         if self._metrics:
             self._metrics.events_processed_total.add(
-                1, {"event_type": event.type.value, "status": "success"}
+                1,
+                {
+                    "event_type": event.type.value,
+                    "status": "failed" if other_errors == len(recipients) else "success",
+                },
             )
             duration = time.monotonic() - start
             self._metrics.event_processing_duration.record(
@@ -335,7 +352,9 @@ class BaseHandler(ABC):
                             attempt=_claim_attempt,
                             event_type=event.type.value,
                             recipient=mask_email(recipient.email),
-                            error=str(exc),
+                            # str(exc) 의 SQL 바운드 파라미터에 이메일/payload 가
+                            # 섞일 수 있어 텍스트 마스킹을 거친다.
+                            error=mask_emails_in_text(str(exc)),
                         )
                 if duplicate:
                     # IntegrityError 는 두 경우다.
@@ -600,7 +619,7 @@ class BaseHandler(ABC):
                 "db_write_failed",
                 event_type=event.type.value,
                 recipient=mask_email(recipient.email),
-                error=str(exc),
+                error=mask_emails_in_text(str(exc)),
             )
             if self._metrics:
                 self._metrics.errors_total.add(1, {"error_type": "db"})

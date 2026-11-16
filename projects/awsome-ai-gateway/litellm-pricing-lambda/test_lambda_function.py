@@ -28,8 +28,8 @@ class _FakeResp:
     def __exit__(self, *a):
         return False
 
-    def read(self):
-        return self._body
+    def read(self, n=-1):
+        return self._body if n is None or n < 0 else self._body[:n]
 
 
 def _catalog_responder(pages: list[dict]):
@@ -45,7 +45,7 @@ def test_paginates_until_has_more_false():
         {"data": [{"id": "a"}], "has_more": True},
         {"data": [{"id": "b"}], "has_more": False},
     ])
-    with patch.object(lf.urllib.request, "urlopen", fake):
+    with patch.object(lf._OPENER, "open", fake):
         out = lf.lambda_handler({}, None)
     assert len(calls) == 2
     assert {m["id"] for m in out["data"]} == {"a", "b"}
@@ -54,7 +54,7 @@ def test_paginates_until_has_more_false():
 
 def test_provider_filter_in_query():
     calls, fake = _catalog_responder([{"data": [], "has_more": False}])
-    with patch.object(lf.urllib.request, "urlopen", fake):
+    with patch.object(lf._OPENER, "open", fake):
         lf.lambda_handler({}, None)
     assert "provider=bedrock_converse" in calls[0]
 
@@ -62,7 +62,7 @@ def test_provider_filter_in_query():
 def test_upstream_error_is_fail_soft():
     def boom(req, timeout=None):
         raise TimeoutError("upstream timeout")
-    with patch.object(lf.urllib.request, "urlopen", boom):
+    with patch.object(lf._OPENER, "open", boom):
         out = lf.lambda_handler({}, None)
     assert out["errors"] and "timeout" in out["errors"][0]
     assert "data" not in out
@@ -70,7 +70,7 @@ def test_upstream_error_is_fail_soft():
 
 def test_page_limit_guard():
     calls, fake = _catalog_responder([{"data": [{"id": "x"}], "has_more": True}] * 100)
-    with patch.object(lf.urllib.request, "urlopen", fake):
+    with patch.object(lf._OPENER, "open", fake):
         out = lf.lambda_handler({}, None)
     assert len(calls) == lf.MAX_PAGES
     assert "page limit" in out["errors"][0]
@@ -95,7 +95,7 @@ def test_cost_map_mode(monkeypatch):
         "sample_spec": {"litellm_provider": "one of docs"},  # 스펙 행도 제외
     }
     calls, fake = _catalog_responder([cost_map])
-    with patch.object(lf.urllib.request, "urlopen", fake):
+    with patch.object(lf._OPENER, "open", fake):
         out = lf.lambda_handler({}, None)
     assert len(calls) == 1 and calls[0] == "https://example.com/cost.json"
     ids = {m["id"] for m in out["data"]}
@@ -110,7 +110,7 @@ def test_cost_map_mode_fail_soft(monkeypatch):
 
     def boom(req, timeout=None):
         raise TimeoutError("down")
-    with patch.object(lf.urllib.request, "urlopen", boom):
+    with patch.object(lf._OPENER, "open", boom):
         out = lf.lambda_handler({}, None)
     assert out["errors"] and "down" in out["errors"][0]
 
@@ -119,3 +119,16 @@ if __name__ == "__main__":
     import pytest  # noqa: E402
 
     sys.exit(pytest.main([__file__, "-q"]))
+
+
+def test_redirect_refused():
+    """30x 추종 금지 — https 강제를 우회한 https→http 다운그레이드/외부 호스트
+    fetch 유도 차단(_NoRedirect). 리다이렉트면 fail-soft errors."""
+    import urllib.error
+
+    def redirect(_req, timeout=None):
+        raise urllib.error.HTTPError("https://api.litellm.ai/x", 302,
+                                     "redirect refused: http://evil", {}, None)
+    with patch.object(lf._OPENER, "open", redirect):
+        out = lf.lambda_handler({}, None)
+    assert out["errors"] and "redirect" in out["errors"][0]

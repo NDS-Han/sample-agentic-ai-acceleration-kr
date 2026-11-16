@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fnmatch
+import hashlib
 import re
 import uuid
 from datetime import date
@@ -49,6 +50,11 @@ class CLIService:
 
         # ── SSRF Prevention: validate STS URL host ──
         parsed = urlparse(data.sts_request.url)
+        # http://sts.*.amazonaws.com 도 호스트 allowlist 를 통과하므로 scheme 을
+        # 별도로 강제한다 — 평문 STS 요청은 경로상 공격자가 위조
+        # GetCallerIdentityResponse 로 응답해 허용 계정/롤 ARN 을 주장할 수 있다.
+        if parsed.scheme != "https":
+            raise STSVerificationError("STS URL must use https")
         host = parsed.hostname or ""
         allowed_hosts = {f"sts.{r}.amazonaws.com" for r in settings.ALLOWED_STS_REGIONS}
         allowed_hosts.add("sts.amazonaws.com")  # global endpoint
@@ -81,6 +87,10 @@ class CLIService:
 
         if resp.status_code != 200:
             raise STSVerificationError(f"STS returned status {resp.status_code}")
+        # 위조/이상 응답의 거대 본문이 defusedxml 파서에 그대로 들어가는 것을 막는다
+        # (정상 GetCallerIdentity 응답은 수백 바이트다).
+        if len(resp.content) > 256 * 1024:
+            raise STSVerificationError("STS response too large")
 
         # Parse STS XML response to extract Arn
         arn = self._extract_arn_from_sts_response(resp.text)
@@ -150,7 +160,12 @@ class CLIService:
         user = await user_repo.get_by_sso_subject(arn)
 
         if user is None:
-            email = session_name if "@" in session_name else f"{session_name}@unknown"
+            # ⚠️ session_name 은 미검증 호출자 입력이다 — "@corp.com" 형태로 지으면
+            #    신뢰 컬럼 users.email 에 피해자 이메일이 들어가 email-squatting 이
+            #    된다(나중에 피해자의 verified-email rebind 시 행+VK 통째 이관).
+            #    ARN 해시 기반 합성 주소로 저장해 어떤 실제 이메일과도 충돌하지
+            #    않게 한다(OIDC 의 {sub}@unknown 과 같은 계약).
+            email = f"sts-{hashlib.sha256(arn.encode()).hexdigest()[:16]}@unknown"
             user = User(
                 id=uuid.uuid4(),
                 email=email,

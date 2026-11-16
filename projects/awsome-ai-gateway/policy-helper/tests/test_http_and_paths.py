@@ -110,3 +110,37 @@ def test_vk_paths_override_is_the_only_candidate():
     env = {"GATEWAY_CLI_VK_CACHE": "/data/gw/vk.json"}
 
     assert vk_paths_for("darwin", env, Path("/home/u")) == [Path("/data/gw/vk.json")]
+
+
+class Redirector(BaseHTTPRequestHandler):
+    """302 → 두 번째 서버. 기본 opener 면 Authorization 이 그대로 따라간다."""
+
+    target = ""
+    def do_GET(self):
+        self.send_response(302)
+        self.send_header("Location", Redirector.target)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+    def log_message(self, *args):
+        pass
+
+
+def test_http_fetch_does_not_forward_vk_on_redirect(server):
+    """_NoRedirect 회귀 — 30x 을 따라가며 Bearer VK 를 다른 호스트에
+    재전송하는 기본 urlopen 동작이 돌아오면 VK 유출."""
+    Recorder.status = 200
+    redirector = HTTPServer(("127.0.0.1", 0), Redirector)
+    thread = threading.Thread(target=redirector.serve_forever, daemon=True)
+    thread.start()
+    try:
+        Redirector.target = f"{server}/v1/policy"  # redirect target = 원본 서버
+        Recorder.seen = {}
+        with pytest.raises(OSError):
+            http_fetch(
+                f"http://127.0.0.1:{redirector.server_address[1]}/v1/policy",
+                "vk-abc", 3.0,
+            )
+        # redirect 를 따라갔다면 target 서버가 Authorization 헤더를 봤을 것
+        assert Recorder.seen == {}
+    finally:
+        redirector.shutdown()

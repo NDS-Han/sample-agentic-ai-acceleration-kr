@@ -467,7 +467,11 @@ def run_setup(
                 log.info("otel_endpoint_from_site_extra", endpoint=otel_endpoint)
     if not otel_endpoint:
         p = urlparse(gateway_url)
-        otel_endpoint = f"http://{p.hostname}:80"
+        # 게이트웨이 스킴을 따라간다 — https 배포에서 bearer 헤더+프롬프트 로그가
+        # 평문으로 나가지 않게. 명시 오버라이드는 site-extra 로 가능.
+        scheme = "https" if p.scheme == "https" else "http"
+        port = 443 if scheme == "https" else 80
+        otel_endpoint = f"{scheme}://{p.hostname}:{port}"
 
     user_id = _resolve_user_id()
     ca_bundle = configured_ca_bundle()
@@ -581,6 +585,11 @@ def run_setup(
     # at the user tier too adds resilience. setdefault keeps any existing value.
     if ca_bundle:
         put_user("NODE_EXTRA_CA_CERTS", ca_bundle, default_only=True)
+
+    # OTEL bearer 토큰은 managed tier(전 사용자 가독)에 두지 않고 user tier 에만
+    # 둔다 — 공유 자격이 world-readable managed-settings.json 에 새는 것 차단.
+    if otel_auth_token:
+        put_user("OTEL_EXPORTER_OTLP_HEADERS", f"Authorization=Bearer {otel_auth_token}")
 
     # site-extra's `user.env` may carry a static OTEL_RESOURCE_ATTRIBUTES (e.g.
     # "service.name=claude-code,user.id=user@example.com"). That's how the same

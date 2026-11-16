@@ -502,6 +502,10 @@ def write_gateway_settings(
         user_id=user_id,
         ca_bundle=ca_bundle,
     )
+    # OTEL bearer 토큰은 managed tier(0644 — 로컬 전 사용자 가독)에 두지 않는다.
+    # 유도된 헤더는 여기서 제거하고 run_setup 이 user settings.env 에만 쓴다.
+    # 운영자가 site-extra managed.env 로 명시 주입한 값은 아래 fold 에서 살아남는다.
+    gateway_env.pop("OTEL_EXPORTER_OTLP_HEADERS", None)
     quoted_helper = _quote_helper_path(api_key_helper_path)
     status_line = {"type": "command", "command": statusline_path}
 

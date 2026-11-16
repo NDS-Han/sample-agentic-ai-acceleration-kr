@@ -12,6 +12,7 @@ from worker.handlers.base import EventHandler, NotificationInfraError
 from worker.observability.metrics import WorkerMetrics
 from worker.redis_client import get_redis_client
 from worker.schemas.events import parse_pubsub_message
+from worker.services.email_mask import mask_emails_in_text
 from worker.services.notification_buffer import get_notification_buffer
 
 logger = structlog.get_logger(__name__)
@@ -98,7 +99,12 @@ class ChannelListener:
                 task.add_done_callback(self._inflight.discard)
         finally:
             try:
-                await pubsub.unsubscribe(self.channel)
+                # unsubscribe 가 ConnectionError 등으로 실패해도 aclose 는 해야
+                # 한다 — 그렇지 않으면 재시작 주기마다 pubsub 연결이 orphan 된다.
+                try:
+                    await pubsub.unsubscribe(self.channel)
+                except Exception:
+                    pass
                 await pubsub.aclose()
             finally:
                 # in-flight 발송이 잘려 'pending' dead-claim 으로 남지 않게
@@ -143,7 +149,8 @@ class ChannelListener:
                     "event_buffered_infra_error",
                     channel=self.channel,
                     event_type=event.type.value,
-                    error=str(exc),
+                    # 핸들러 예외의 바운드 파라미터에 이메일/payload 가 섞일 수 있다.
+                    error=mask_emails_in_text(str(exc)),
                 )
                 try:
                     await get_notification_buffer().enqueue(event)

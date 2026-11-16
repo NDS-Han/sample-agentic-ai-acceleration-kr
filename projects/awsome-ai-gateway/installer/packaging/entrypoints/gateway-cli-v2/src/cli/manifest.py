@@ -572,9 +572,11 @@ FIELDS: tuple[ConfigField, ...] = (
     ),
     ConfigField(
         "OTEL_EXPORTER_OTLP_HEADERS", Category.TELEMETRY, Placement.SETTINGS_ENV, Status.OWNED,
-        tier=Tier.MANAGED, site_extra_overridable=True, sensitive=True,
+        tier=Tier.EITHER, site_extra_overridable=True, sensitive=True,
         flag="--otel-auth-token",
-        outputs=(Output(Placement.SETTINGS_ENV, Tier.MANAGED),),
+        # bearer 토큰은 managed tier(0644)에 두지 않고 user settings.env 에만
+        # 쓴다 — outputs 에서 MANAGED 를 빼면 managed 경로는 emit 하지 않는다.
+        outputs=(Output(Placement.SETTINGS_ENV, Tier.USER),),
         doc="OTLP auth header (Authorization=Bearer <token>) when a token is supplied.",
     ),
     ConfigField(
