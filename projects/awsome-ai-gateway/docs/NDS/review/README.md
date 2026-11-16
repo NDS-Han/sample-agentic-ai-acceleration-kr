@@ -59,6 +59,7 @@
 | [clients-agents.md](clients-agents.md) | gateway-cli·installer·cowork-installer·admin-chat-agent·query_db | 조건부 수렴(MED 1·LOW 3 + diff 스윕 9건 수정) |
 | [admin-ui.md](admin-ui.md) | Next.js 관리자 콘솔 — OIDC/PKCE·BFF 프록시·CSRF·시크릿 처리 | 수렴(MED 1·LOW 3 수정) |
 | [app-maintenance-manual.md](app-maintenance-manual.md) | **애플리케이션 정비 매뉴얼(AMM)** — 5개 레포트를 CAR/FT/DD 체계로 통합 | 지상검사 완료·비행시험 대기 |
+| [pr4-web-sso-provision.md](pr4-web-sso-provision.md) | **PR #4 머지 기록** — /v1/auth/provision JIT 등록·마법사 기본값·compose OIDC env + 충돌 해소 | 머지 완료(`1ab19b29`) |
 
 \* 캡처는 라이브 AWS/K8s 에서만 최종 검증 가능 — 코드 경로는 수렴.
 
