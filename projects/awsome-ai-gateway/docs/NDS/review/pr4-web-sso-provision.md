@@ -66,3 +66,43 @@ provision은 로그인 시도 자체가 트리거라 해당 인프라 비용이 
 - deploy 스위트 478 tests ✅
 - admin-api OIDC/provision 관련 64 tests(`test_web_oidc_provision` 신규 포함) ✅
 - admin-ui `authLoginFlow.test.ts` 67 tests ✅
+
+## 머지 diff 심층 리뷰 (후속, `589dd6a2`)
+
+**추출 충실성**: `provision_user` = 원 exchange의 1-7단계를 그대로 이동
+(JWT 검증→클레임 추출→Cognito 이메일 enrich→그룹 게이트→팀 해석→역할 도출→
+upsert→서비스계정 거부→transfer→활성 검사). exchange는 VK 발급·Redis 캐시
+하이드레이트만 추가 수행 — `sso_session_expires_at`은 발급에서만 사용,
+provision 미전달 정상. 에러 매핑(401/403/503)·레이트리밋
+(`rl:auth_exchange:{ip}` 공유 10/min, bearer 추출 후 적용) 동일.
+
+**`default=None` 크래시 실증**: `questionary.text(default=None)`이
+prompt_toolkit `Document.__init__`의 `len(None)`에서 `TypeError` — `or None`
+패턴은 `aaa6760e`(configure 도입)부터 존재해 미설정 선택 필드가 있는
+yaml로 configure를 돌리면 해당 질문 렌더 시점에 마법사가 죽고 답변이
+유실되던 결함. PR 수정 정당, 20개소 전부 `str(_g())` 패턴으로 확인.
+
+**compose env 전파**: `${VAR:-}`는 `gen/<env>/.env`에서 interpolate.
+`merge_env`의 `_MANAGED_PREFIX_ANCHORS`(OIDC_→OIDC_ISSUER_URL) 규칙상
+운영자 수동 OIDC_REDIRECT_URI는 OIDC 켜진 동안 보존·끄면 수렴 — 올바른
+계약. `SECURE_COOKIES`는 proto 자동감지(`secureCookieFlag`) 실패 시
+강제 오버라이드 — 외부 HTTPS 프록시 용도와 일치.
+
+**콜백**: provision 호출이 토큰 검증 후·쿠키 발급 전, `cookieToken`(검증된
+세션 토큰) 사용, `AbortSignal.timeout(10s)`, 실패 시 403/503 fail-closed
+(쿠키 미발급) — 신규 테스트 2건이 순서·미발급을 고정.
+
+**후속 수정(이번 리뷰)**:
+- `domain_name` 질문에 `validate` 추가 — route53-acm + 빈 도메인이 wizard
+  끝 SchemaError(`schema.py:636`)로 답변 유실되던 경로 차단
+- ad-sync.md 표에 "SAML 사용자 커버" 컬럼 복원 — 병합본이 산문으로만
+  옮겼던 정보를 표로 복구
+
+**잔여 관측(수용)**:
+- capture가 `adminUi.env`의 `OIDC_REDIRECT_URI`/`SECURE_COOKIES`를 cfg로
+  읽지 않음 — eks→compose 채택 시 `.env` 수동 캐리오버 필요(구조적 —
+  cfg 필드 자체가 없음). feature_notes가 안내 문구 출력
+- 콜백이 provision 응답 `{user_id, role}`을 쓰지 않고 `/admin/my/profile`
+  재조회 — 역할 조회가 본래 목적이라 정상
+- cold JWKS + Cognito AdminGetUser 합산이 10s 타임아웃을 넘는 극단 케이스는
+  503 → 재로그인 안내로 수용
