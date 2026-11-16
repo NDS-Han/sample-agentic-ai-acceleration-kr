@@ -357,7 +357,7 @@ async def _resolve_idp_identity(request: Request, claims: dict) -> CurrentUser:
     """IdP id_token 클레임 → DB 신원.
 
     ``auth.users`` 를 ``sso_subject`` 로 조회한다. 여기서 프로비저닝은 **하지 않는다** —
-    이 경로는 admin-ui 세션 검증이고, 프로비저닝은 ``POST /v1/auth/exchange``
+    이 경로는 admin-ui 세션 검증이고, 프로비저닝은 ``POST /v1/auth/provision`` 또는 ``POST /v1/auth/exchange``
     (``services/oidc_service.py``)의 책임이다. 두 곳에서 만들면 같은 사용자가 서로 다른
     팀/역할로 두 번 생길 수 있다.
 
