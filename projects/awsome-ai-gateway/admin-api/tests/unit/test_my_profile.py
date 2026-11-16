@@ -83,6 +83,41 @@ async def test_my_budget_includes_team_pool(developer_user):
 
 
 @pytest.mark.asyncio
+async def test_my_effective_policy_uses_caller_identity(developer_user, monkeypatch):
+    """본인 스코프 — 세션의 user_id 로 합성을 호출한다(다른 user_id 를 받지 않는다).
+
+    /admin/users/{id}/effective-policy 와 달리 경로 파라미터가 없으므로
+    호출자 외의 정책을 조회할 경로 자체가 없다 — 서비스 호출 인자가
+    CurrentUser.user_id 인지만 고정한다.
+    """
+    from unittest.mock import AsyncMock, MagicMock
+
+    from app.routers.my import get_my_effective_policy
+
+    captured = {}
+
+    class _Svc:
+        def __init__(self, session):
+            captured["session"] = session
+
+        async def get_for_user(self, user_id):
+            captured["user_id"] = user_id
+            return {"user_id": str(user_id), "cells": []}
+
+    import app.services.effective_policy_service as eps
+
+    monkeypatch.setattr(
+        "app.services.effective_policy_service.EffectivePolicyService", _Svc
+    )
+    session = MagicMock()
+    body = await get_my_effective_policy(developer_user, session)
+
+    assert captured["session"] is session
+    assert captured["user_id"] == developer_user.user_id
+    assert body["user_id"] == str(developer_user.user_id)
+
+
+@pytest.mark.asyncio
 async def test_my_budget_team_null_when_no_team(admin_user):
     """팀 미소속이면 team 은 null — 프론트가 팀 섹션을 숨긴다."""
     from unittest.mock import MagicMock

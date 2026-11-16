@@ -151,6 +151,23 @@ async def get_my_budget(
     }
 
 
+@router.get("/effective-policy")
+async def get_my_effective_policy(
+    user: CurrentUser = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """로그인 사용자 본인의 유효 정책 합성 뷰 — 읽기 전용.
+
+    /admin/users/{id}/effective-policy 와 같은 합성을 본인 스코프로 내린다 —
+    /my 페이지가 "내게 적용되는 모델/앱/rate limit/다운그레이드" 를 셀프서비스로
+    보여주기 위한 경로. 인증만 요구한다 — 자기 자신의 정책을 돌려줄 뿐이라
+    역할 제한은 없다(/admin/my/profile 과 같은 게이트).
+    """
+    from app.services.effective_policy_service import EffectivePolicyService
+
+    return await EffectivePolicyService(session).get_for_user(user.user_id)
+
+
 @router.get("/periods")
 async def get_my_periods(
     request: Request,

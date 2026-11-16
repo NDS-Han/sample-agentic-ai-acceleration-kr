@@ -970,7 +970,9 @@
     "dailyDetail": "일별 상세 보기",
     "colTokenMix": "토큰 구성",
     "colShare": "점유율",
-    "budgetBasis": "기준: {period}"
+    "budgetBasis": "기준: {period}",
+    "myPolicyTitle": "내 유효 정책",
+    "myPolicyHint": "본인에게 실제로 적용되는 정책의 합성 결과 — 허용 앱·모델, rate limit, 팀 자동 다운그레이드 체인."
   },
   "chat": {
     "biInsight": "BI Insight",

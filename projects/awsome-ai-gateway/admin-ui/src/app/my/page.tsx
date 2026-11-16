@@ -3,8 +3,10 @@
 import { Suspense } from 'react';
 import { getTranslations } from 'next-intl/server';
 import { SkeletonCard } from '@/components/common/SkeletonCard';
-import { fetchMyBudget, fetchMyPeriods, fetchMyUsage } from '@/lib/actions/my';
+import { fetchMyBudget, fetchMyEffectivePolicy, fetchMyPeriods, fetchMyUsage } from '@/lib/actions/my';
+import { listActiveModelsAction } from '@/lib/actions/models';
 import { MyUsageDashboard } from '@/components/my/MyUsageDashboard';
+import { EffectivePolicyCard } from '@/components/users/EffectivePolicyCard';
 import { PeriodSelector } from '@/components/dashboard/PeriodSelector';
 import { ErrorState } from '@/components/common/ErrorState';
 import { currentCalendarMonth, isMonth } from '@/lib/utils/period';
@@ -20,6 +22,19 @@ async function UsageSection({ period }: { period?: string }) {
     <MyUsageDashboard data={usage} budget={budget} />
   ) : (
     <ErrorState />
+  );
+}
+
+// 유효 정책 카드 — 기간 선택과 무관한 현재 상태라 대시보드 아래 별개 섹션.
+// 정책 합성과 모델 카탈로그(다운그레이드 단가 표기용)를 병렬로 가져오고,
+// 실패는 카드 안쪽으로 격리해 사용량 대시보드를 깨지 않게 한다.
+async function PolicySection() {
+  const [policy, models] = await Promise.all([
+    fetchMyEffectivePolicy().catch(() => null),
+    listActiveModelsAction().then((r) => (r.success ? r.data : [])).catch(() => []),
+  ]);
+  return (
+    <EffectivePolicyCard policy={policy} loadFailed={policy === null} models={models} />
   );
 }
 
@@ -56,6 +71,14 @@ export default async function MyPage(props: MyPageProps) {
       <Suspense key={effectiveMonth} fallback={<SkeletonCard count={4} />}>
         <UsageSection period={effectiveMonth} />
       </Suspense>
+
+      <section className="border rounded-apple-md p-3">
+        <h2 className="text-sm font-medium mb-2">{t('myPolicyTitle')}</h2>
+        <p className="text-xs text-muted-foreground mb-3">{t('myPolicyHint')}</p>
+        <Suspense fallback={<SkeletonCard count={1} />}>
+          <PolicySection />
+        </Suspense>
+      </section>
     </div>
   );
 }

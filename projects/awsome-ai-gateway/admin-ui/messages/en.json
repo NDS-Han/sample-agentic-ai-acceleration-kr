@@ -970,7 +970,9 @@
     "dailyDetail": "Daily details",
     "colTokenMix": "Token mix",
     "colShare": "Share",
-    "budgetBasis": "As of {period}"
+    "budgetBasis": "As of {period}",
+    "myPolicyTitle": "My effective policy",
+    "myPolicyHint": "The resolved result of every policy layer applied to you — allowed apps and models, rate limits, and the team auto-downgrade chain."
   },
   "chat": {
     "biInsight": "BI Insight",

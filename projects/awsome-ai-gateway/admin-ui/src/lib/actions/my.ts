@@ -5,6 +5,7 @@
 
 import { adminAPI } from '@/lib/api-client';
 import { withRetry } from '@/lib/utils/retry';
+import type { EffectivePolicy } from '@/types/entities';
 
 export interface MyBudgetResponse {
   user_id: string;
@@ -84,6 +85,12 @@ export async function fetchMyUsage(period?: string): Promise<MyUsageResponse> {
   return withRetry(() =>
     adminAPI.get<MyUsageResponse>('/admin/my/usage', period ? { period } : undefined)
   );
+}
+
+/** 본인 유효 정책 합성 뷰 — /admin/users/{id}/effective-policy 의 자기 스코프 버전.
+    모델/앱 허용·rate limit·다운그레이드·web search 를 한 번에 내린다. */
+export async function fetchMyEffectivePolicy(): Promise<EffectivePolicy> {
+  return withRetry(() => adminAPI.get<EffectivePolicy>('/admin/my/effective-policy'));
 }
 
 /** 본인 사용량이 있는 월 목록 — /my 기간 선택기용(dashboard/periods 는 admin 전용). */
