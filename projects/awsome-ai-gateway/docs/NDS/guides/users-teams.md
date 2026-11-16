@@ -55,27 +55,78 @@ A **team node** shows the full per-team editor:
 - **Current team leaders** — list with **Remove** per leader, plus a
   member picker and **Set as team leader** to designate another. Team
   leader is a console flag, not a Cognito group.
-- **App access policy** — per-scope allowlist of client apps. More
-  specific scopes override the organization default.
-- **Team Model Access Management** — which catalog aliases the team may
-  call (`N allowed`).
-- **Rate limit** — request/token limits; *Unrestricted* inherits the
-  organization default.
-- **Effective Policy** — read-only resolved result of every layer for
-  this scope, so you can verify what actually applies.
-- **Budget** — read-only pointer to [Budget Management](budgets.md).
 - **Force re-authentication for team** — invalidates every member's
   active virtual keys; users must run `gateway-cli login` again.
+- **Budget** — read-only pointer to [Budget Management](budgets.md).
 
-Team and member nodes additionally expose:
+Below those controls, the panel stacks collapsible **policy sections**.
+Every section is edited through a single floating **Apply** bar — edits
+in different sections are staged independently and saved together (a
+failed section keeps its unsaved state and shows a `failed` chip while
+the others commit).
 
-- **App access** (`ScopeAppAccessPanel`) — per-scope allowlist of client
-  apps. More specific scopes override the organization default.
-- **Rate limits** (`ScopeRateLimitPanel`) — request/token limits per
-  scope; teams can inherit the organization default, and members can
-  inherit the team default or carry an individual cap.
-- **Effective policy** (`EffectivePolicyCard`) — the resolved result of
-  all layers for that scope, so you can verify what actually applies.
+### Team sections (expanded)
+
+**App access policy** — allowlist of client apps applied to members
+without an individual override. Saves exactly what is checked; an empty
+selection *clears* the team policy (members inherit the organization
+policy, it does not mean "deny all"):
+
+![Team app access](screenshots/65-users-team-app-access.png)
+
+**Team Model Access Management** — catalog aliases the team may call.
+`N/20 selected` counter with **Select all / Clear all**; a subset
+selection restricts every member without a personal override:
+
+![Team model access](screenshots/66-users-team-models.png)
+
+**Rate limit** — RPM/TPM/CPM/CPH fields per scope. *Unrestricted* means
+no own limit (the organization default applies if one exists). The panel
+shows a live *requests in last 60s* counter and a usage-trend chart:
+
+![Team rate limit](screenshots/67-users-team-rate-limit.png)
+
+**Effective Policy** — read-only synthesized result of every policy axis
+for this team: the auto-downgrade chain, the model × client matrix, and
+the source of each policy (own / inherited / default):
+
+![Team effective policy](screenshots/68-users-team-effective-policy.png)
+
+### Member sections (expanded)
+
+A **member node** shows the same axes at user scope, plus a per-app
+budget view:
+
+**App access** — individual override of the team/org policy. The checked
+set is saved literally: *select all* is an explicit allow-everything
+override; *deselect all* clears the user policy and falls back to the
+team/org policy. An inheritance caption states which policy currently
+applies:
+
+![User app access](screenshots/60-users-user-app-access.png)
+
+**Per-user allowed models** — overrides the team model policy. No
+selection = follow team policy; with no team policy either, all models
+are allowed:
+
+![User allowed models](screenshots/61-users-user-models.png)
+
+**Rate limit** — same fields as the team editor (RPM/TPM/CPM/CPH) at
+user scope; empty inherits the team limit:
+
+![User rate limit](screenshots/62-users-user-rate-limit.png)
+
+**Per-app budgets** — read-only gauges of the member's team total and
+per-app budget slices; edit them in
+[Budget Management](budgets.md) via the inline link:
+
+![User per-app budgets](screenshots/63-users-user-app-budgets.png)
+
+**Effective Policy** — the resolved result of all layers for this user,
+including the team auto-downgrade chain and which axis (own/team/org)
+produced each value:
+
+![User effective policy](screenshots/64-users-user-effective-policy.png)
 
 Member nodes also carry per-user status controls — activate/deactivate
 the account, assign or remove the team-leader flag, and force
