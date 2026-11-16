@@ -18,7 +18,7 @@ auto-downgrade mechanism that throttles spend before the hard limit.
 
 | Column | Meaning |
 |---|---|
-| **Target Name** | Team row (expandable to list members) with member count; a `downgrade N` badge means N members are currently auto-downgraded. |
+| **Target Name** | Team row (expandable to list members) with member count; a `downgrade N` badge means the team has N auto-downgrade rules configured. |
 | **Type** | `Team` or `User`. |
 | **Max Budget** | Monthly cap in USD. |
 | **Used / Remaining** | Spend so far this month and what is left. |
@@ -54,15 +54,23 @@ team cap, and a per-member **Set Budget** action:
 
 ## Auto-downgrade
 
-Each team can enable **auto-downgrade rules**: when a member crosses a
-usage threshold, their requests are transparently redirected to a
-cheaper model alias instead of being blocked.
+Each team can enable **auto-downgrade rules**: when the team's monthly
+usage crosses a threshold, requests naming the flagged model are
+transparently rewritten to a cheaper model alias instead of being
+blocked — spend degrades before it stops.
 
-- Rules are edited in the team's expanded row
-  (`AutoDowngradeConfig`): add thresholds, pick the fallback alias, and
-  set alert thresholds.
-- `downgrade N` on the team row shows live count; clearing the config
-  restores the original model routing.
+- Rules are edited in the team's expanded row (**Auto downgrade**
+  card): enable the toggle, add *from-model → to-model* rules with a
+  usage-% threshold each, and save.
+- Rules **chain** — past several thresholds a request resolves to the
+  chain's floor model in multiple hops (cycle-safe, 5-hop cap).
+- A built-in **usage simulation** slider previews per-model resolution
+  at any percentage before saving.
+- `downgrade N` on the team row reports N configured rules; **Clear
+  settings** removes the policy and restores original routing.
+
+Full setup walkthrough, resolution semantics, and runtime behavior:
+[auto-downgrade.md](auto-downgrade.md).
 
 ## Operational notes
 

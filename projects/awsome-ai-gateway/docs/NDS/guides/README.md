@@ -33,6 +33,7 @@ redirected to the [403 page](access-denied.md).
 | Model Management | `/models` | Admin | [models.md](models.md) |
 | App Policy | `/apps` | Admin | [app-policy.md](app-policy.md) |
 | Budget Management | `/budgets` | Admin, Team leader | [budgets.md](budgets.md) |
+| Auto-downgrade | `/budgets` (team row) | Admin, Team leader | [auto-downgrade.md](auto-downgrade.md) |
 | API Keys | `/keys` | Admin | [api-keys.md](api-keys.md) |
 | Agents | `/agents` | Admin | [agents.md](agents.md) |
 | Agent detail | `/agents/{userId}` | Admin | [agents.md](agents.md#agent-detail) |
