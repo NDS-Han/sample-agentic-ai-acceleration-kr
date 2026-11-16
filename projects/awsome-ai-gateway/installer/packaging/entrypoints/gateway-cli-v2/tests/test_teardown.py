@@ -132,6 +132,53 @@ def test_revert_idempotent(tmp_path, backup_dir):
     settings = tmp_path / "settings.json"
     _write_settings(settings, {"model": "claude-sonnet-4-6"})
     assert revert_user_settings(settings).changed
+
+
+# ---------------------------------------------------------------------------
+# remove_user_otel_header — disable의 선택적 자격 제거 (diff-regression: bearer
+# 가 user tier 로 옮겨간 뒤에도 disable 이 managed 계약처럼 그 키를 지운다)
+# ---------------------------------------------------------------------------
+
+def test_remove_otel_header_removes_only_that_key(tmp_path):
+    settings = tmp_path / "settings.json"
+    _write_settings(settings, {
+        "model": "claude-sonnet-4-6",
+        "env": {
+            "OTEL_EXPORTER_OTLP_HEADERS": "Authorization=Bearer tok",
+            "ANTHROPIC_BASE_URL": "http://gw",
+        },
+    })
+
+    assert teardown.remove_user_otel_header(settings)
+
+    data = json.loads(settings.read_text())
+    assert data["env"] == {"ANTHROPIC_BASE_URL": "http://gw"}
+    assert data["model"] == "claude-sonnet-4-6"
+
+
+def test_remove_otel_header_drops_empty_env_block(tmp_path):
+    settings = tmp_path / "settings.json"
+    _write_settings(settings, {"env": {"OTEL_EXPORTER_OTLP_HEADERS": "x"}})
+    assert teardown.remove_user_otel_header(settings)
+    assert "env" not in json.loads(settings.read_text())
+
+
+def test_remove_otel_header_noop_when_absent(tmp_path):
+    settings = tmp_path / "settings.json"
+    _write_settings(settings, {"env": {"USER_KEY": "keep"}})
+    assert not teardown.remove_user_otel_header(settings)
+    assert json.loads(settings.read_text())["env"] == {"USER_KEY": "keep"}
+
+
+def test_remove_otel_header_missing_file_noop(tmp_path):
+    assert not teardown.remove_user_otel_header(tmp_path / "absent.json")
+
+
+def test_remove_otel_header_unparseable_noop(tmp_path):
+    settings = tmp_path / "settings.json"
+    settings.write_text("{not json", encoding="utf-8")
+    assert not teardown.remove_user_otel_header(settings)
+    assert settings.read_text() == "{not json"
     second = revert_user_settings(settings)
     assert not second.changed  # Q3: idempotency = absence of owned keys
 

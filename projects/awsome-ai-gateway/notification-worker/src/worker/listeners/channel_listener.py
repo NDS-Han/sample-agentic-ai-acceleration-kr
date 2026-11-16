@@ -165,7 +165,7 @@ class ChannelListener:
                     "event_processing_failed",
                     channel=self.channel,
                     event_type=event.type.value,
-                    error=str(exc),
+                    error=mask_emails_in_text(str(exc)),
                 )
                 if self.metrics:
                     self.metrics.errors_total.add(1, {"error_type": "processing"})

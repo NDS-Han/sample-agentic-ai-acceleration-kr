@@ -17,8 +17,11 @@ The base collector endpoint (`OTEL_EXPORTER_OTLP_ENDPOINT`) is resolved in
 2. **site-extra `managed.env.OTEL_EXPORTER_OTLP_ENDPOINT`** — the value bundled in
    `site_extra.json` (or the file pointed to by the `GATEWAY_CLI_SITE_EXTRA`
    environment variable). This is how a corporate site pins its own collector.
-3. **Auto-derived from the gateway hostname** — `http://<gateway-hostname>:80`,
-   used only when neither of the above is set.
+3. **Auto-derived from the gateway hostname** — `<gateway-scheme>://<gateway-hostname>:<443|80>`,
+   i.e. `https://host:443` for an `https` gateway URL and `http://host:80`
+   otherwise. Used only when neither of the above is set; sites whose collector
+   listens on a non-default port (e.g. `:4318`, `:8443`) should pin the endpoint
+   explicitly.
 
 Whichever endpoint wins is fed into `build_gateway_env`, so **every per-signal
 endpoint is derived from the same base**:
@@ -42,6 +45,15 @@ are owned by gateway-cli and must not be broken by site config.
 an operator may also override an individual per-signal endpoint (e.g. send traces
 to a different host than metrics) simply by setting that specific key in
 site-extra.
+
+## `OTEL_EXPORTER_OTLP_HEADERS` is a tier exception
+
+Every `OTEL_*` key above lands in the **managed** tier — except
+`OTEL_EXPORTER_OTLP_HEADERS`, which carries a bearer credential. The
+managed-settings file is world-readable (`0644`), so the `--otel-auth-token`
+value is written to **user** `settings.json` `env` only. A site that *wants* the
+header in the managed tier can still pin it in site-extra `managed.env`
+(explicit operator choice), but `gateway-cli` never derives it there itself.
 
 ## How to pin a corporate collector
 

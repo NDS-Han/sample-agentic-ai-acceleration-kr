@@ -152,6 +152,14 @@ def disable_cmd(ctx: click.Context) -> None:
     except Exception as exc:
         raise click.ClickException(f"Failed to remove managed settings: {exc}") from exc
 
+    # OTEL bearer는 이제 user settings.env 에 있다 — managed 제거만으로는
+    # 자격이 남으므로 disable 도 이전 계약대로 그 키만 제거한다(나머지
+    # user-tier 키·토큰 캐시는 재활성을 위해 유지 — 전체 정리는 clear).
+    from cli import teardown
+
+    if teardown.remove_user_otel_header():
+        click.echo("  Removed OTEL credential from user settings.")
+
     click.secho("Gateway disabled.", fg="yellow")
     click.echo("Restart Claude Code to apply changes.")
     click.echo("Run 'gateway-cli setup' to re-enable.")

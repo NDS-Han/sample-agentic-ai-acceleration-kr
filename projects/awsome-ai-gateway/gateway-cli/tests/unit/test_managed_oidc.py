@@ -87,7 +87,9 @@ class TestBuildGatewaySettingsOIDC:
             oidc_issuer_url="https://idp.example.com", oidc_client_id="c",
         )["env"]
         assert env["OTEL_EXPORTER_OTLP_ENDPOINT"] == "http://otel:4317"
-        assert env["OTEL_EXPORTER_OTLP_HEADERS"] == "Authorization=Bearer tok"
+        # bearer 토큰은 managed tier(0644)에 심지 않는다 — user-tier
+        # settings.json(tools/otel_config) 경로에만 기록된다.
+        assert "OTEL_EXPORTER_OTLP_HEADERS" not in env
         assert env["OIDC_CLIENT_ID"] == "c"
 
 

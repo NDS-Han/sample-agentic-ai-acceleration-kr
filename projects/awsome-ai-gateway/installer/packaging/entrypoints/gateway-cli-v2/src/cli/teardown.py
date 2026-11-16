@@ -236,6 +236,36 @@ def revert_user_settings(settings_path: Path | None = None) -> SettingsRevertRes
     return result
 
 
+def remove_user_otel_header(settings_path: Path | None = None) -> bool:
+    """Remove only ``env.OTEL_EXPORTER_OTLP_HEADERS`` from user ``settings.json``.
+
+    ``disable`` historically removed the OTEL bearer because it lived in the
+    managed tier; now that it sits in user settings.env a plain disable would
+    leave the credential behind. This surgical removal keeps disable's "gateway
+    credentials off" contract without touching other user-tier keys (model,
+    apiKeyHelper, …) — full revert stays with ``clear``.
+    """
+    path = settings_path or _user_settings_path()
+    if not path.is_file():
+        return False
+    try:
+        settings = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        log.warning("settings_unparseable_on_disable", path=str(path), error=str(exc))
+        return False
+    env_block = settings.get("env") if isinstance(settings, dict) else None
+    if not isinstance(env_block, dict) or "OTEL_EXPORTER_OTLP_HEADERS" not in env_block:
+        return False
+    env_block.pop("OTEL_EXPORTER_OTLP_HEADERS")
+    if not env_block:
+        settings.pop("env", None)
+    from cli.utils.files import atomic_write_text  # noqa: PLC0415
+
+    atomic_write_text(path, json.dumps(settings, indent=2, ensure_ascii=False) + "\n")
+    log.info("user_otel_header_removed", path=str(path))
+    return True
+
+
 # ---------------------------------------------------------------------------
 # 2. OS-env restore (HKCU on Windows, shell rc on POSIX)
 # ---------------------------------------------------------------------------

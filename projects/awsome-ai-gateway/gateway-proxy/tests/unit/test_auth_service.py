@@ -807,6 +807,37 @@ async def test_auth_middleware_security_detector_uses_rightmost_xff():
     assert recorded["ip"] == "10.0.0.9"
 
 
+@pytest.mark.asyncio
+async def test_auth_failure_malformed_header_no_indexerror():
+    """Diff-regression: `Authorization: Bearer `(스킴만 있고 토큰 없음)가 실패
+    기록 경로의 토큰 추출에서 IndexError를 일으키지 않아야 한다 — 이전 구현은
+    ``split(None, 1)[1]`` 로 인덱스가 없어 500 크래시였다."""
+    from app.middleware.auth import AuthMiddleware
+
+    async def _rec(ip, at):
+        pass
+
+    detector = MagicMock()
+    detector.record_auth_failure = MagicMock(side_effect=lambda ip, at: _rec(ip, at))
+
+    async def inner(scope, receive, send):
+        pass
+
+    mw = AuthMiddleware(inner)
+    scope = _auth_scope(headers={"authorization": "Bearer "})
+    scope["state"]["_security_detector"] = detector
+    scope["state"]["_degradation_manager"] = None
+    redis = AsyncMock()
+    redis.get = AsyncMock(return_value=None)
+    scope["state"]["_redis"] = redis
+    scope["state"]["_session_factory"] = None
+
+    sent = []
+    await mw(scope, AsyncMock(), lambda m: sent.append(m) or AsyncMock()())
+
+    assert sent[0]["status"] == 401
+
+
 # ── 인프라 장애 vs 자격증명 거부 — AuthBackendUnavailableError 계약 ────────────
 
 

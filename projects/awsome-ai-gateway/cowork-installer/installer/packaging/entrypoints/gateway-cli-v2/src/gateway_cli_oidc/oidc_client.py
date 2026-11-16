@@ -284,19 +284,27 @@ def _secure_write(path: Path, content: str) -> None:
     umask default.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    # tmp+os.replace — O_TRUNC 인플레이스는 크래시 시 잘린 캐시 파일을 남겨
+    # 다음 호출이 JSON 파싱 실패로 재인증을 강제한다.
+    tmp = path.with_name(f"{path.name}.tmp-{os.getpid()}")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
-        fh = os.fdopen(fd, "w", encoding="utf-8")
-    except Exception:
-        os.close(fd)
-        raise
-    with fh:
-        fh.write(content)
-    try:
-        # Pre-existing file keeps its old mode under O_CREAT — re-assert 0600.
+        try:
+            fh = os.fdopen(fd, "w", encoding="utf-8")
+        except Exception:
+            os.close(fd)
+            raise
+        with fh:
+            fh.write(content)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
         os.chmod(path, 0o600)
-    except (OSError, NotImplementedError):
-        pass
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
 
 
 def save_tokens(tokens: Tokens) -> None:

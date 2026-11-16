@@ -72,6 +72,30 @@
 - `db/init/*.sql`: NOLOGIN·컬럼스코프 SELECT·`chat_agent` 스키마 revoke·statement_timeout
 - `loadtest/`·`mock/`·`gateway-clients/`: env 제공 키·플레이스홀더만, 선적 시크릿 없음
 
+## Diff 회귀검증 (컴포넌트 수정분 자체 검증 — 2인 독립 리뷰)
+
+`9450630d`+`2da88828` 변경분의 자체 회귀를 2인 리뷰어가 검증 — OTEL bearer
+계층 이동이 낳은 마이그레이션 공백 다수를 발견·수정했다.
+
+- **stale 토큰 영구 잔존(HIGH-equivalent 회귀)**: pre-fix 빌드가
+  `managed-settings.json` 에 심어둔 `OTEL_EXPORTER_OTLP_HEADERS` 는 env merge
+  가 덧붙이기만 하고 marker `envKeys` 에도 다시 기록되지 않아 영구 잔존했다.
+  `write_gateway_settings` 가 merge 대상 env 에서 해당 키를 명시 스크럽
+  (site-extra `managed.env` 의 명시 핀은 운영자 선택으로 복원 — 계약 주석화).
+- **`disable` 계약 회귀**: bearer 가 user tier 로 옮겨가며 plain `disable`
+  이 자격을 남기게 됐다 — `teardown.remove_user_otel_header()` 로 그 키만
+  선택 제거(나머지 user-tier 키·토큰 캐시는 재활성을 위해 유지, 전체 정리는
+  `clear`).
+- **legacy v1 트리 동일 결함**: `gateway-cli/src/cli/managed.py` 도 bearer 를
+  managed env 에 심고 있었다 — 제거 + 수동 설정 경고. v1 은 전체 파일 재작성
+  방식이라 stale 잔존은 없음.
+- **토큰/VK 캐시 비원자 쓰기(LOW→수정)**: `oidc_client._secure_write` 두 사본
+  (installer·cowork)이 `O_TRUNC` 인플레이스 — tmp+fsync+`os.replace` 로 통일,
+  login.py 와 같은 패턴·pid-접미 tmp명.
+- **기타**: `urlparse(...).hostname is None` 가드(파생 OTEL/endpoint 가
+  `https://None:443` 되는 경로, v2 setup + v1 setup), manifest `tier`
+  메타데이터 EITHER→USER 정정, pricing-lambda 본문 상한 명시 검사.
+
 ## 잔여 리스크
 
 - query_db 함수 denylist 는 패턴 기반 — 신규 PG 함수/확장은 추가 필요.

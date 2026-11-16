@@ -39,6 +39,13 @@
 - `usage_fired`+pop 정산 소유권; raw Bedrock 스트림 await 우선순위 수정 확인(`routers/bedrock.py:441-459`)
 - 보안이벤트 source IP는 XFF 최우측 홉 사용; BOTH_DEGRADED fail-closed
 
+## Diff 회귀검증
+
+- **`Authorization: Bearer `(토큰 부재) IndexError → 500 크래시**: 실패 기록
+  경로의 `authorization.split(None, 1)[1]` 가 스킴만 있는 헤더에서 IndexError
+  — `split()` 후 마지막 토큰 추출로 방어 + 회귀 테스트
+  (`test_auth_failure_malformed_header_no_indexerror`).
+
 ## 잔여 리스크
 
 - **의도된 fail-open**: `allowed_clients` 조회 실패 허용(soft gating), 예약 경로 장애 통과(#3), 성공 0토큰 무기록(#6) — 로그는 남으나 정책 문서에 "허용"으로 명시 필요.

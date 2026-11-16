@@ -70,7 +70,10 @@ _OPENER = urllib.request.build_opener(_NoRedirect)
 
 def _fetch_json(req) -> object:
     with _OPENER.open(req, timeout=REQUEST_TIMEOUT) as resp:
-        return json.loads(resp.read(MAX_BODY_BYTES + 1))
+        body = resp.read(MAX_BODY_BYTES + 1)
+    if len(body) > MAX_BODY_BYTES:
+        raise ValueError(f"response body exceeds {MAX_BODY_BYTES} bytes")
+    return json.loads(body)
 
 
 def _fetch_page(page: int) -> dict:

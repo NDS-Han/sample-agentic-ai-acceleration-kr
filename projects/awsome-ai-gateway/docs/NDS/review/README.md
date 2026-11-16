@@ -12,7 +12,10 @@
   **오타겟**(다른 env·release·state에 쓰기), **시크릿 누출**,
   **신규 설치↔업데이트 경로 불일치**, **캡처/채택 정확성**.
 - 매 라운드 수정은 `deploy/tests/` 회귀 테스트로 고정 —
-  최종 **478 tests 통과**.
+  배포 도구 **478 tests** + 컴포넌트 스위트(admin-api·proxy·workers·
+  installer·admin-ui) 통과. 컴포넌트 수정분 자체도 2인 독립 diff 회귀검증
+  (OTEL bearer 계층 이동의 stale-잔존·disable 계약·v1 드리프트·비원자
+  캐시쓰기 등 9건 수정)을 거쳤다.
 
 ## 라운드 이력 (git log --oneline)
 
@@ -51,9 +54,9 @@
 | [sizing-capacity.md](sizing-capacity.md) | size_tier/capacity_tier/sizing·DB/Redis 예산 | 수렴 |
 | [ecs-compose.md](ecs-compose.md) | ECS(배포 보류)·compose 로컬 경로 | 조건부 수렴 |
 | [admin-api.md](admin-api.md) | 관리 API — 인증/인가·VK 라이프사이클·예산·STS 로그인 | 수렴(HIGH 1·MED 1 수정) |
-| [gateway-proxy.md](gateway-proxy.md) | 게이트웨이 프록시 — VK/JWT·인가·레이트리밋·예산·회계 | 조건부 수렴(MED 1·LOW 1 수정, MED 1 문서화) |
-| [workers.md](workers.md) | cost-recorder·notification·pricing-lambda·policy-helper | 수렴(MED 3 등 7건 수정) |
-| [clients-agents.md](clients-agents.md) | gateway-cli·installer·cowork-installer·admin-chat-agent·query_db | 조건부 수렴(MED 1·LOW 3 수정) |
+| [gateway-proxy.md](gateway-proxy.md) | 게이트웨이 프록시 — VK/JWT·인가·레이트리밋·예산·회계 | 조건부 수렴(MED 1·LOW 1 + diff 스윕 1건 수정, MED 1 문서화) |
+| [workers.md](workers.md) | cost-recorder·notification·pricing-lambda·policy-helper | 수렴(MED 3 등 7건 + diff 스윕 2건 수정) |
+| [clients-agents.md](clients-agents.md) | gateway-cli·installer·cowork-installer·admin-chat-agent·query_db | 조건부 수렴(MED 1·LOW 3 + diff 스윕 9건 수정) |
 | [admin-ui.md](admin-ui.md) | Next.js 관리자 콘솔 — OIDC/PKCE·BFF 프록시·CSRF·시크릿 처리 | 수렴(MED 1·LOW 3 수정) |
 
 \* 캡처는 라이브 AWS/K8s 에서만 최종 검증 가능 — 코드 경로는 수렴.

@@ -116,6 +116,20 @@ def test_user_settings_golden_no_site_extra(
     assert "OTEL_RESOURCE_ATTRIBUTES" not in settings["env"]
 
 
+def test_otel_bearer_written_to_user_tier_only(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Diff-regression: --otel-auth-token lands in user settings.env.
+
+    The managed-side contract (never emitted there) is pinned by
+    test_managed_remove_backup's scrub tests.
+    """
+    _, settings, _ = _run(
+        monkeypatch, tmp_path, otel_auth_token="tok-secret",
+    )
+    assert settings["env"]["OTEL_EXPORTER_OTLP_HEADERS"] == "Authorization=Bearer tok-secret"
+
+
 def test_optional_default_models_written_only_when_supplied(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

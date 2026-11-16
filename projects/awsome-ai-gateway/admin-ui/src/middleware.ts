@@ -209,8 +209,9 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
     //    서버 컴포넌트의 모든 admin-api 호출만 401 이 됐다 — 화면 전체가 '—' 와
     //    fetchFailed 로 덮이고 로그인으로 돌아갈 방법이 없었다. 만료는 미인증과 같게
     //    취급한다(쿠키 제거 + 로그인 리다이렉트).
-    //    isSessionExpired 는 exp 클레임이 없거나 해석 불가면 false 를 준다 — dev 토큰에는
-    //    숫자 exp 가 없어서, 여기서 만료로 몰면 dev 로그인이 무한 리다이렉트가 된다.
+    //    isSessionExpired 는 exp 클레임이 없거나 해석 불가면 만료(true)로 본다 —
+    //    해석 불가를 통과시키면 위조 쿠키의 무기한 세션으로 악용된다. dev 토큰은
+    //    expires_at(ISO)이 항상 파싱되므로 이 fail-closed 판정에 걸리지 않는다.
     if (isSessionExpired(session)) {
       return redirectToLogin(request, true);
     }

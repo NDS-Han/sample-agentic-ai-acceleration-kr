@@ -469,9 +469,10 @@ def run_setup(
         p = urlparse(gateway_url)
         # 게이트웨이 스킴을 따라간다 — https 배포에서 bearer 헤더+프롬프트 로그가
         # 평문으로 나가지 않게. 명시 오버라이드는 site-extra 로 가능.
-        scheme = "https" if p.scheme == "https" else "http"
-        port = 443 if scheme == "https" else 80
-        otel_endpoint = f"{scheme}://{p.hostname}:{port}"
+        if p.hostname:
+            scheme = "https" if p.scheme == "https" else "http"
+            port = 443 if scheme == "https" else 80
+            otel_endpoint = f"{scheme}://{p.hostname}:{port}"
 
     user_id = _resolve_user_id()
     ca_bundle = configured_ca_bundle()

@@ -149,7 +149,8 @@ def setup(
     if not otel_endpoint and not config.otel_endpoint:
         from urllib.parse import urlparse
         p = urlparse(config.gateway_url)
-        otel_endpoint = f"http://{p.hostname}:4317"
+        if p.hostname:
+            otel_endpoint = f"http://{p.hostname}:4317"
     otel = otel_endpoint or config.otel_endpoint or None
     helper_path = api_key_helper or resolve_helper_path()
     # Claude Code executes statusLine as a shell command — a bare "statusline"

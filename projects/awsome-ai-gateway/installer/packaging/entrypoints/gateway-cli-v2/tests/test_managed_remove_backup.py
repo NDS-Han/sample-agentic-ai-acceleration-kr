@@ -98,3 +98,61 @@ def test_remove_backs_up_before_delete(managed_root: Path, tmp_path: Path) -> No
     backups = _backups(tmp_path / "backups")
     assert len(backups) == 1
     assert json.loads(backups[0].read_text(encoding="utf-8")) == original
+
+
+# ---------------------------------------------------------------------------
+# Diff-regression: pre-fix builds wrote OTEL_EXPORTER_OTLP_HEADERS (a bearer
+# credential) into the 0644 managed file. The marker's envKeys never listed it
+# again after the fix, so an upgrade-merge that only adds keys would leave the
+# stale token in the world-readable file forever. write_gateway_settings now
+# scrubs it from the merged env — unless site-extra explicitly re-pins it.
+# ---------------------------------------------------------------------------
+
+def test_write_scrubs_stale_otel_bearer(managed_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Upgrade path: a pre-fix bearer in managed env must not survive re-setup."""
+    monkeypatch.setattr("cli.managed.managed_extra", lambda: {})
+    mf = managed._managed_file()
+    mf.write_text(json.dumps({
+        "env": {
+            "OTEL_EXPORTER_OTLP_HEADERS": "Authorization=Bearer stale",
+            "ORG_KEEP": "v",
+        },
+        _MARKER: {
+            "managed": True,
+            "envKeys": ["OTEL_EXPORTER_OTLP_HEADERS"],
+            "topKeys": [],
+            "fileExisted": True,
+        },
+    }), encoding="utf-8")
+
+    managed.write_gateway_settings(
+        gateway_url="https://gw", admin_api_url="https://admin",
+        api_key_helper_path="/x/api-key-helper",
+        otel_auth_token="fresh-token",
+    )
+
+    data = json.loads(mf.read_text(encoding="utf-8"))
+    assert data["env"]["ORG_KEEP"] == "v"
+    # 스크럽됨 — 신규 토큰도 managed 에 심지 않고 user tier 로만 간다.
+    assert "OTEL_EXPORTER_OTLP_HEADERS" not in data["env"]
+    # marker 도 이전 envKeys 에 남은 키를 추적하지 않는다.
+    assert "OTEL_EXPORTER_OTLP_HEADERS" not in data[_MARKER]["envKeys"]
+
+
+def test_write_site_extra_explicit_otel_header_survives(
+    managed_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Operator escape hatch: site-extra managed.env OTEL_* pins still win."""
+    monkeypatch.setattr("cli.managed.managed_extra", lambda: {
+        "env": {"OTEL_EXPORTER_OTLP_HEADERS": "Authorization=Bearer site-pin"}
+    })
+    mf = managed._managed_file()
+    mf.write_text(json.dumps({"env": {"ORG_KEEP": "v"}}), encoding="utf-8")
+
+    managed.write_gateway_settings(
+        gateway_url="https://gw", admin_api_url="https://admin",
+        api_key_helper_path="/x/api-key-helper",
+    )
+
+    data = json.loads(mf.read_text(encoding="utf-8"))
+    assert data["env"]["OTEL_EXPORTER_OTLP_HEADERS"] == "Authorization=Bearer site-pin"

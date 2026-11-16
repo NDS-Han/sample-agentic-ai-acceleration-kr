@@ -173,7 +173,10 @@ class AuthMiddleware:
                 source_ip = peer[0] if peer else "unknown"
             # DUAL 경로(/v1/messages 등)는 대부분 VK 인데 경로만 보고 JWT 로 분류하면
             # VK 브루트포스가 JWT 버킷에 쌓여 탐지가 왜곡된다 — 토큰 형태로 분류한다.
-            token = authorization.split(None, 1)[1] if " " in authorization else authorization
+            # "Bearer " 같이 접두만 있는 헤더는 split(None,1)[1] 이 IndexError —
+            # 마지막 토큰을 안전하게 꺼낸다(없으면 헤더 전체를 쓰되 공백 제거).
+            parts = authorization.split()
+            token = parts[-1] if parts else authorization
             auth_type = AuthType.JWT if _is_jwt_token(token) else AuthType.VIRTUAL_KEY
             from app.services.streaming import _spawn
 

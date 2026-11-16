@@ -120,7 +120,7 @@ def _secure_write(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     # tmp+os.replace — O_TRUNC 인플레이스는 크래시 시 잘린 토큰 파일을 남겨
     # 다음 호출이 JSON 파싱 실패로 재로그인을 강제한다.
-    tmp = path.with_name(path.name + ".tmp")
+    tmp = path.with_name(f"{path.name}.tmp-{os.getpid()}")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
         try:

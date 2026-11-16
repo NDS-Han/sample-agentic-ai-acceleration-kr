@@ -574,6 +574,11 @@ def write_gateway_settings(
 
     # Merge env key-by-key so org env vars we don't manage survive untouched.
     merged_env = dict(existing.get("env") or {})
+    # 이전 빌드가 managed tier 에 심어둔 OTEL bearer 는 제거한다 — env merge 는
+    # 덧붙이기만 하고 marker envKeys 에서도 빠져 있어 그대로 두면 0644 파일에
+    # 영구 잔존한다. site-extra managed.env 의 명시 핀은 위 fold 가 gateway_env
+    # 에 실어 여기서 되살아난다.
+    merged_env.pop("OTEL_EXPORTER_OTLP_HEADERS", None)
     merged_env.update(gateway_env)
     settings["env"] = merged_env
 

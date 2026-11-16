@@ -30,6 +30,8 @@
 | 7 | LOW | `unsubscribe` 실패 시 `aclose` 누락 — 재시작 주기당 pubsub 연결 orphan. → 두 리스너 모두 unsubscribe 실패를 삼키고 aclose 보장 |
 | 8 | LOW | `internal_api_sender` timeout 하드코딩(10s)·3xx→영구 rejected — 설정 튜너블/명시 처리 권장 |
 | 9 | LOW | 발송 성공 후 finalize commit 실패 → sweeper 재발송 중복 메일(설계상 한계, 하트비트로 축소 가능) |
+| 10 | LOW | `channel_listener.py` 이벤트 처리 실패 로그의 `str(exc)` 미마스킹 잔여 — diff 스윕에서 발견, `mask_emails_in_text` 적용 |
+| 11 | LOW | pricing-lambda `read(MAX+1)` 절단본을 그대로 `json.loads` — 명시 길이 검사로 오류 메시지 명확화(diff 스윕) |
 
 ## 잔여 리스크(계약상 허용·문서화 확인)
 

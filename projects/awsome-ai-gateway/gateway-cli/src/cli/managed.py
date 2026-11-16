@@ -151,8 +151,16 @@ def build_gateway_settings(
         env["OTEL_METRICS_EXPORTER"] = "otlp"
         env["OTEL_TRACES_EXPORTER"] = "otlp"
         env["CLAUDE_CODE_ENHANCED_TELEMETRY_BETA"] = "1"
+        # OTEL bearer 는 managed tier(0644 — 로컬 전 사용자 가독)에 심지 않는다.
+        # v1 은 user-tier settings.json 라이터가 없으므로 토큰 인증이 필요하면
+        # 사용자별 ~/.claude/settings.json env 에 수동으로 넣도록 안내한다.
         if otel_auth_token:
-            env["OTEL_EXPORTER_OTLP_HEADERS"] = f"Authorization=Bearer {otel_auth_token}"
+            structlog.get_logger(__name__).warning(
+                "otel_auth_token_not_in_managed",
+                detail="OTEL bearer token 은 user-tier 에만 두어야 합니다 — "
+                "~/.claude/settings.json env 에 OTEL_EXPORTER_OTLP_HEADERS 를 "
+                "수동 설정하세요(managed-settings.json 은 전 사용자 가독).",
+            )
 
     return {
         "_comment": "LLM Gateway — managed by gateway-cli",
