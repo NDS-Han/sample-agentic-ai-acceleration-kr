@@ -15,6 +15,28 @@ const MAX_FIELD_CHARS = 2048;
 // 덮어쓰거나(spread 순서) 구조화 로그 파서를 오염시킨다(로그 위조).
 const ALLOWED_FIELDS = new Set(['message', 'stack', 'url', 'component', 'digest']);
 
+// 위조 JWT 통과 잔여면: 이 라우트는 admin-api 를 호출하지 않으므로 "서명은
+// upstream 이 검증" 전제가 성립하지 않는다 — 형식+만료만 맞는 위조 쿠키로
+// 무제한 로그 쓰기가 가능했다. per-IP fixed-window 로 상한을 둔다.
+const WINDOW_MS = 60_000;
+const MAX_PER_WINDOW = 20;
+const _buckets = new Map<string, { start: number; count: number }>();
+
+function rateLimited(ip: string): boolean {
+  const now = Date.now();
+  const b = _buckets.get(ip);
+  if (!b || now - b.start >= WINDOW_MS) {
+    _buckets.set(ip, { start: now, count: 1 });
+    // 무한 성장 방지 — 창이 지난 항목을 주기적으로 청소한다.
+    if (_buckets.size > 10_000) {
+      for (const [k, v] of _buckets) if (now - v.start >= WINDOW_MS) _buckets.delete(k);
+    }
+    return false;
+  }
+  b.count += 1;
+  return b.count > MAX_PER_WINDOW;
+}
+
 function truncate(v: unknown): string | undefined {
   if (v === undefined || v === null) return undefined;
   const s = typeof v === 'string' ? v : String(v);
@@ -37,6 +59,13 @@ export async function POST(request: NextRequest) {
     }
   } catch {
     return Response.json(unauthorizedBody(), { status: 401 });
+  }
+
+  // XFF 가장 오른쪽 홉 = 프록시가 기록한 직접 클라이언트(위조 불가 영역).
+  const xff = request.headers.get('x-forwarded-for') ?? '';
+  const clientIp = xff.split(',').pop()?.trim() || 'unknown';
+  if (rateLimited(clientIp)) {
+    return Response.json({ error: 'rate_limited' }, { status: 429 });
   }
 
   const bounded = await readBoundedBody(request, MAX_BODY_BYTES);

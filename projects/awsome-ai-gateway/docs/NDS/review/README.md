@@ -54,6 +54,7 @@
 | [gateway-proxy.md](gateway-proxy.md) | 게이트웨이 프록시 — VK/JWT·인가·레이트리밋·예산·회계 | 조건부 수렴(MED 1·LOW 1 수정, MED 1 문서화) |
 | [workers.md](workers.md) | cost-recorder·notification·pricing-lambda·policy-helper | 수렴(MED 3 등 7건 수정) |
 | [clients-agents.md](clients-agents.md) | gateway-cli·installer·cowork-installer·admin-chat-agent·query_db | 조건부 수렴(MED 1·LOW 3 수정) |
+| [admin-ui.md](admin-ui.md) | Next.js 관리자 콘솔 — OIDC/PKCE·BFF 프록시·CSRF·시크릿 처리 | 수렴(MED 1·LOW 3 수정) |
 
 \* 캡처는 라이브 AWS/K8s 에서만 최종 검증 가능 — 코드 경로는 수렴.
 

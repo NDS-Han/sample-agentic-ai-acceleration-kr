@@ -30,7 +30,14 @@ export default async function BudgetsPage(props: BudgetsPageProps) {
   const focusUser = searchParams.user && UUID_RE.test(searchParams.user) ? searchParams.user : undefined;
   const cookieStore = await cookies();
   const jwt = cookieStore.get('admin_jwt')?.value;
-  const session = jwt ? parseJWT(jwt) : null;
+  // 손상된 토큰도 error boundary 로 튀지 않게 — middleware 선검사에 의존하는
+  // 암묵 전제를 여기서도 방어한다(403/page.tsx 와 같은 패턴).
+  let session: ReturnType<typeof parseJWT> | null = null;
+  try {
+    session = jwt ? parseJWT(jwt) : null;
+  } catch {
+    session = null;
+  }
   // IdP 토큰에는 role 클레임이 없다 — OIDC 로그인의 유효 역할은 콜백이
   // /admin/my/profile 결과로 구워 둔 admin_role 쿠키에 있다(DB 역할/ADMIN_EMAILS
   // 관리자는 JWT 상으로 role=undefined). layout/403 과 같은 병합 규칙을 쓴다 —

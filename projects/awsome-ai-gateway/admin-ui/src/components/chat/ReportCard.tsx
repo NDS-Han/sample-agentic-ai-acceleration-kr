@@ -38,6 +38,15 @@ export function ReportCard({ report }: { report: ReportFile }) {
       }
       const data = (await res.json()) as { download_url: string };
       // presigned URL 로 다운로드 트리거(새 탭 — Content-Disposition: attachment).
+      // 스킴 검증 — upstream 응답이 조작됐을 때 javascript: URL 이 관리자
+      // 페이지 컨텍스트에서 실행되는 것을 막는다(ChartRenderer 의 https: 전용과 동일).
+      try {
+        if (new URL(data.download_url).protocol !== 'https:') {
+          throw new Error('허용되지 않는 다운로드 URL 형식');
+        }
+      } catch {
+        throw new Error('다운로드 URL 형식이 올바르지 않습니다');
+      }
       window.open(data.download_url, '_blank', 'noopener,noreferrer');
     } catch (e) {
       setErr(e instanceof Error ? e.message : '다운로드 중 오류');

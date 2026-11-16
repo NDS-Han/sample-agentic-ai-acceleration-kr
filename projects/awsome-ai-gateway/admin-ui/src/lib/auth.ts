@@ -169,7 +169,10 @@ export function isSessionExpired(session: AdminSession, nowMs: number = Date.now
     expiresAtMs = Date.parse(raw); // ISO 8601 도 받아준다
   }
 
-  if (!Number.isFinite(expiresAtMs)) return false; // 해석 불가 → 판정 보류
+  // 해석 불가는 만료로 본다 — dev 토큰은 expires_at(ISO)이 항상 파싱되므로 이
+  // 분기를 타는 건 위조/손상 토큰뿐이다. 서명 검증이 없는 만큼 판정 보류는
+  // fail-open 이라 위조 쿠키가 페이지 게이트를 통과한다.
+  if (!Number.isFinite(expiresAtMs)) return true;
 
   return expiresAtMs - CLOCK_SKEW_SECONDS * 1000 <= nowMs;
 }

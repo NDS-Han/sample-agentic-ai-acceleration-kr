@@ -104,12 +104,14 @@ describe('middleware — session expiry', () => {
     expect(res.headers.get('location')).toBeNull();
   });
 
-  it('lets a token with an UNPARSEABLE expiry through — 판정 보류', async () => {
-    // 만료를 확신할 수 없을 때 튕겨내면 정상 사용자를 잠글 수 있다.
+  it('redirects a token with an UNPARSEABLE expiry — 해석 불가는 만료(fail-closed)', async () => {
+    // dev 토큰은 expires_at(ISO)이 항상 파싱되므로 이 분기는 위조/손상 토큰
+    // 전용이다 — 서명 검증이 없어 판정 보류(fail-open)는 위조 쿠키 통과였다.
     const res = await middleware(
       requestWith(`dev.${b64url({ role: 'ADMIN', expires_at: 'not-a-date' })}.sig`),
     );
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(307);
+    expectSameOriginRedirect(res, '/api/auth/login');
   });
 
   it('redirects when the expiry is inside the skew window (UI 가 먼저 만료로 본다)', async () => {
