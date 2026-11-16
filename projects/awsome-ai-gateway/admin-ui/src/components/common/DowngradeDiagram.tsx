@@ -2,7 +2,7 @@
 
 // Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
 
-import type { ModelListItem } from '@/types/entities';
+import type { PolicyModelRef } from '@/types/entities';
 import { applyChain, type DowngradeRuleLike } from '@/lib/downgrade';
 
 export interface DowngradeDiagramRule {
@@ -34,8 +34,8 @@ export function DowngradeDiagram({
   terminalLabel,
 }: {
   rules: DowngradeDiagramRule[];
-  models: ModelListItem[];
-  formatOutPrice: (_m: ModelListItem) => string;
+  models: PolicyModelRef[];
+  formatOutPrice: (_m: PolicyModelRef) => string;
   edgeTag?: (_rule: DowngradeDiagramRule) => string | null;
   /** null/undefined 이면 시뮬레이션 끔. 값이면 팀 예산 사용률 %로 해석. */
   simPct?: number | null;

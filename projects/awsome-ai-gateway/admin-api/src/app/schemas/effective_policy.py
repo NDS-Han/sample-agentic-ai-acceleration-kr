@@ -45,6 +45,15 @@ class EffectiveDowngradeRule(BaseModel):
     to_model_alias: str
 
 
+class EffectivePolicyModel(BaseModel):
+    """다이어그램 표시용 최소 모델 정보 — /admin/models 는 ADMIN 전용이라
+    비-ADMIN 뷰(/my)가 별도로 카탈로그를 못 가져와 단가가 '—' 로 빠졌다.
+    응답 자체에 실어 어떤 롤이든 가격을 렌더할 수 있게 한다."""
+
+    alias: str
+    output_price_per_1k: str | None  # 현재 open 단가 행이 없으면 None
+
+
 class EffectivePolicyResponse(BaseModel):
     # 팀 스코프 뷰(get_for_team)에서는 user_id/email 이 None — 팀에는 의미가 없다.
     user_id: str | None = None
@@ -65,3 +74,6 @@ class EffectivePolicyResponse(BaseModel):
     budgets: list[EffectiveBudgetEntry]
     rate_limits: list[EffectiveRateLimitEntry]
     downgrade_rules: list[EffectiveDowngradeRule]
+    # cells + downgrade_rules 에 등장하는 모든 별칭의 현재 output 단가 —
+    # 카탈로그에 없는 규칙 별칭은 누락된다(UI 가 '—' 로 표시).
+    models: list[EffectivePolicyModel] = []

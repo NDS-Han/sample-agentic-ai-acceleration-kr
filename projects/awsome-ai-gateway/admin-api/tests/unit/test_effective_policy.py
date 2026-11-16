@@ -121,6 +121,37 @@ class TestGetForUser:
         assert _cell(res.cells, "cowork", "opus-5").allowed
         assert _cell(res.cells, "codex", "opus-5").blocked_by == ["user_app"]
 
+    async def test_models_carry_current_output_price(self):
+        """응답 내장 models — /admin/models 가 ADMIN 전용이라 비-ADMIN 소비자
+        (/my)는 이 필드로만 단가를 렌더할 수 있다. 마지막 쿼리가 ModelPricing."""
+        from decimal import Decimal
+
+        user = MagicMock(spec=User)
+        user.id = uuid.uuid4()
+        user.email = "dev@example.com"
+        user.team_id = None
+
+        session = MagicMock()
+        session.execute = AsyncMock(
+            side_effect=[
+                _exec_result(scalar=user),              # User
+                _exec_result(scalars=[]),               # user_allowed_clients
+                _exec_result(scalars=[]),               # user_allowed_models
+                _exec_result(rows=[("opus-5", None)]),  # ModelAlias
+                _exec_result(scalars=[]),               # BudgetConfig
+                _exec_result(scalars=[]),               # BudgetUsage
+                _exec_result(scalars=[]),               # RateLimitConfig
+                _exec_result(scalars=[]),               # RoutingProfile
+                _exec_result(                           # ModelPricing
+                    rows=[("opus-5", Decimal("0.015"))]
+                ),
+            ]
+        )
+        res = await EffectivePolicyService(session).get_for_user(user.id)
+
+        m = next(x for x in res.models if x.alias == "opus-5")
+        assert m.output_price_per_1k == "0.015"
+
 
 def _user_with_team(*, dept_id=None):
     """team/dept 체인이 있는 사용자·팀 모사."""

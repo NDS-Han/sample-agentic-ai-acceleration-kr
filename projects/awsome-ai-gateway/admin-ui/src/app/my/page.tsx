@@ -4,7 +4,6 @@ import { Suspense } from 'react';
 import { getTranslations } from 'next-intl/server';
 import { SkeletonCard } from '@/components/common/SkeletonCard';
 import { fetchMyBudget, fetchMyEffectivePolicy, fetchMyPeriods, fetchMyUsage } from '@/lib/actions/my';
-import { listActiveModelsAction } from '@/lib/actions/models';
 import { MyUsageDashboard } from '@/components/my/MyUsageDashboard';
 import { EffectivePolicyCard } from '@/components/users/EffectivePolicyCard';
 import { PeriodSelector } from '@/components/dashboard/PeriodSelector';
@@ -26,16 +25,12 @@ async function UsageSection({ period }: { period?: string }) {
 }
 
 // 유효 정책 카드 — 기간 선택과 무관한 현재 상태라 대시보드 아래 별개 섹션.
-// 정책 합성과 모델 카탈로그(다운그레이드 단가 표기용)를 병렬로 가져오고,
+// /admin/models 는 ADMIN 전용이라 여기서 별도 카탈로그를 못 가져온다 —
+// 다이어그램 단가는 effective-policy 응답에 실린 models 로 카드가 자체 해결한다.
 // 실패는 카드 안쪽으로 격리해 사용량 대시보드를 깨지 않게 한다.
 async function PolicySection() {
-  const [policy, models] = await Promise.all([
-    fetchMyEffectivePolicy().catch(() => null),
-    listActiveModelsAction().then((r) => (r.success ? r.data : [])).catch(() => []),
-  ]);
-  return (
-    <EffectivePolicyCard policy={policy} loadFailed={policy === null} models={models} />
-  );
+  const policy = await fetchMyEffectivePolicy().catch(() => null);
+  return <EffectivePolicyCard policy={policy} loadFailed={policy === null} />;
 }
 
 interface MyPageProps {

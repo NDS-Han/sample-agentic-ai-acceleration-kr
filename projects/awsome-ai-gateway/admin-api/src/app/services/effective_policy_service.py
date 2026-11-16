@@ -35,6 +35,7 @@ from app.models.auth import (
 from app.models.budget import BudgetConfig, BudgetScope, BudgetUsage, DowngradePolicy
 from app.models.model import (
     ModelAlias,
+    ModelPricing,
     ModelStatus,
     RateLimitConfig,
     RateLimitScope,
@@ -46,6 +47,7 @@ from app.schemas.effective_policy import (
     EffectiveBudgetEntry,
     EffectiveDowngradeRule,
     EffectivePolicyCell,
+    EffectivePolicyModel,
     EffectivePolicyResponse,
     EffectiveRateLimitEntry,
 )
@@ -88,6 +90,43 @@ def compute_cells(
 class EffectivePolicyService:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
+
+    async def _model_infos(
+        self,
+        cells: list[EffectivePolicyCell],
+        downgrade_rules: list[EffectiveDowngradeRule],
+    ) -> list[EffectivePolicyModel]:
+        """cells + 규칙에 등장하는 별칭의 현재 output 단가 — 한 쿼리.
+
+        /admin/models 가 ADMIN 전용이라 비-ADMIN 소비자(/my)가 별도 카탈로그를
+        못 가져온다. 응답에 실어 어떤 롤이든 다이어그램 단가를 렌더할 수 있게.
+        """
+        aliases = {c.model_alias for c in cells}
+        for r in downgrade_rules:
+            aliases.update((r.from_model_alias, r.to_model_alias))
+        if not aliases:
+            return []
+        rows = (
+            await self.session.execute(
+                select(
+                    ModelPricing.model_alias,
+                    ModelPricing.output_price_per_1k_tokens,
+                ).where(
+                    ModelPricing.model_alias.in_(aliases),
+                    ModelPricing.effective_until.is_(None),
+                )
+            )
+        ).all()
+        prices = dict(rows)
+        return [
+            EffectivePolicyModel(
+                alias=a,
+                output_price_per_1k=(
+                    str(prices[a]) if a in prices else None
+                ),
+            )
+            for a in sorted(aliases)
+        ]
 
     async def get_for_user(self, user_id: uuid.UUID) -> EffectivePolicyResponse:
         user = (
@@ -311,6 +350,7 @@ class EffectivePolicyService:
             budgets=budgets,
             rate_limits=rate_limits,
             downgrade_rules=downgrade_rules,
+            models=await self._model_infos(cells, downgrade_rules),
         )
 
     async def get_for_team(self, team_id: uuid.UUID) -> EffectivePolicyResponse:
@@ -498,4 +538,5 @@ class EffectivePolicyService:
             budgets=budgets,
             rate_limits=rate_limits,
             downgrade_rules=downgrade_rules,
+            models=await self._model_infos(cells, downgrade_rules),
         )

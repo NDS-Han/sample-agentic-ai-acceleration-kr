@@ -15,7 +15,7 @@ import {
   setDowngradeConfigAction,
   deleteDowngradeConfigAction,
 } from '@/lib/actions/budgets';
-import type { ModelListItem } from '@/types/entities';
+import type { ModelListItem, PolicyModelRef } from '@/types/entities';
 import { NumberInput } from '@/components/common/NumberInput';
 
 interface DowngradeRuleForm {
@@ -70,7 +70,8 @@ export function AutoDowngradeConfig({ scopeType, scopeId, scopeName, models, mod
   };
 
   // 저장값은 per-1K — 표기는 1M 기준 output 단가가 읽기 쉽다 ($0.015/1K → $15/1M).
-  const formatOutPrice = (m: ModelListItem) => {
+  const formatOutPrice = (m: PolicyModelRef) => {
+    if (m.output_price_per_1k == null) return '—';
     const per1m = m.output_price_per_1k * 1000;
     return `$${per1m.toFixed(2).replace(/\.?0+$/, '')}/1M output`;
   };

@@ -8,7 +8,7 @@ import { useTranslations } from 'next-intl';
 import { getEffectivePolicyAction, getTeamEffectivePolicyAction } from '@/lib/actions/users';
 import { DowngradeDiagram } from '@/components/common/DowngradeDiagram';
 import { CLIENTS as GATEWAY_CLIENTS } from '@/lib/constants/gateway';
-import type { EffectivePolicy, EffectivePolicyCell, ModelListItem } from '@/types/entities';
+import type { EffectivePolicy, EffectivePolicyCell, PolicyModelRef } from '@/types/entities';
 
 interface Props {
   /** policy 를 넘기면 불필요(자체 fetch 용). 팀 뷰처럼 부모 소유 데이터면 생략. */
@@ -19,8 +19,8 @@ interface Props {
   policy?: EffectivePolicy | null;
   /** 부모가 policy 를 소유할 때 로드 실패를 함께 전달 — null policy 와 구분한다. */
   loadFailed?: boolean;
-  /** 다운그레이드 다이어그램의 output 단가 표기용 — 없으면 단가 칸은 '—'. */
-  models?: ModelListItem[];
+  /** 다이어그램 단가 표기용 오버라이드 — 생략하면 policy.models (응답 내장) 사용. */
+  models?: PolicyModelRef[];
 }
 
 /** 거부 축 id → i18n 키 매핑. */
@@ -70,6 +70,16 @@ export function EffectivePolicyCard({ userId, teamId, policy: policyProp, loadFa
   const cellAt = (client: string, alias: string): EffectivePolicyCell | undefined =>
     policy.cells.find((c) => c.client === client && c.model_alias === alias);
 
+  // 단가 소스: props 우선, 없으면 응답 내장 models — /admin/models 가 ADMIN
+  // 전용이라 /my 처럼 비-ADMIN 소비자는 응답 실린 값에만 의지할 수 있다.
+  const modelsForDiagram: PolicyModelRef[] =
+    models ??
+    (policy.models ?? []).map((m) => ({
+      alias: m.alias,
+      output_price_per_1k:
+        m.output_price_per_1k == null ? null : parseFloat(m.output_price_per_1k),
+    }));
+
   return (
     <div className="space-y-3">
       {/* 상: 다운그레이드 다이어그램(전체 폭 — 노드/엣지가 읽힐 크기가 필요) /
@@ -81,8 +91,9 @@ export function EffectivePolicyCard({ userId, teamId, policy: policyProp, loadFa
         {policy.downgrade_rules.length > 0 ? (
           <DowngradeDiagram
             rules={policy.downgrade_rules}
-            models={models ?? []}
+            models={modelsForDiagram}
             formatOutPrice={(m) => {
+              if (m.output_price_per_1k == null) return '—';
               const per1m = m.output_price_per_1k * 1000;
               return `$${per1m.toFixed(2).replace(/\.?0+$/, '')}/1M output`;
             }}

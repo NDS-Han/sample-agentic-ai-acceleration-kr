@@ -364,6 +364,18 @@ export interface EffectiveDowngradeRule {
   to_model_alias: string;
 }
 
+export interface EffectivePolicyModel {
+  alias: string;
+  output_price_per_1k: string | null;
+}
+
+/** 다이어그램/정책 카드가 요구하는 최소 모델 정보 — ModelListItem 이 이를
+ *  구조적으로 만족하므로 어느 소스든 그대로 넘길 수 있다. */
+export interface PolicyModelRef {
+  alias: string;
+  output_price_per_1k: number | null;
+}
+
 export interface EffectivePolicy {
   // 팀 스코프 뷰(GET /admin/teams/{id}/effective-policy)에서는 null.
   user_id: string | null;
@@ -379,6 +391,9 @@ export interface EffectivePolicy {
   budgets: EffectiveBudgetEntry[];
   rate_limits: EffectiveRateLimitEntry[];
   downgrade_rules: EffectiveDowngradeRule[];
+  // cells + 규칙에 등장하는 별칭의 현재 output 단가 — /admin/models 가
+  // ADMIN 전용이라 비-ADMIN 소비자(/my)용으로 응답에 포함된다.
+  models?: EffectivePolicyModel[];
 }
 
 // ── 서비스 계정 키 단위 사용량 (GET /admin/service-accounts/{id}/usage) ──
