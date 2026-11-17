@@ -582,7 +582,7 @@ def check_eks(cfg: GatewayConfig, gen_dir: Path, repo_root: Path,
             owned = None
         if owned:
             items = [i for i in items
-                     if str(_d(_d(i.get("metadata")).get("name")) or "")
+                     if str(_d(i.get("metadata")).get("name") or "")
                      in owned]
         # 서비스 식별은 component 라벨 우선 — 이름 프리픽스는 fullnameOverride
         # 면 어긋나 전부 "deployment 없음" 으로 오진된다. 라벨 없는 수동 배포는
