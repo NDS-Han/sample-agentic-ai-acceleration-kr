@@ -192,6 +192,9 @@ git status --short               # 미커밋 변경은 태그(SHA)와 이미지�
   (`./deploy apply --build --all`).
 - **태그 규약** — git HEAD short SHA (rebuild-image.sh 와 동일). ECR 에
   이미 있는 태그는 immutable 규약상 빌드를 건너뛰고 핀만 갱신합니다.
+- **비-ECR 레지스트리** — `images.registry` 가 ECR 이 아니면 존재 확인이
+  불가라 ECR 로그인/태그 조회를 건너뛰고 대상 서비스를 항상 빌드+push
+  합니다(사전 docker login 필요). cross-region ECR 도 지원됩니다.
 - **핀 갱신** — `gateway.yaml` 의 `images.tags` 를 새 태그로 자동 갱신하고
   재로드해 render 에 반영합니다. `scheduler` 는 admin-api 이미지 공유라
   admin-api 가 리빌드되면 핀이 함께 따라갑니다.

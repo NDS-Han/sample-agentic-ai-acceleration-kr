@@ -25,6 +25,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import yaml
+
 from .bootstrap import EKS_SERVICES
 from .schema import GatewayConfig
 
@@ -93,7 +95,8 @@ def _migration_gate(cfg: GatewayConfig, repo_root: Path,
     같이 빌드하지 않으면 중단 — rebuild-image.sh R24-S5 게이트 이식."""
     if "migration" in want:
         return
-    mig_pin = (cfg.images.tags or {}).get("migration") or ""
+    # render 와 같은 폴백 — 무핀이면 images.tag 가 migration 태그다.
+    mig_pin = (cfg.images.tags or {}).get("migration") or cfg.images.tag or ""
     if not mig_pin or not _is_commit(repo_root, mig_pin):
         return  # 비교 불가면 게이트 불가 — 경고 단계에서 이미 알림
     r = _q(["git", "diff", "--quiet", "--diff-filter=A", mig_pin, "HEAD",
@@ -121,37 +124,54 @@ def _ecr_has_tag(repo: str, tag: str, region: str,
     return None  # 권한/네트워크 — 유보
 
 
-def _registry(cfg: GatewayConfig, region: str) -> tuple[str, str]:
-    """(registry 호스트, registry_id) — 선언값 우선, 없으면 ECR 계정 추론."""
+# bootstrap.push_images_eks 와 같은 판별 — ECR 호스트만 aws ecr API 대상.
+_ECR_RE = re.compile(
+    r"^(\d{12})\.dkr\.ecr\.([a-z0-9-]+)\.amazonaws\.com(\.cn)?$")
+
+
+def _registry(cfg: GatewayConfig, region: str) -> tuple[str, str, str | None]:
+    """(registry 호스트, registry_id, ecr_region) — ecr_region 이 None 이면
+    비-ECR 레지스트리(harbor 등)라 aws ecr API/로그인 대상이 아니다.
+    cross-region ECR 은 호스트에 박힌 리전이 API 리전이다(deploy 리전 X)."""
     registry = (cfg.images.registry or "").rstrip("/")
-    if registry:
-        return registry, (registry.split(".", 1)[0]
-                          if ".dkr.ecr." in registry else "")
-    from .eks_apply import _aws_account_id  # 늦은 import — 호출 시점 로드
-    account = _aws_account_id(region)
-    if not account:
-        raise SystemExit("images.registry 미지정 + account 추론 실패 — "
-                         "ECR 대상을 정할 수 없습니다")
-    return f"{account}.dkr.ecr.{region}.amazonaws.com", account
+    if not registry:
+        from .eks_apply import _aws_account_id  # 늦은 import — 호출 시점 로드
+        account = _aws_account_id(region)
+        if not account:
+            raise SystemExit("images.registry 미지정 + account 추론 실패 — "
+                             "ECR 대상을 정할 수 없습니다")
+        registry = f"{account}.dkr.ecr.{region}.amazonaws.com"
+    m = _ECR_RE.match(registry)
+    if m:
+        return registry, m.group(1), m.group(2)
+    return registry, "", None
 
 
 def _push_set(cfg: GatewayConfig, region: str, tag: str,
               want: dict[str, str], repo_root: Path) -> None:
-    """want 의 서비스를 tag 로 build+push — 이미 ECR 에 있으면 빌드 생략."""
-    registry, registry_id = _registry(cfg, region)
-    pw = _q(["aws", "ecr", "get-login-password", "--region", region])
-    if pw.returncode != 0:
-        raise SystemExit(f"ECR 로그인 실패: {pw.stderr.strip()[:200]}")
-    login = _q(["docker", "login", "--username", "AWS", "--password-stdin",
-                registry], input=pw.stdout)
-    if login.returncode != 0:
-        raise SystemExit(f"docker login 실패: {login.stderr.strip()[:200]}")
+    """want 의 서비스를 tag 로 build+push — ECR 이면 기존 태그는 빌드 생략."""
+    registry, registry_id, ecr_region = _registry(cfg, region)
+    if ecr_region:
+        pw = _q(["aws", "ecr", "get-login-password",
+                 "--region", ecr_region])
+        if pw.returncode != 0:
+            raise SystemExit(f"ECR 로그인 실패: {pw.stderr.strip()[:200]}")
+        login = _q(["docker", "login", "--username", "AWS",
+                    "--password-stdin", registry], input=pw.stdout)
+        if login.returncode != 0:
+            raise SystemExit(
+                f"docker login 실패: {login.stderr.strip()[:200]}")
+    else:
+        print(f"ⓘ images.registry({registry}) 가 ECR 이 아닙니다 — ECR "
+              "로그인/태그 확인을 건너뜁니다. 대상 레지스트리에 docker "
+              "login 돼 있어야 push 가 성공합니다", file=sys.stderr)
 
     for helm_key, repo, ctx in EKS_SERVICES:
         if helm_key not in want:
             continue
         image = f"{registry}/llm-gateway/{repo}:{tag}"
-        have = _ecr_has_tag(repo, tag, region, registry_id)
+        have = (_ecr_has_tag(repo, tag, ecr_region, registry_id)
+                if ecr_region else False)  # 비-ECR 은 존재 확인 불가 → 빌드
         if have is True:
             print(f"  ⏭ {image} — ECR 에 이미 있음(태그 동일 = 코드 동일) "
                   "— 빌드 생략, 핀만 갱신", file=sys.stderr)
@@ -219,7 +239,12 @@ def rewrite_tags(text: str, updates: dict[str, str]) -> str:
                    if "#" in lines[i] else "")
         lines[i] = f'{m.group(1)}{key}: "{pending.pop(key)}"{comment}\n'
     if pending:
-        indent = "    "
+        # 기존 항목의 들여쓰기를 따른다 — 없으면 tags: 보다 한 단계 안쪽.
+        # 하드코딩된 깊이는 파일의 실제 관례와 어긋나 malformed YAML 이 된다.
+        indent = next(
+            (m.group(1) for i in range(tags_i + 1, block_end)
+             if (m := _TAG_LINE.match(lines[i].rstrip("\n")))),
+            " " * (len(lines[tags_i]) - len(lines[tags_i].lstrip()) + 2))
         ins = tags_i + 1
         for key, tag in pending.items():
             lines.insert(ins, f'{indent}{key}: "{tag}"\n')
@@ -243,15 +268,19 @@ def build_and_pin(cfg: GatewayConfig, repo_root: Path, config_path: Path,
     """--build 진입점 — 감지→게이트→빌드/푸시→yaml 핀 갱신. 갱신 키 목록 반환.
 
     호출자는 반환 후 config 를 재로드해 render 가 새 핀을 보게 해야 한다."""
+    config_path = config_path.resolve()  # symlink 이면 실체에 쓴다 —
+    # read_text 는 링크를 따라가는데 _atomic_write(rename) 는 링크 자체를
+    # regular 파일로 바꿔 타겟이 어긋나는 걸 막는다.
     tag = _head_tag(repo_root)
     want = propagate_shared(detect_rebuilds(cfg, repo_root, build_all))
 
     _migration_gate(cfg, repo_root, want)
 
-    # 핀=HEAD 인데 ECR 에 없는 서비스는 감지에서 빠져 apply 가
+    # 핀=HEAD 인데 레지스트리에 이미지가 없는 서비스는 감지에서 빠져 apply 가
     # ImagePullBackOff 로 간다 — 핀만 쓴 수동 경로의 잔재를 여기서 회수.
     # scheduler 는 admin-api 이미지를 당기므로 같은 repo 를 확인한다.
-    registry, registry_id = _registry(cfg, cfg.aws.region)
+    # ECR 이면 describe 로 확인하고, 비-ECR 은 확인 자체가 불가라 전부 빌드.
+    _reg, registry_id, ecr_region = _registry(cfg, cfg.aws.region)
     tags = cfg.images.tags or {}
     ensure = [(k, repo) for k, repo, _ctx in EKS_SERVICES]
     ensure.append(("scheduler", "admin-api"))
@@ -261,7 +290,10 @@ def build_and_pin(cfg: GatewayConfig, repo_root: Path, config_path: Path,
         pin = tags.get(helm_key) or cfg.images.tag or ""
         if pin != tag:
             continue
-        have = _ecr_has_tag(repo, tag, cfg.aws.region, registry_id)
+        if not ecr_region:
+            want[helm_key] = "핀=HEAD — 비-ECR 이라 존재 확인 불가"
+            continue
+        have = _ecr_has_tag(repo, tag, ecr_region, registry_id)
         if have is False:
             want[helm_key] = "핀=HEAD인데 ECR 에 이미지 없음"
         elif have is None:
@@ -283,10 +315,24 @@ def build_and_pin(cfg: GatewayConfig, repo_root: Path, config_path: Path,
 
     _push_set(cfg, cfg.aws.region, tag, want, repo_root)
 
+    # config 가 git 추적 파일이면(커밋된 템플릿 등) 핀 쓰기가 working tree 를
+    # 오염시킨다 — gateway.yaml 처럼 무시된 정본이 관례라 미리 알린다.
+    if _q(["git", "ls-files", "--error-unmatch", config_path.name],
+          cwd=config_path.parent).returncode == 0:
+        print(f"⚠ {config_path} 는 git 추적 파일입니다 — 핀 갱신이 "
+              "커밋된 파일을 변경합니다", file=sys.stderr)
+
     updates = {k: tag for k in want}
     from .cli import _atomic_write
     text = config_path.read_text()
-    _atomic_write(config_path, rewrite_tags(text, updates))
+    new_text = rewrite_tags(text, updates)
+    try:
+        yaml.safe_load(new_text)
+    except yaml.YAMLError as exc:
+        raise SystemExit(
+            f"핀 갱신 결과가 YAML 로 파싱되지 않습니다 — "
+            f"{config_path} 는 건드리지 않았습니다: {exc}")
+    _atomic_write(config_path, new_text)
     print(f"  gateway.yaml 핀 갱신: "
           + ", ".join(f"{k}={t}" for k, t in updates.items()), file=sys.stderr)
     return sorted(updates)

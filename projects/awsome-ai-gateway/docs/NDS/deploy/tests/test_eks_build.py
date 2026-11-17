@@ -16,8 +16,10 @@ def _cp(rc=0, out="", err=""):
 
 
 def _cfg(tags=None, tag="base1111"):
-    img = types.SimpleNamespace(tags=tags or {}, tag=tag,
-                                registry="123.dkr.ecr.ap-south-1.amazonaws.com")
+    # _ECR_RE 는 \d{12} 계정을 요구 — 짧은 값은 비-ECR 경로로 빠진다.
+    img = types.SimpleNamespace(
+        tags=tags or {}, tag=tag,
+        registry="123456789012.dkr.ecr.ap-south-1.amazonaws.com")
     return types.SimpleNamespace(images=img,
                                  aws=types.SimpleNamespace(region="ap-south-1"))
 
@@ -151,6 +153,27 @@ class TestBuildAndPinEnsure:
         got, pushed = self._run(monkeypatch, tmp_path, pins, head, missing=())
         assert got == [] and pushed == {}
 
+    def test_non_ecr_registry_rebuilds_pinned_head(self, monkeypatch,
+                                                   tmp_path):
+        head = "d0496ed7"
+        pins = {k: head for k, _, _ in eks_build.EKS_SERVICES}
+        pins["scheduler"] = head
+        cfg = _cfg(pins, tag="old00000")
+        cfg.images.registry = "harbor.corp.local"   # 비-ECR — 확인 불가
+        monkeypatch.setattr(eks_build, "_q",
+                            self._fake_q(head, missing=()))
+        pushed = {}
+        monkeypatch.setattr(
+            eks_build, "_push_set",
+            lambda _c, _r, _t, want, _p: pushed.update(want))
+        cfg_file = tmp_path / "gateway.yaml"
+        cfg_file.write_text(TestRewriteTags.SAMPLE)
+        got = eks_build.build_and_pin(cfg, tmp_path, cfg_file)
+        # 존재 확인 자체가 불가 → 핀=HEAD 인 서비스는 전부 리빌드 대상
+        assert "adminApi" in pushed and "gatewayProxy" in pushed
+        assert "scheduler" in pushed   # admin-api repo 공유 확인분 포함
+        assert "비-ECR" in pushed["adminApi"]
+
     def test_ecr_lookup_error_does_not_rebuild(self, monkeypatch, tmp_path):
         head = "d0496ed7"
         pins = {k: head for k, _, _ in eks_build.EKS_SERVICES}
@@ -202,3 +225,13 @@ infra:
         assert 'scheduler: "d0496ed7"' in out
         # tags: 블록 안쪽에 삽입됨 — infra: 보다 앞
         assert out.index('adminUi: "d0496ed7"') < out.index("infra:")
+
+    def test_insert_follows_sibling_indent(self):
+        # 태그 항목이 6칸 들여쓰기면 삽입도 6칸 — 하드코딩 깊이면 깨진다.
+        text = ("images:\n"
+                "  tag: base1111\n"
+                "  tags:\n"
+                "      gatewayProxy: aaa11111\n"
+                "infra:\n  x: 1\n")
+        out = eks_build.rewrite_tags(text, {"adminApi": "d0496ed7"})
+        assert '\n      adminApi: "d0496ed7"\n' in out
