@@ -724,7 +724,7 @@ def _build_budget_429(reason: str, metrics=None) -> JSONResponse:
     """월예산 거절 429 — middleware/budget.py 의 에러 어휘와 맞춘다."""
     messages = {
         "no_team_assigned": "No team assigned. Contact your admin.",
-        "team_budget_unset": "팀 예산이 설정되지 않았습니다. 관리자에게 문의하세요.",
+        "team_budget_unset": "Team budget is not configured. Contact your admin.",
         "budget_backend_unavailable": "Budget service temporarily unavailable. Please retry.",
     }
     # 백엔드 장애는 월예산 고갈 429 가 아니라 503 — 클라이언트가 rate-limit

@@ -172,7 +172,7 @@ class BudgetMiddleware:
             message = "No budget assigned. Contact your admin."
             code = "no_budget_assigned"
         elif reason == "team_budget_unset":
-            message = "팀 예산이 설정되지 않았습니다. 관리자에게 문의하세요."
+            message = "Team budget is not configured. Contact your admin."
             code = "team_budget_unset"
         elif reason in ("team_budget_exceeded", "user_budget_exceeded"):
             message = "Budget limit exceeded."
@@ -191,7 +191,7 @@ class BudgetMiddleware:
             message = "Monthly budget exhausted. Contact your team leader or admin."
             code = "hard_block"
         elif reason == "client_budget_exceeded":
-            message = "App (client) budget limit exceeded. 앱별 예산을 초과했습니다."
+            message = "App (client) budget limit exceeded."
             code = "client_budget_exceeded"
         else:
             message = "Budget limit exceeded."
