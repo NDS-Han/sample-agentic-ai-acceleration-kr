@@ -16,10 +16,11 @@ upstream에 없던 전체 신규 서브시스템 (~11k LOC + 테스트 478).
 | `render/` | 대상별 산출물 렌더링 — `compose.py`(docker-compose+.env+Caddyfile), `eks`(helm values), `ecs`(tfvars) |
 | `bootstrap.py` | 신규 설치 — 인프라·시크릿·이미지·Cognito 전체 프로비저닝 |
 | `eks_apply.py` / `ecs_apply.py` | 업데이트 경로 — helm apply, terraform plan/apply, `--plan` 미리보기 |
+| `eks_build.py` | `apply --build` — eks 변경분 감지 이미지 빌드·ECR push·`images.tags` 핀 갱신(`--all` 전체) |
 | `capture.py` | `doctor --capture` — 기존 배포를 gateway.yaml로 역생성(helm values+kubectl 라이브 대조, compose .env 병합) |
 | `doctor.py` | 상태·드리프트 점검 — 준비성·위험 감지 |
 | `websearch.py` / `chatagent.py` / `pricinglambda.py` | 기능별 프로비저너 — boto3로 AgentCore Runtime·Lambda 생성·동기화 |
-| `tests/` | 478 tests — 매 리뷰 라운드의 회귀 고정 |
+| `tests/` | 485 tests — 매 리뷰 라운드의 회귀 고정 |
 
 명령 수명주기: `init/configure`(yaml 작성) → `bootstrap`(신규 1회) →
 `apply`(업데이트 반복, render 내장) → `doctor`(점검) → `teardown`(삭제).
