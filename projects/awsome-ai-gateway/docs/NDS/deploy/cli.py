@@ -873,6 +873,19 @@ def cmd_apply(args) -> int:
         from .render import eks as eks_render
         context = getattr(args, "context", "") or ""
         out = GEN_ROOT / cfg.env / "eks"
+        if (args.build or getattr(args, "build_all", False)) and not args.plan:
+            # 코드 배포 경로 — 변경분 감지 빌드+push 후 핀을 yaml 에 쓰고,
+            # 재로드해 render 가 새 핀을 보게 한다 (--all 은 전체 강제).
+            # --plan 조합은 읽기 전용 — 이미지를 만들거나 핀을 쓰지 않는다.
+            from . import eks_build
+            try:
+                eks_build.build_and_pin(
+                    cfg, REPO_ROOT, Path(args.config),
+                    build_all=bool(getattr(args, "build_all", False)))
+            except SystemExit as exc:
+                console.print(f"[red]{exc}")
+                return 1
+            cfg = _load_config(args)
         # render 가 deploy.yaml 을 덮어쓰기 전에 이전 배포 identity 를
         # 보존한다 — release/namespace 를 바꾼 apply 는 upgrade 가 아니라
         # '새 install + 구 release 고아화'가 된다 (같은 DB 를 공유하는
@@ -2127,7 +2140,11 @@ def main(argv=None) -> int:
 
     sp = sub.add_parser("apply", help="[변경 적용] gateway.yaml을 그대로 배포 — yaml을 직접 편집했거나 CI에서 쓰는 경로")
     sp.add_argument("--config", default=str(DEFAULT_CONFIG))
-    sp.add_argument("--build", action="store_true", help="이미지를 강제로 다시 빌드 (compose)")
+    sp.add_argument("--build", action="store_true",
+                    help="이미지 빌드 포함 — compose 는 compose --build, "
+                         "eks 는 변경분 서비스를 ECR 에 빌드+push 하고 핀 갱신")
+    sp.add_argument("--all", dest="build_all", action="store_true",
+                    help="eks --build 와 함께 — 변경 감지 없이 전체 서비스 리빌드")
     sp.add_argument("--plan", action="store_true",
                     help="변경 계획만 보여주고 적용하지 않음")
     sp.add_argument("-y", "--yes", action="store_true",

@@ -140,7 +140,7 @@ backend 마다 **이미지를 누가 빌드하는지**가 다릅니다 — 이 �
 |---|---|---|
 | compose | `docker compose up --build` 가 로컬 소스에서 빌드 | 불필요 (checkout된 소스가 곧 이미지) |
 | ecs | `./deploy apply` 가 build+push 까지 수행 | `gateway.yaml` 의 `images.tag` |
-| eks | **`./deploy apply` 는 빌드하지 않습니다** — helm 이 ECR 의 기존 태그를 참조할 뿐 | `gateway.yaml` 의 `images.tag`/`images.tags` + 사전에 `rebuild-image.sh` 로 push |
+| eks | `./deploy apply --build` 가 변경분 서비스를 build+push 하고 핀도 갱신 — 플래그 없는 `apply` 는 helm 이 ECR 의 기존 태그를 참조할 뿐 | `gateway.yaml` 의 `images.tag`/`images.tags` — `--build` 가 자동 갱신 |
 
 ### compose
 
@@ -169,41 +169,49 @@ vi deployment/gateway.yaml     # images.tag: "<새 태그>"  (관례: git short 
 ./deploy doctor
 ```
 
-### eks — 이미지 push → 태그 핀 → apply (3단계)
+### eks — `./deploy apply --build` (1단계)
 
-`./deploy apply` 는 helm upgrade 만 합니다. **태그만 바꾸면 ECR 에 그
-이미지가 없어 새 파드가 ImagePullBackOff 로 멈춥니다** — 반드시 push 가
-먼저입니다:
+`--build` 가 **변경분 감지 → build+push → 핀 갱신 → apply** 를 한 번에
+수행합니다. 핀만 바꾼 `apply`(플래그 없음)는 helm upgrade 만 하므로 ECR 에
+이미지가 없으면 새 파드가 ImagePullBackOff 로 멈춥니다:
 
 ```bash
 git fetch && git checkout <새 브랜치/태그>
-TAG=$(git rev-parse --short HEAD)              # rebuild-image.sh 와 같은 태그 규약
+git status --short               # 미커밋 변경은 태그(SHA)와 이미지가 어긋남 — 커밋 권장
 
-# 1. 대상 계정/리전 확인 — 스크립트는 현재 AWS 자격증명의 ECR 에 push 한다
-aws sts get-caller-identity --query Account
+./deploy apply --build           # 변경된 서비스만 HEAD sha 로 build+push, 핀 갱신 후 적용
+./deploy doctor
+```
 
-# 2. 이미지 빌드 + ECR push (DEPLOY=1 없이 — push 만)
+동작 상세:
+
+- **변경분 감지** — 서비스별로 `images.tags` 핀 커밋→HEAD 간 빌드 컨텍스트
+  (`admin-api/` 등) diff 를 계산해 바뀐 것만 리빌드합니다. 안 바뀐 서비스는
+  기존 핀을 유지해 불필요한 롤아웃이 없습니다.
+- **`--all`** — 감지 없이 전체 서비스를 HEAD 태그로 리빌드합니다
+  (`./deploy apply --build --all`).
+- **태그 규약** — git HEAD short SHA (rebuild-image.sh 와 동일). ECR 에
+  이미 있는 태그는 immutable 규약상 빌드를 건너뛰고 핀만 갱신합니다.
+- **핀 갱신** — `gateway.yaml` 의 `images.tags` 를 새 태그로 자동 갱신하고
+  재로드해 render 에 반영합니다. `scheduler` 는 admin-api 이미지 공유라
+  admin-api 가 리빌드되면 핀이 함께 따라갑니다.
+- **migration 게이트** — `db/versions/` 에 핀 이후 신규 revision 이 있는데
+  migration 을 같이 빌드하지 않으면 중단합니다(구 스키마 위에 새 앱이
+  올라가는 사고 방지). `--all` 로 전체 빌드하거나 migration 만 먼저
+  올리세요.
+- `--plan` 과의 조합은 읽기 전용입니다 — 빌드/푸시/핀 갱신을 하지 않습니다.
+
+수동 경로(개별 서비스만 빠르게 올릴 때)는 종전대로 `rebuild-image.sh`:
+
+```bash
+TAG=$(git rev-parse --short HEAD)
 export AWS_REGION=<대상 리전>
 for s in gateway-proxy admin-api admin-ui notification-worker cost-recorder-worker migration; do
   bash deployment/scripts/rebuild-image.sh "$s" <env>
 done
 #   scheduler 는 admin-api 와 이미지를 공유 — 별도 빌드 없음
-#   이미 그 태그가 ECR 에 있으면 스크립트가 덮어쓰기를 거부 → 해당 서비스는 skip
-
-# 3. gateway.yaml 에 태그 핀
-vi deployment/gateway.yaml
-#   images:
-#     registry: <account>.dkr.ecr.<region>.amazonaws.com
-#     tag: "<새 SHA>"              # 전 서비스 동일 태그면 여기만
-#     tags:                        # 서비스별로 다르면 맵으로 (tag 를 개별 override)
-#       gatewayProxy: "<SHA>"
-#       migration: "<SHA>"         # migration 은 tags 맵에서만 핀 가능
-
-# 4. 적용
-./deploy validate
-./deploy apply --plan            # 변경 미리보기
+vi deployment/gateway.yaml     # images.tags 핀 수동 갱신
 ./deploy apply
-./deploy doctor
 ```
 
 `rebuild-image.sh` 참고:
