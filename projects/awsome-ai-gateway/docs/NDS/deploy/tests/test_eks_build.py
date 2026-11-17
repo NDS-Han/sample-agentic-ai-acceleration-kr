@@ -84,6 +84,98 @@ class TestMigrationGate:
                                   {"migration": "x"})
 
 
+class TestPropagateShared:
+    """adminApi/scheduler 이미지 공유 계약 전파."""
+
+    def test_admin_api_drags_scheduler(self):
+        got = eks_build.propagate_shared({"adminApi": "변경"})
+        assert got["scheduler"] == "adminApi 이미지 공유"
+
+    def test_scheduler_drags_admin_api(self):
+        got = eks_build.propagate_shared({"scheduler": "x"})
+        assert got["adminApi"] == "scheduler 이미지 공유"
+
+    def test_unrelated_untouched(self):
+        assert eks_build.propagate_shared({"gatewayProxy": "x"}) == {
+            "gatewayProxy": "x"}
+
+
+class TestBuildAndPinEnsure:
+    """핀=HEAD인데 ECR 에 없으면 감지와 무관하게 리빌드 대상에 합류."""
+
+    def _fake_q(self, head, missing=()):
+        def fake(argv, *, cwd=None, input=None, timeout=300):
+            s = " ".join(argv)
+            if "rev-parse" in s and "HEAD" in s:
+                return _cp(0, out=f"{head}\n")
+            if "--verify" in s:
+                return _cp(0)                       # 핀은 전부 커밋
+            if argv[:2] == ["git", "diff"]:
+                return _cp(0)                       # 변경 없음
+            if argv[:2] == ["git", "status"]:
+                return _cp(0)
+            if "describe-images" in s:
+                repo = s.split("--repository-name ")[1].split()[0]
+                if any(repo.endswith(f"/{m}") for m in missing):
+                    return _cp(1, err="(ImageNotFoundException) not found")
+                return _cp(0, out="{}")
+            return _cp(0)
+        return fake
+
+    def _run(self, monkeypatch, tmp_path, pins, head, missing):
+        cfg = _cfg(pins, tag="old00000")
+        monkeypatch.setattr(eks_build, "_q", self._fake_q(head, missing))
+        pushed = {}
+        monkeypatch.setattr(
+            eks_build, "_push_set",
+            lambda _c, _r, _t, want, _p: pushed.update(want))
+        cfg_file = tmp_path / "gateway.yaml"
+        cfg_file.write_text(TestRewriteTags.SAMPLE)
+        return eks_build.build_and_pin(cfg, tmp_path, cfg_file), pushed
+
+    def test_pinned_head_missing_in_ecr_joins(self, monkeypatch, tmp_path):
+        head = "d0496ed7"
+        pins = {k: head for k, _, _ in eks_build.EKS_SERVICES}
+        pins["scheduler"] = head
+        got, pushed = self._run(monkeypatch, tmp_path, pins, head,
+                                missing=("admin-api",))
+        # adminApi 만 ECR 누락 → 본인 + 공유 계약의 scheduler 만 리빌드
+        assert set(pushed) == {"adminApi", "scheduler"}
+        assert "gatewayProxy" not in pushed
+        assert set(got) == {"adminApi", "scheduler"}
+
+    def test_all_present_in_ecr_noop(self, monkeypatch, tmp_path):
+        head = "d0496ed7"
+        pins = {k: head for k, _, _ in eks_build.EKS_SERVICES}
+        pins["scheduler"] = head
+        got, pushed = self._run(monkeypatch, tmp_path, pins, head, missing=())
+        assert got == [] and pushed == {}
+
+    def test_ecr_lookup_error_does_not_rebuild(self, monkeypatch, tmp_path):
+        head = "d0496ed7"
+        pins = {k: head for k, _, _ in eks_build.EKS_SERVICES}
+        pins["scheduler"] = head
+
+        def fake(argv, *, cwd=None, input=None, timeout=300):
+            s = " ".join(argv)
+            if "rev-parse" in s and "HEAD" in s:
+                return _cp(0, out=f"{head}\n")
+            if "describe-images" in s:
+                return _cp(255, err="AccessDeniedException")   # 유보 경로
+            return _cp(0)
+
+        monkeypatch.setattr(eks_build, "_q", fake)
+        pushed = {}
+        monkeypatch.setattr(
+            eks_build, "_push_set",
+            lambda _c, _r, _t, want, _p: pushed.update(want))
+        cfg_file = tmp_path / "gateway.yaml"
+        cfg_file.write_text(TestRewriteTags.SAMPLE)
+        assert eks_build.build_and_pin(_cfg(pins, tag="old00000"),
+                                       tmp_path, cfg_file) == []
+        assert pushed == {}
+
+
 class TestRewriteTags:
     SAMPLE = """\
 images:

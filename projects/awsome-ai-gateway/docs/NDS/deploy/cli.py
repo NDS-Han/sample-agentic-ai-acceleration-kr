@@ -873,19 +873,36 @@ def cmd_apply(args) -> int:
         from .render import eks as eks_render
         context = getattr(args, "context", "") or ""
         out = GEN_ROOT / cfg.env / "eks"
-        if (args.build or getattr(args, "build_all", False)) and not args.plan:
-            # 코드 배포 경로 — 변경분 감지 빌드+push 후 핀을 yaml 에 쓰고,
-            # 재로드해 render 가 새 핀을 보게 한다 (--all 은 전체 강제).
-            # --plan 조합은 읽기 전용 — 이미지를 만들거나 핀을 쓰지 않는다.
+        if args.build or getattr(args, "build_all", False):
             from . import eks_build
-            try:
-                eks_build.build_and_pin(
-                    cfg, REPO_ROOT, Path(args.config),
-                    build_all=bool(getattr(args, "build_all", False)))
-            except SystemExit as exc:
-                console.print(f"[red]{exc}")
-                return 1
-            cfg = _load_config(args)
+            if args.plan:
+                # --plan 은 읽기 전용 — 빌드/푸시/핀 갱신 없이 감지 결과만
+                # 보고한다(아래 diff 는 현재 핀 기준이라 이 점을 명시).
+                try:
+                    want = eks_build.propagate_shared(
+                        eks_build.detect_rebuilds(
+                            cfg, REPO_ROOT,
+                            bool(getattr(args, "build_all", False))))
+                except SystemExit as exc:
+                    console.print(f"[red]{exc}")
+                    return 1
+                if want:
+                    console.print(
+                        f"[yellow]ⓘ --plan: 빌드 대상 — "
+                        f"{', '.join(sorted(want))} (아래 diff 는 현재 핀 기준)")
+                else:
+                    console.print("[yellow]ⓘ --plan: 빌드 대상 없음")
+            else:
+                # 코드 배포 경로 — 변경분 감지 빌드+push 후 핀을 yaml 에 쓰고,
+                # 재로드해 render 가 새 핀을 보게 한다 (--all 은 전체 강제).
+                try:
+                    eks_build.build_and_pin(
+                        cfg, REPO_ROOT, Path(args.config),
+                        build_all=bool(getattr(args, "build_all", False)))
+                    cfg = _load_config(args)
+                except (SystemExit, schema.SchemaError) as exc:
+                    console.print(f"[red]{exc}")
+                    return 1
         # render 가 deploy.yaml 을 덮어쓰기 전에 이전 배포 identity 를
         # 보존한다 — release/namespace 를 바꾼 apply 는 upgrade 가 아니라
         # '새 install + 구 release 고아화'가 된다 (같은 DB 를 공유하는

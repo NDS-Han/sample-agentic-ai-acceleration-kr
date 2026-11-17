@@ -30,14 +30,15 @@ from .schema import GatewayConfig
 
 
 def _q(argv: list[str], *, cwd: Path | None = None,
-       input: str | None = None) -> subprocess.CompletedProcess:
+       input: str | None = None,
+       timeout: int = 300) -> subprocess.CompletedProcess:
     try:
         return subprocess.run(argv, cwd=cwd, input=input,
-                              capture_output=True, text=True, timeout=300)
+                              capture_output=True, text=True, timeout=timeout)
     except FileNotFoundError:
         raise SystemExit(f"{argv[0]} 명령을 못 찾았습니다 — PATH 확인 필요")
     except subprocess.TimeoutExpired:
-        raise SystemExit(f"{argv[0]} 타임아웃: {' '.join(argv[:4])}")
+        raise SystemExit(f"{argv[0]} 타임아웃({timeout}s): {' '.join(argv[:4])}")
 
 
 def _head_tag(repo_root: Path) -> str:
@@ -120,21 +121,24 @@ def _ecr_has_tag(repo: str, tag: str, region: str,
     return None  # 권한/네트워크 — 유보
 
 
+def _registry(cfg: GatewayConfig, region: str) -> tuple[str, str]:
+    """(registry 호스트, registry_id) — 선언값 우선, 없으면 ECR 계정 추론."""
+    registry = (cfg.images.registry or "").rstrip("/")
+    if registry:
+        return registry, (registry.split(".", 1)[0]
+                          if ".dkr.ecr." in registry else "")
+    from .eks_apply import _aws_account_id  # 늦은 import — 호출 시점 로드
+    account = _aws_account_id(region)
+    if not account:
+        raise SystemExit("images.registry 미지정 + account 추론 실패 — "
+                         "ECR 대상을 정할 수 없습니다")
+    return f"{account}.dkr.ecr.{region}.amazonaws.com", account
+
+
 def _push_set(cfg: GatewayConfig, region: str, tag: str,
               want: dict[str, str], repo_root: Path) -> None:
     """want 의 서비스를 tag 로 build+push — 이미 ECR 에 있으면 빌드 생략."""
-    from .eks_apply import _aws_account_id  # 늦은 import — 호출 시점 로드
-    registry = (cfg.images.registry or "").rstrip("/")
-    registry_id = ""
-    if not registry:
-        account = _aws_account_id(region)
-        if not account:
-            raise SystemExit("images.registry 미지정 + account 추론 실패 — "
-                             "ECR 대상을 정할 수 없습니다")
-        registry = f"{account}.dkr.ecr.{region}.amazonaws.com"
-    elif ".dkr.ecr." in registry:
-        registry_id = registry.split(".", 1)[0]
-
+    registry, registry_id = _registry(cfg, region)
     pw = _q(["aws", "ecr", "get-login-password", "--region", region])
     if pw.returncode != 0:
         raise SystemExit(f"ECR 로그인 실패: {pw.stderr.strip()[:200]}")
@@ -156,12 +160,15 @@ def _push_set(cfg: GatewayConfig, region: str, tag: str,
             raise SystemExit(f"ECR 조회 실패 — {repo}:{tag} 존재 여부를 알 수 "
                              "없어 멈춥니다(덮어쓰기 방지)")
         print(f"  🔨 {image} — {want[helm_key]}", file=sys.stderr)
+        # cold 빌드(npm install 없음 상태)는 5분을 넘길 수 있다 — admin-ui
+        # 캐시 적중도 ~2분이라 git 조회와 같은 타임아웃을 쓰면 스푸리어스 실패.
         r = _q(["docker", "build", "--platform", "linux/amd64",
-                "-t", image, str(repo_root / ctx)], cwd=repo_root)
+                "-t", image, str(repo_root / ctx)], cwd=repo_root,
+               timeout=1800)
         if r.returncode != 0:
             raise SystemExit(f"docker build 실패 ({image}): "
                              f"{(r.stderr or r.stdout or '')[-400:]}")
-        r = _q(["docker", "push", image])
+        r = _q(["docker", "push", image], timeout=900)
         if r.returncode != 0:
             # 동시 apply 레이스 — 상대가 먼저 같은 태그를 push 한 경우 성공.
             if "AlreadyExists" in (r.stderr or ""):
@@ -220,22 +227,49 @@ def rewrite_tags(text: str, updates: dict[str, str]) -> str:
     return "".join(lines)
 
 
+def propagate_shared(want: dict[str, str]) -> dict[str, str]:
+    """이미지 공유 계약 전파 — adminApi 를 올리면 같은 이미지를 당기는
+    scheduler 핀도 반드시 따라간다(values 주석 "adminApi.image.tag 와
+    항상 같은 값"). --build/--plan 양쪽에서 쓴다."""
+    if "adminApi" in want and "scheduler" not in want:
+        want = {**want, "scheduler": "adminApi 이미지 공유"}
+    elif "scheduler" in want and "adminApi" not in want:
+        want = {**want, "adminApi": "scheduler 이미지 공유"}
+    return want
+
+
 def build_and_pin(cfg: GatewayConfig, repo_root: Path, config_path: Path,
                   *, build_all: bool = False) -> list[str]:
     """--build 진입점 — 감지→게이트→빌드/푸시→yaml 핀 갱신. 갱신 키 목록 반환.
 
     호출자는 반환 후 config 를 재로드해 render 가 새 핀을 보게 해야 한다."""
     tag = _head_tag(repo_root)
-    want = detect_rebuilds(cfg, repo_root, build_all)
-    # adminApi 를 올리면 이미지를 공유하는 scheduler 핀도 반드시 따라간다
-    # (values 주석 "adminApi.image.tag 와 항상 같은 값" 계약).
-    if "adminApi" in want and "scheduler" not in want:
-        want["scheduler"] = "adminApi 이미지 공유"
-    # scheduler 단독 핀(adminApi 와 다른 태그)은 계약 위반 — 같이 올린다.
-    elif "scheduler" in want:
-        want.setdefault("adminApi", "scheduler 이미지 공유")
+    want = propagate_shared(detect_rebuilds(cfg, repo_root, build_all))
 
     _migration_gate(cfg, repo_root, want)
+
+    # 핀=HEAD 인데 ECR 에 없는 서비스는 감지에서 빠져 apply 가
+    # ImagePullBackOff 로 간다 — 핀만 쓴 수동 경로의 잔재를 여기서 회수.
+    # scheduler 는 admin-api 이미지를 당기므로 같은 repo 를 확인한다.
+    registry, registry_id = _registry(cfg, cfg.aws.region)
+    tags = cfg.images.tags or {}
+    ensure = [(k, repo) for k, repo, _ctx in EKS_SERVICES]
+    ensure.append(("scheduler", "admin-api"))
+    for helm_key, repo in ensure:
+        if helm_key in want:
+            continue
+        pin = tags.get(helm_key) or cfg.images.tag or ""
+        if pin != tag:
+            continue
+        have = _ecr_has_tag(repo, tag, cfg.aws.region, registry_id)
+        if have is False:
+            want[helm_key] = "핀=HEAD인데 ECR 에 이미지 없음"
+        elif have is None:
+            print(f"⚠ {repo}:{tag} ECR 조회 실패 — 존재 여부를 확인할 수 "
+                  "없어 그대로 진행합니다(없으면 ImagePullBackOff)",
+                  file=sys.stderr)
+    want = propagate_shared(want)  # ensure 가 adminApi 를 늦게 넣은 경우 추종
+
     if not want:
         print("ⓘ 빌드할 변경분이 없습니다 — 핀은 그대로 둡니다", file=sys.stderr)
         return []
