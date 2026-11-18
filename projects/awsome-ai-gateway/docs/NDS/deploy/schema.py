@@ -56,7 +56,6 @@ class DeployConfig:
 
 
 @dataclass
-@dataclass
 class PortsConfig:
     """compose 전용 — Caddy 가 바인드하는 호스트 포트(유일한 인입점이라
     이것만 바꾸면 된다). 컨테이너 측 포트는 Caddyfile 과 고정이라 불변."""
@@ -909,13 +908,25 @@ def _ports_from(v: Any, errors: list[str]) -> "PortsConfig":
         return PortsConfig()
     _check_unknown(m, frozenset({"http", "https", "gateway", "admin_api", "admin_ui"}),
                    "network.ports", errors)
-    return PortsConfig(
+    pc = PortsConfig(
         http=_port_val(m.get("http"), 80, "network.ports.http", errors),
         https=_port_val(m.get("https"), 443, "network.ports.https", errors),
         gateway=_port_val(m.get("gateway"), 8000, "network.ports.gateway", errors),
         admin_api=_port_val(m.get("admin_api"), 8080, "network.ports.admin_api", errors),
         admin_ui=_port_val(m.get("admin_ui"), 3000, "network.ports.admin_ui", errors),
     )
+    # 같은 그룹 안 호스트 포트 중복은 caddy 바인드 시 확정 실패 — 그룹 간
+    # 중복(http vs gateway 등)은 mode 에 따라 한쪽만 바인드돼 무해
+    for group in (("http", "https"), ("gateway", "admin_api", "admin_ui")):
+        seen: dict[int, str] = {}
+        for k in group:
+            n = getattr(pc, k)
+            if n in seen:
+                errors.append(f"network.ports.{k}={n} 이(가) "
+                              f"network.ports.{seen[n]} 와 충돌합니다")
+            else:
+                seen[n] = k
+    return pc
 
 
 def _require_mapping(node: Any, path: str, errors: list[str]) -> dict:

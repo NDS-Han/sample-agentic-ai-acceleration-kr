@@ -336,6 +336,23 @@ def test_ports_eks_warns_ignored():
     assert any("compose 전용" in w for w in c.warnings())
 
 
+def test_ports_collision_rejected():
+    import pytest
+    # 같은 그룹 내 중복 — caddy 가 같은 호스트 포트를 두 번 바인드해 확정 실패
+    with pytest.raises(schema.SchemaError):
+        cfg(network={"ports": {"gateway": 9000, "admin_api": 9000}})
+    with pytest.raises(schema.SchemaError):
+        cfg(domain={"mode": "route53-acm", "name": "x.com"},
+            network={"ports": {"http": 8080, "https": 8080}})
+
+
+def test_ports_cross_group_overlap_allowed(tmp_path):
+    # http(도메인 모드 전용)와 gateway(none 전용)는 동시에 바인드되지 않는다
+    _, out = render_to(tmp_path, cfg(
+        network={"ports": {"gateway": 9000, "http": 9000}}))
+    assert "9000:8000" in out["services"]["caddy"]["ports"]
+
+
 def test_ports_partial_override_keeps_defaults(tmp_path):
     _, out = render_to(tmp_path, cfg(network={"ports": {"gateway": 9000}}))
     assert out["services"]["caddy"]["ports"] == [

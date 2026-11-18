@@ -35,6 +35,21 @@ DEFAULT_CONFIG = REPO_ROOT / "deployment" / "gateway.yaml"
 GEN_ROOT = REPO_ROOT / "deployment" / "gen"
 
 
+def _disp_path(p) -> str:
+    """붙여넣기용 표시 경로 — cwd 아래면 상대로 짧게, 아니면 절대."""
+    try:
+        return str(Path(p).relative_to(Path.cwd()))
+    except ValueError:
+        return str(p)
+
+
+def _deploy_sh() -> str:
+    """안내용 deploy 스크립트 호출 문자열 — `deploy` 처럼 슬래시 없는 상대
+    경로는 PATH 해석돼 command not found 가 나므로 ./ 를 붙인다."""
+    disp = _disp_path(REPO_ROOT / "deploy")
+    return f"./{disp}" if "/" not in disp else disp
+
+
 class Cancelled(Exception):
     pass
 
@@ -677,7 +692,7 @@ def cmd_init(args) -> int:
     doc = _collect_doc()
     if _write_config(out_path, doc):
         return 1
-    console.print(f"다음: [bold]deploy render --config {out_path}")
+    console.print(f"다음: [bold]{_deploy_sh()} render --config {_disp_path(out_path)}")
     return 0
 
 
@@ -740,7 +755,7 @@ def cmd_configure(args) -> int:
 
     # 마지막에 배포까지 — 확인 게이트는 그대로 (plan 출력 후 y)
     if args.no_apply:
-        console.print(f"다음: [bold]deploy render --config {cfg_path}")
+        console.print(f"다음: [bold]{_deploy_sh()} render --config {_disp_path(cfg_path)}")
         return 0
     go = _unwrap(questionary.confirm(
         "지금 배포 절차를 진행합니까? (render → plan 미리보기 → 확인 → apply)",
@@ -822,13 +837,10 @@ def cmd_render(args) -> int:
             console.print(f"  [yellow]ⓘ {n}")
         # 붙여넣기용 — 절대경로 전체를 찍으면 터미널 폭에서 줄바꿈돼 -f 인자가
         # 잘린 채 실행된다. cwd 아래의 gen dir 이면 상대 경로로 짧게 찍는다.
-        try:
-            rel_out = out.relative_to(Path.cwd())
-        except ValueError:
-            rel_out = out
+        rel_out = _disp_path(out)
         console.print(
-            f"\n기동: [bold]docker compose --env-file {rel_out/'.env'} "
-            f"-f {rel_out/'docker-compose.yml'} up -d --build[/bold]\n"
+            f"\n기동: [bold]docker compose --env-file {rel_out}/.env "
+            f"-f {rel_out}/docker-compose.yml up -d --build[/bold]\n"
             "  (--env-file 필수 — 없으면 ${POSTGRES_PASSWORD} 등이 repo 루트 .env 나\n"
             "   기본값으로 interpolate 되어 앱과 DB의 비밀번호가 어긋납니다)")
         return 0
@@ -2144,11 +2156,11 @@ def cmd_client_values(args) -> int:
         # ecs route53-acm 은 ACM+443 — 이 분기는 전부 https 가 맞다.
         # compose 에서 https 호스트 포트를 바꿨으면 URL 에도 붙는다(ecs 는
         # ports 미적용이라 443 고정)
-        hs = ""
+        https_sfx = ""
         if target == "compose" and cfg.network.ports.https != 443:
-            hs = f":{cfg.network.ports.https}"
-        gw = f"https://gateway.{cfg.domain.name}{hs}"
-        adm = f"https://admin-api.{cfg.domain.name}{hs}"
+            https_sfx = f":{cfg.network.ports.https}"
+        gw = f"https://gateway.{cfg.domain.name}{https_sfx}"
+        adm = f"https://admin-api.{cfg.domain.name}{https_sfx}"
     else:
         outs = _tf_outputs_soft(_tf_env_dir(cfg))
         dns = str(outs.get("alb_dns_name") or "")

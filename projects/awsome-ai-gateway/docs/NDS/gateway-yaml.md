@@ -41,6 +41,11 @@ network:
   mode: public                # public | private
   allowed_cidrs: ["1.2.3.0/24"]
   admin_internal: false       # eks 전용 — admin(admin-ui/api) Ingress만 internal ALB로
+  ports:                      # compose 전용 — caddy 바인드 호스트 포트(유일 인입점)
+    gateway: 8000             # domain 없을 때 gateway-proxy (기본 8000)
+    admin_api: 8080           # domain 없을 때 admin-api (기본 8080)
+    admin_ui: 3000            # domain 없을 때 admin-ui (기본 3000)
+    # http: 80 / https: 443   # domain 부착 시 바인드 포트
 
 domain:
   mode: none                  # none | route53-acm | selfsigned-temp(eks) | cloudfront-temp(미구현)
@@ -270,6 +275,13 @@ ecs/eks 경로의 terraform state 위치. 비우면 `llm-gateway-tfstate-<accoun
   미설정**입니다 — ecs 는 모듈 기본 `0.0.0.0/0`(전체 개방)이 적용되고,
   "아예 닫기" 는 `network.mode: private` 로 표현합니다. 운영 환경에서는
   반드시 채우세요 ([operations.md](operations.md#2-직원-오픈-전-하드닝-체크리스트) §2)
+- `ports` — **compose 전용**(eks/ecs 에서는 무시 경고). Caddy 가 바인드하는
+  **호스트 포트**만 바꿉니다 — 컨테이너 리슨 포트와 Caddyfile 은 불변이라
+  Caddyfile 을 손댈 필요가 없습니다. `domain.mode: none` 이면
+  `gateway`/`admin_api`/`admin_ui`(기본 8000/8080/3000), 도메인 부착이면
+  `http`/`https`(기본 80/443)가 적용됩니다. 같은 그룹 안 중복
+  (`gateway`와 `admin_api`를 같은 값으로 등)은 스키마 오류입니다 —
+  그룹 간 중복(`http`와 `gateway`)은 mode 에 따라 한쪽만 바인드돼 허용됩니다.
 
 ### `domain.mode`
 
