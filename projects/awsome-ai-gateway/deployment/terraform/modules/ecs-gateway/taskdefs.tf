@@ -154,6 +154,12 @@ locals {
       var.chat_lambda_query_db != "" ? { LAMBDA_QUERY_DB = var.chat_lambda_query_db } : {},
       var.chat_lambda_get_schema != "" ? { LAMBDA_GET_SCHEMA = var.chat_lambda_get_schema } : {},
       var.chat_staging_bucket != "" ? { CHAT_STAGING_BUCKET = var.chat_staging_bucket } : {},
+      # admin UI 의 웹서치 토글이 프로비저닝 상태를 표시할 수 있게 gateway 와
+      # 같은 조건을 admin-api 에도 주입한다
+      var.agentcore_gateway_url != "" ? {
+        WEB_SEARCH_ENABLED    = "true"
+        AGENTCORE_GATEWAY_URL = var.agentcore_gateway_url
+      } : {},
     )
 
     admin-ui = merge(local.common_env, {

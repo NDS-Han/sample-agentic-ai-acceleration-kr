@@ -34,6 +34,9 @@ export interface AppPolicy {
   allowed_users: AppUserRef[];
   all_models: AppModelRef[];
   web_search_enabled: boolean;
+  // AgentCore 가 실제 프로비저닝됐는지(env 선언+URL) — false 면 토글은
+  // 꺼짐+비활성으로 표시한다(DB 플래그만으론 미배포 상태를 알 수 없다)
+  web_search_deployed?: boolean;
   // 크로스계정 라우팅(routing_profiles 행) — ARN 비우면 in-account.
   account_role_arn: string | null;
   external_id: string | null;

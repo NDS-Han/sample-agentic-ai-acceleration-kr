@@ -163,21 +163,28 @@ def _is_managed(key: str, desired: dict[str, str]) -> bool:
 
 def merge_env(existing: dict[str, str],
               desired: dict[str, str]) -> tuple[dict[str, str], list[str], list[str]]:
-    """existing 을 보존하고 desired 의 누락 키만 채운다.
+    """desired(yaml 파생)로 existing 을 수렴하고, 누락 키는 채운다.
 
-    desired 에 있는 값이 existing 과 다르면 **덮지 않고** 이름을 돌려준다 —
-    운영자가 의도를 가지고 바꾼 값일 수 있으므로 결정권을 사람에게 둔다.
+    desired 에 나타나는 키는 전부 gateway.yaml 에서 계산된 도구 관리값이다 —
+    선언과 다르면 **yaml 이 이긴다**(갱신 목록을 돌려준다). 예외는
+    GENERATED_KEYS(시크릿): 기존 값과 다르면 덮지 않고 이름을 돌려준다 —
+    pgdata 볼륨·발급 키와 물려 있어 값 변경이 배포를 깨므로 결정권을 사람에게 둔다.
     도구 관리 키가 existing 에 있는데 desired 에 없으면(선언 해제) 삭제해
     declared-off 수렴을 맞춘다 — 운영자가 손으로 넣은 비관리 키는 보존한다.
-    반환: (merged, preserved_differing_keys, dropped_managed_keys)
+    반환: (merged, updated_keys, preserved_differing_keys, dropped_managed_keys)
     """
     merged = dict(existing)
+    updated: list[str] = []
     differing: list[str] = []
     for k, v in desired.items():
         if k not in merged or merged[k] == "":
             merged[k] = v
         elif merged[k] != v:
-            differing.append(k)
+            if k in GENERATED_KEYS:
+                differing.append(k)
+            else:
+                merged[k] = v
+                updated.append(k)
     dropped = [k for k in list(merged)
                if k not in desired and k not in GENERATED_KEYS
                and _is_managed(k, desired)]
@@ -188,7 +195,7 @@ def merge_env(existing: dict[str, str],
                     if k.startswith("AGENTCORE_") and k not in dropped]
     for k in dropped:
         del merged[k]
-    return merged, differing, dropped
+    return merged, updated, differing, dropped
 
 
 def fill_generated(env: dict[str, str]) -> list[str]:

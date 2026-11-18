@@ -492,14 +492,17 @@ export function AppPolicyPanel() {
             <div>
               <h2 className="text-sm font-semibold">{t('webSearchTitle')}</h2>
               <p className="text-xs text-muted-foreground mt-0.5">{t('webSearchHint')}</p>
+              {shown.web_search_deployed === false && (
+                <p className="text-xs text-amber-500 mt-0.5">{t('webSearchNotDeployed')}</p>
+              )}
             </div>
             <label className="flex items-center gap-2 cursor-pointer">
               <div className="relative inline-flex items-center">
                 <input
                   type="checkbox"
-                  checked={shown.web_search_enabled}
+                  checked={shown.web_search_deployed !== false && shown.web_search_enabled}
                   onChange={(e) => handleToggleWebSearch(e.target.checked)}
-                  disabled={isWsSaving}
+                  disabled={isWsSaving || shown.web_search_deployed === false}
                   className="sr-only peer"
                   aria-label={t('webSearchTitle')}
                 />

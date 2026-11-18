@@ -1340,6 +1340,7 @@
     "title": "App Policy",
     "toggleSaved": "{app} access setting updated.",
     "webSearchHint": "Injects the server-side web_search tool into requests from this app.",
+    "webSearchNotDeployed": "Feature not deployed — enable features.web_search in gateway.yaml and apply to use it.",
     "webSearchOff": "Off",
     "webSearchOn": "On",
     "webSearchSaved": "{app} web search setting saved.",

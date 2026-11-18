@@ -427,19 +427,31 @@ def _collect_doc(existing: dict | None = None) -> dict:
             oidc["admin_emails"] = [e.strip()
                                     for e in admin_emails.split(",") if e.strip()]
 
-    # 로그인 경로가 실제로 비는 경우만 dev_login 을 묻는다 — compose+IdP 없음,
-    # eks 에서 OIDC 없음 선택, eks auto+도메인 없음(Cognito 콜백 불가라
-    # dev_login 경로로 떨어지는 경우). ecs 는 Cognito 자동 배선이라 항상 경로가
-    # 있어 묻지 않는다. 무인증 ADMIN 토큰이라 자동으로 켜지 않고 선택을 넘긴다.
-    needs_login_path = (not oidc_on and (
-        target == "compose"
-        or (target == "eks" and (sel != "auto" or not domain_name))))
+    # 로그인 경로가 실제로 비는 경우만 dev_login 을 묻는다 — 인증 경로는
+    # "외부 IdP issuer 가 입력됨" 또는 "배포가 Cognito 를 배선할 조합"
+    # (ecs 항상, eks auto+domain). IdP 가 있다고 답하고 issuer 를 비운 경우는
+    # 경로가 없는 것으로 판정 — schema 의 oidc.enabled 도 issuer 유무로 결정된다.
+    has_auth_path = (bool(oidc.get("issuer_url")) or target == "ecs"
+                     or (target == "eks" and sel == "auto" and domain_name))
+    needs_login_path = target != "ecs" and not has_auth_path
     dev_login = bool(prev_feat.get("dev_login"))
+    dev_login_set = needs_login_path
     if needs_login_path:
         dev_login = _unwrap(questionary.confirm(
             "외부 로그인 경로가 없습니다 — features.dev_login 을 켭니까? "
             "(무인증 ADMIN 토큰 — 평가 전용, allowed_cidrs/SSH 터널로 제한 필수)",
             default=dev_login).ask())
+    elif dev_login and not oidc.get("issuer_url"):
+        # Cognito 자동 배선(eks auto+domain / ecs)은 render 시점에 yaml 에
+        # oidc 가 없어 oidc.enabled=false — 이전 dev_login:true 가 그대로
+        # DEV_LOGIN_ENABLED=true 를 켜 무인증 ADMIN 경로가 잔존한다. 인증 경로가
+        # 생겼으므로 명시 해제. yaml 에 issuer 가 있는 외부 IdP 경로는 render 가
+        # dev_login 을 게이트하므로 보존해도 안전(SSO+dev fallback 의도 허용).
+        console.print("[yellow]ⓘ 인증 로그인 경로가 설정되어 이전 "
+                      "features.dev_login 을 끕니다 — 필요하면 yaml 에 다시 "
+                      "선언하세요[/yellow]")
+        dev_login = False
+        dev_login_set = True
 
     images = {}
     if target in ("ecs", "eks"):
@@ -628,7 +640,11 @@ def _collect_doc(existing: dict | None = None) -> dict:
         "deploy": {"target": target, "size_tier": size_tier, **deploy_extra},
         "network": {"mode": _g(ex, "network", "mode") or "public",
                     "allowed_cidrs": [c.strip() for c in allowed.split(",") if c.strip()],
-                    "admin_internal": admin_internal},
+                    "admin_internal": admin_internal,
+                    # ports 는 질문이 다루지 않는 선언 키 — 보존 못하면 다음
+                    # configure 가 기본 포트로 되돌린다
+                    **({"ports": _gd(ex, "network", "ports")}
+                       if _gd(ex, "network", "ports") else {})},
         # hosts 는 질문이 다루지 않는 선언 키 — 보존 못하면 재 configure 가
         # 파생 호스트로 되돌려 live URL 을 바꾼다 (이전 yaml 값 유지).
         "domain": {"mode": domain_mode, "name": domain_name, "zone_id": zone_id,
@@ -649,9 +665,9 @@ def _collect_doc(existing: dict | None = None) -> dict:
             **{k: v for k, v in prev_feat.items()
                if k not in ("notifications", "web_search", "body_logging",
                             "bi_insight", "pricing_lambda", "observability")},
-            # dev_login 은 위 질문에서 명시 답변했을 때만 덮어쓴다 — 질문이
-            # 안 돌았으면 이전 선언을 보존, No 면 false 를 명시해 이전 true 도 끈다
-            **({"dev_login": dev_login} if needs_login_path else {}),
+            # dev_login 은 위에서 명시 처리했을 때만 덮어쓴다 — 질문/정리가
+            # 안 돌았으면 이전 선언을 보존, No/강제해제면 false 를 명시해 끈다
+            **({"dev_login": dev_login} if dev_login_set else {}),
         },
         "clients": _gd(ex, "clients") or {"models_profile": "global"},
     }
@@ -831,10 +847,18 @@ def cmd_render(args) -> int:
             console.print(f"  {f}")
         if res["filled"]:
             console.print(f"  [cyan]새로 생성된 시크릿: {', '.join(res['filled'])}")
+        if res.get("updated"):
+            console.print(f"  [cyan]선언에 맞게 갱신됨: {', '.join(res['updated'])}")
         if res["preserved"]:
-            console.print(f"  [yellow]기존 값과 달라 보존됨(수동 확인): {', '.join(res['preserved'])}")
+            console.print(f"  [yellow]시크릿이 기존 값과 달라 보존됨(수동 확인): "
+                          f"{', '.join(res['preserved'])}")
         for n in res.get("notes", []):
             console.print(f"  [yellow]ⓘ {n}")
+        _conflicts = _compose_port_conflicts(cfg)
+        if _conflicts:
+            console.print("  [yellow]⚠ 이 호스트에서 이미 사용 중인 포트: "
+                          f"{', '.join(_conflicts)} — 실제 기동 호스트라면 "
+                          "gateway.yaml 의 network.ports 를 바꾸세요")
         # 붙여넣기용 — 절대경로 전체를 찍으면 터미널 폭에서 줄바꿈돼 -f 인자가
         # 잘린 채 실행된다. cwd 아래의 gen dir 이면 상대 경로로 짧게 찍는다.
         rel_out = _disp_path(out)
@@ -1088,6 +1112,13 @@ def cmd_apply(args) -> int:
                           f"{url or '없음 — apply 시 프로비저닝'}")
         console.print("[cyan]plan 전용 — 기동하지 않았습니다. 적용: ./deploy apply")
         return 0
+    conflicts = _compose_port_conflicts(cfg)
+    if conflicts:
+        console.print("[red]caddy 가 바인드할 호스트 포트가 이미 사용 중입니다: "
+                      + ", ".join(conflicts))
+        console.print("      gateway.yaml 의 network.ports 를 빈 포트로 바꾼 뒤 "
+                      "다시 apply 하거나, 점유 프로세스를 종료하십시오")
+        return 1
     if not _confirm_apply(args):
         return 130
     if not env_existed:
@@ -2120,6 +2151,55 @@ def _public_ip() -> str:
         return ip if r.returncode == 0 and "." in ip else ""
     except Exception:
         return ""
+
+
+def _our_caddy_holds_port(env: str, port: int) -> bool:
+    """포트를 잡고 있는 컨테이너가 우리 프로젝트의 caddy 인지 — 재적용 시 기존
+    caddy 가 이미 바인드 중인 건 정상(compose up 이 같은 컨테이너를 갱신)."""
+    import subprocess
+    try:
+        r = subprocess.run(
+            ["docker", "ps", "--filter", f"publish={port}", "--format",
+             '{{.Label "com.docker.compose.project"}}\t'
+             '{{.Label "com.docker.compose.service"}}'],
+            capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    if r.returncode != 0:
+        return False
+    for line in r.stdout.splitlines():
+        proj, _, svc = line.partition("\t")
+        if proj.strip() == f"llm-gateway-{env}" and svc.strip() == "caddy":
+            return True
+    return False
+
+
+def _compose_port_conflicts(cfg: GatewayConfig) -> list[str]:
+    """선언된 caddy 호스트 포트 중 외부 프로세스가 이미 점유한 것 — 그대로
+    두면 compose up 이 'Bind ... port is already allocated' 로 실패한다."""
+    p = cfg.network.ports
+    if cfg.domain.mode == "none":
+        wanted = {"gateway": p.gateway, "admin_api": p.admin_api,
+                  "admin_ui": p.admin_ui}
+    else:
+        wanted = {"http": p.http, "https": p.https}
+    import socket
+    bad = []
+    for key, port in wanted.items():
+        busy = False
+        for fam, addr in ((socket.AF_INET, "127.0.0.1"),
+                          (socket.AF_INET6, "::1")):
+            try:
+                with socket.socket(fam) as s:
+                    s.settimeout(0.3)
+                    if s.connect_ex((addr, port)) == 0:
+                        busy = True
+                        break
+            except OSError:
+                continue  # 해당 패밀리 미지원 호스트
+        if busy and not _our_caddy_holds_port(cfg.env, port):
+            bad.append(f"network.ports.{key}={port}")
+    return bad
 
 
 def cmd_client_values(args) -> int:

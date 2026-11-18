@@ -69,6 +69,11 @@ class Settings(BaseSettings):
             return [item.strip() for item in stripped.split(",") if item.strip()]
         return v
 
+    # ── Web search (AgentCore) — deploy 가 기능 선언과 프로비저닝 URL 을
+    #    둘 다 주입했을 때만 "배포됨". admin UI 토글 표시에만 쓰인다.
+    WEB_SEARCH_ENABLED: bool = False
+    AGENTCORE_GATEWAY_URL: str = ""
+
     # ── Application ──
     APP_NAME: str = "llm-gateway-admin-api"
     APP_ENV: str = "development"  # development | staging | production — Helm 은 dev|staging|prod 주입

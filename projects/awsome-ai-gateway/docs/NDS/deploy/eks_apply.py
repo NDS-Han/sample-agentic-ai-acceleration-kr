@@ -2120,7 +2120,12 @@ def plan(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "") 
         set_args += [
             "--set", f"gatewayProxy.env.AGENTCORE_GATEWAY_URL={url}",
             "--set", f"gatewayProxy.env.AGENTCORE_REGION={websearch.AGENTCORE_REGION}",
-            "--set", f"gatewayProxy.env.AGENTCORE_TARGET_ID={websearch.TARGET_ID}"]
+            "--set", f"gatewayProxy.env.AGENTCORE_TARGET_ID={websearch.TARGET_ID}",
+            # admin UI 의 웹서치 토글이 실제 프로비저닝 상태를 표시하도록
+            # admin-api 에도 같은 쌍을 준다 (URL 없이 flag 만 두면 미배포인데
+            # 켜짐으로 보이는 오판 방지 — 둘 다 있을 때만 배포됨으로 판정)
+            "--set", "adminApi.env.WEB_SEARCH_ENABLED=true",
+            "--set", f"adminApi.env.AGENTCORE_GATEWAY_URL={url}"]
     if cfg.features.bi_insight and arn:
         set_args += [
             "--set", f"adminApi.env.AGENTCORE_RUNTIME_ARN={arn}",

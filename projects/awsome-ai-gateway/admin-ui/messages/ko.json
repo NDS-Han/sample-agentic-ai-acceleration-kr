@@ -1340,6 +1340,7 @@
     "title": "앱 정책 관리",
     "toggleSaved": "{app} 허용 설정이 변경되었습니다.",
     "webSearchHint": "이 앱의 요청에 서버사이드 web_search 도구를 주입합니다.",
+    "webSearchNotDeployed": "기능이 배포되지 않았습니다 — gateway.yaml 의 features.web_search 를 켜고 배포(apply)해야 사용할 수 있습니다.",
     "webSearchOff": "꺼짐",
     "webSearchOn": "켜짐",
     "webSearchSaved": "{app} 웹서치 설정이 저장되었습니다.",

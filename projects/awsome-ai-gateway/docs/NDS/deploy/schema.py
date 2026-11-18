@@ -283,6 +283,30 @@ class GatewayConfig:
         w: list[str] = []
         if self.deploy.target != "compose" and self.network.ports != PortsConfig():
             w.append("network.ports 는 compose 전용입니다 — eks/ecs 배포에서는 무시됩니다")
+        elif self.deploy.target == "compose":
+            p = self.network.ports
+            if self.domain.mode == "none":
+                if p.http != 80 or p.https != 443:
+                    w.append("domain 없는 compose 에서는 ports.http/https 가 적용되지 "
+                             "않습니다 — gateway/admin_api/admin_ui 를 사용하세요")
+            else:
+                if (p.gateway, p.admin_api, p.admin_ui) != (8000, 8080, 3000):
+                    w.append("domain 부착 compose 에서는 ports.gateway/admin_api/admin_ui "
+                             "가 적용되지 않습니다 — http/https 를 사용하세요")
+                if p.https != 443:
+                    w.append("ports.https ≠ 443 — Caddy 자동 HTTPS 의 인증서 발급과 "
+                             "HTTP→HTTPS 리다이렉트는 공개 443 을 기대합니다. "
+                             "프록시/NAT 앞단이 아니면 인증서 발급·리다이렉트가 깨집니다")
+            # observability 스택은 127.0.0.1 호스트 바인드를 유지한다 — caddy 의
+            # 0.0.0.0 바인드와 겹치면 compose up 이 실패
+            if self.features.observability:
+                obs_ports = {4317, 4318, 8889, 9090, 3100, 3200, 3001}
+                used = ({p.gateway, p.admin_api, p.admin_ui}
+                        if self.domain.mode == "none" else {p.http, p.https})
+                hit = sorted(obs_ports & used)
+                if hit:
+                    w.append(f"network.ports {hit} — observability 스택이 같은 포트를 "
+                             "127.0.0.1 에 바인드해 caddy 와 충돌합니다")
         open_cidrs = {"0.0.0.0/0", "::/0"}
         if self.network.mode == "public" and not self.network.allowed_cidrs:
             if self.deploy.target == "ecs":

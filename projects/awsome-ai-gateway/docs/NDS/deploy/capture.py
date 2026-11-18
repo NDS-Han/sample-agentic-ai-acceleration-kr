@@ -88,6 +88,26 @@ def capture_compose(out_dir: Path, unknown: set[str] | None = None
     m = re.search(r"@blocked not remote_ip ([^\n]+)", caddy)
     cidrs = m.group(1).strip().split() if m else []
 
+    # caddy 호스트 포트 — "H:C"(또는 long syntax)에서 컨테이너 포트로 역매핑해
+    # network.ports 를 복원한다. 기본값과 같은 키는 생략해 yaml 을 깨끗하게 둔다.
+    _CONT_PORT_KEYS = {80: "http", 443: "https", 8000: "gateway",
+                       8080: "admin_api", 3000: "admin_ui"}
+    _PORT_DFLT = {"http": 80, "https": 443, "gateway": 8000,
+                  "admin_api": 8080, "admin_ui": 3000}
+    ports: dict[str, int] = {}
+    for ent in (_dmap(services.get("caddy")).get("ports") or []):
+        if isinstance(ent, dict):
+            host_p = int(ent.get("published", 0) or 0)
+            cont_p = int(ent.get("target", 0) or 0)
+        else:
+            mm = re.match(r"^(?:[\d.]+:)?(\d+):(\d+)$", str(ent).strip())
+            if not mm:
+                continue
+            host_p, cont_p = int(mm.group(1)), int(mm.group(2))
+        key = _CONT_PORT_KEYS.get(cont_p)
+        if key and host_p != _PORT_DFLT[key]:
+            ports[key] = host_p
+
     # domain — Caddyfile 이 포트 블록(:8000)이면 none, host 블록이면 이름 추출.
     # compose 경로의 TLS 는 Caddy 자동 발급이라 zone_id 는 알 수 없다.
     host_m = re.search(r"^gateway\.([^\s{]+)\s*\{", caddy, re.M)
@@ -230,7 +250,8 @@ def capture_compose(out_dir: Path, unknown: set[str] | None = None
         "env": env_name,
         "aws": {"region": env.get("AWS_REGION", "")},
         "deploy": {"target": "compose", "size_tier": "t0"},
-        "network": {"mode": "public", "allowed_cidrs": cidrs},
+        "network": {"mode": "public", "allowed_cidrs": cidrs,
+                    **({"ports": ports} if ports else {})},
         "domain": domain,
         "features": features,
         "clients": {"models_profile": "global"},

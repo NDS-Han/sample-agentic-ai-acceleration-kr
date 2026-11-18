@@ -64,6 +64,9 @@ class AppPolicyResponse(BaseModel):
     allowed_users: list[AppUserRef]
     # 같은 routing_profiles 행의 앱 정책 — 한 화면에서 같이 보고 바꾼다.
     web_search_enabled: bool = False
+    # 실제 프로비저닝 상태(env 선언+URL) — false 면 토글은 꺼짐+비활성으로
+    # 표시돼야 한다(DB 플래그만으론 AgentCore 미배포를 알 수 없다)
+    web_search_deployed: bool = False
     # 크로스계정 라우팅(routing_profiles.account_role_arn/external_id/region) —
     # /apps 패널에서 읽고 쓴다. external_id 는 ADMIN 전용 응답에서만 나간다
     # (모델 라우팅 응답과 동일 — 감사 로그만 마스킹).
@@ -236,6 +239,9 @@ async def _build_app_policy(session: AsyncSession, client: str) -> AppPolicyResp
     rp_row = rp_result.fetchone()
     default_model: str | None = rp_row[0] if rp_row else None
     web_search_enabled = bool(rp_row[1]) if rp_row else False
+    from app.core.config import get_settings
+    _s = get_settings()
+    web_search_deployed = bool(_s.WEB_SEARCH_ENABLED and _s.AGENTCORE_GATEWAY_URL)
     account_role_arn: str | None = rp_row[2] if rp_row else None
     external_id: str | None = rp_row[3] if rp_row else None
     region: str | None = rp_row[4] if rp_row else None
@@ -315,6 +321,7 @@ async def _build_app_policy(session: AsyncSession, client: str) -> AppPolicyResp
         default_model=default_model,
         allowed_users=allowed_users,
         web_search_enabled=web_search_enabled,
+        web_search_deployed=web_search_deployed,
         account_role_arn=account_role_arn,
         external_id=external_id,
         region=region,

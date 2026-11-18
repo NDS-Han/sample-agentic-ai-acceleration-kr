@@ -116,7 +116,10 @@ def transform_services(base: dict, cfg: GatewayConfig) -> dict:
             # 도메인이 없거나 mode=none(caddy 포트 라우팅 — 80번에 아무것도
             # 없다)이면 NEXTAUTH_URL 을 비워 Host 헤더로 유도 — 원격 호스트에서
             # localhost 단정이나 접근 불가 도메인 주소는 둘 다 죽은 URL 이다.
-            svc.setdefault("environment", {})["NEXTAUTH_URL"] = f"https://admin.{cfg.domain.name}"
+            _sfx = (f":{cfg.network.ports.https}"
+                    if cfg.network.ports.https != 443 else "")
+            svc.setdefault("environment", {})["NEXTAUTH_URL"] = \
+                f"https://admin.{cfg.domain.name}{_sfx}"
 
         # ⑥ env_file 은 생성 .env 를 가리키도록
         if "env_file" in svc:
@@ -361,7 +364,7 @@ def render(cfg: GatewayConfig, out_dir: Path, repo_root: Path = REPO_ROOT) -> di
     }
     env_path = out_dir / ".env"
     existing = common.parse_env_file(env_path)
-    merged, differing, dropped = common.merge_env(existing, desired_env(cfg))
+    merged, updated, differing, dropped = common.merge_env(existing, desired_env(cfg))
     filled = common.fill_generated(merged)
     # 개행 검증을 첫 파일 쓰기보다 먼저 — .env 에서만 실패하면 새
     # compose/Caddyfile 와 옛 .env 의 불일치 산출물이 남는다.
@@ -389,4 +392,5 @@ def render(cfg: GatewayConfig, out_dir: Path, repo_root: Path = REPO_ROOT) -> di
         "# ⚠️ 이 파일을 잃으면 발급된 Virtual Key 를 전부 다시 만들어야 한다.\n"
         "#    VIRTUAL_KEY_ENCRYPTION_KEY 는 별도 안전한 곳에 백업할 것."))
     return {"files": [compose_path, caddy_path, env_path], "filled": filled,
-            "preserved": differing, "dropped": dropped, "notes": notes}
+            "updated": updated, "preserved": differing, "dropped": dropped,
+            "notes": notes}

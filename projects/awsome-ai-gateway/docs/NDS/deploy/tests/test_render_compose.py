@@ -261,7 +261,7 @@ def test_merge_env_keeps_operator_oidc_smtp_keys_when_feature_on():
                 "SMTP_PASSWORD": "p", "SMTP_STARTTLS": "true"}
     desired = {"OIDC_ISSUER_URL": "https://idp", "SMTP_HOST": "mail",
                "WEB_SEARCH_ENABLED": "false"}
-    merged, _, dropped = common.merge_env(existing, desired)
+    merged, _, _, dropped = common.merge_env(existing, desired)
     assert merged["OIDC_EMAIL_CLAIM"] == "upn"
     assert merged["SMTP_USERNAME"] == "u" and merged["SMTP_PASSWORD"] == "p"
     assert not [k for k in dropped if k.startswith(("OIDC_", "SMTP_"))]
@@ -272,7 +272,7 @@ def test_merge_env_drops_prefix_keys_only_when_anchor_off():
     수렴한다 — stale OIDC_* 가 dev 토큰을 거부하는 잠금 방지."""
     existing = {"OIDC_ISSUER_URL": "https://idp", "OIDC_EMAIL_CLAIM": "upn",
                 "SMTP_HOST": "mail", "SMTP_USERNAME": "u"}
-    merged, _, dropped = common.merge_env(existing, {"DEV_LOGIN_ENABLED": "true"})
+    merged, _, _, dropped = common.merge_env(existing, {"DEV_LOGIN_ENABLED": "true"})
     assert "OIDC_ISSUER_URL" not in merged
     assert "OIDC_EMAIL_CLAIM" not in merged and "SMTP_USERNAME" not in merged
     assert "OIDC_EMAIL_CLAIM" in dropped
@@ -289,7 +289,7 @@ def test_render_newline_aborts_before_any_file_write(tmp_path):
     # 실제 render 경로 — 도메인에 개행이 들어가도 yaml 에서 차단되지만,
     # write_env_file 의 검증이 compose 쓰기 전에 발동하는지는 merge_env
     # 단위로 이미 검증됨. 여기서는 사전검증 순서를 직접 확인한다.
-    merged, _, _ = common.merge_env({}, {"A": "1\n2"})
+    merged, _, _, _ = common.merge_env({}, {"A": "1\n2"})
     with pytest.raises(SystemExit):
         for k, v in merged.items():
             if "\n" in str(v):
@@ -357,3 +357,47 @@ def test_ports_partial_override_keeps_defaults(tmp_path):
     _, out = render_to(tmp_path, cfg(network={"ports": {"gateway": 9000}}))
     assert out["services"]["caddy"]["ports"] == [
         "9000:8000", "8080:8080", "3000:3000"]
+
+
+def test_port_conflict_free_port_not_flagged():
+    import socket
+    from deploy import cli
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    free = s.getsockname()[1]
+    s.close()
+    c = cfg(network={"ports": {"gateway": free}})
+    # 다른 기본 포트(8080/3000)는 개발 머신에서 점유될 수 있어 gateway 만 본다
+    assert f"network.ports.gateway={free}" not in cli._compose_port_conflicts(c)
+
+
+def test_port_conflict_busy_port_flagged():
+    import socket
+    from deploy import cli
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    s.listen(1)
+    port = s.getsockname()[1]
+    try:
+        c = cfg(network={"ports": {"gateway": port}})
+        assert f"network.ports.gateway={port}" in cli._compose_port_conflicts(c)
+    finally:
+        s.close()
+
+
+def test_port_conflict_domain_mode_checks_http_https():
+    import socket
+    from deploy import cli
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    s.listen(1)
+    port = s.getsockname()[1]
+    try:
+        c = cfg(domain={"mode": "route53-acm", "name": "x.com"},
+                network={"ports": {"http": port}})
+        # http 점유 → 충돌, https(기본 443 미점유 가정)는 무관 — gateway 는
+        # none 전용이라 검사하지 않는다
+        got = cli._compose_port_conflicts(c)
+        assert any(f"http={port}" in x for x in got)
+    finally:
+        s.close()

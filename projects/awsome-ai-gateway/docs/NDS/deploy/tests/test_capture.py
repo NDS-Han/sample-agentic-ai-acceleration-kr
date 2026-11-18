@@ -82,8 +82,8 @@ def test_compose_capture_missing_dir(tmp_path):
 def test_compose_roundtrip_service_keys(tmp_path):
     """렌더러는 SERVICE_KEYS_ENABLED 를 .env(env_file)에만 쓴다 — api_env 만
     보면 false 배포가 true 로 캡처돼 채택 시 발급이 켜지는 회귀."""
-    # ⚠️ 같은 out_dir 재렌더는 merge_env 규칙상 기존 .env 가 이긴다 — 케이스별로
-    #    별도 디렉터리를 써야 한다.
+    # 케이스별로 별도 디렉터리 — 같은 out_dir 재렌더는 파생 키가 yaml 을 따라
+    #    이전 케이스 결과를 오염시킨다.
     doc = dict(BASE)
     doc["features"] = {"notifications": {"provider": "mock"},
                        "service_keys": False}
@@ -1433,7 +1433,7 @@ def test_merge_env_drops_declared_off_managed_keys(tmp_path):
         "POSTGRES_PASSWORD": "keepme", "OPERATOR_KEY": "keepme",
     }
     desired = {"AWS_REGION": "us-east-1", "DEV_LOGIN_ENABLED": "true"}
-    merged, differing, dropped = common.merge_env(existing, desired)
+    merged, _, differing, dropped = common.merge_env(existing, desired)
     assert "OIDC_ISSUER_URL" not in merged and "OIDC_CLIENT_SECRET" not in merged
     assert "WEB_SEARCH_ENABLED" not in merged and "AGENTCORE_GATEWAY_URL" not in merged
     assert merged["POSTGRES_PASSWORD"] == "keepme"   # GENERATED — 절대 삭제 금지
@@ -1447,7 +1447,7 @@ def test_merge_env_keeps_agentcore_when_search_on():
     from deploy.render import common
     existing = {"WEB_SEARCH_ENABLED": "true",
                 "AGENTCORE_GATEWAY_URL": "https://gw"}
-    merged, _, dropped = common.merge_env(
+    merged, _, _, dropped = common.merge_env(
         existing, {"WEB_SEARCH_ENABLED": "true"})
     assert merged["AGENTCORE_GATEWAY_URL"] == "https://gw"
     assert "AGENTCORE_GATEWAY_URL" not in dropped
@@ -1527,3 +1527,16 @@ def test_instance_items_manifest_owned_beats_labels():
     # owned=None(매니페스트 조회 불가)이면 라벨 폴백 계약 유지
     got = capture._instance_items([forged, mine], "myrel", owned=None)
     assert [i["metadata"]["name"] for i in got] == ["evil-admin-ui"]
+
+
+def test_compose_roundtrip_ports(tmp_path):
+    doc = dict(BASE)
+    doc["network"] = {**doc["network"],
+                      "ports": {"gateway": 9000, "admin_ui": 3300}}
+    cap, _ = _roundtrip(tmp_path, doc)
+    assert cap["network"]["ports"] == {"gateway": 9000, "admin_ui": 3300}
+
+
+def test_compose_roundtrip_default_ports_omitted(tmp_path):
+    cap, _ = _roundtrip(tmp_path, BASE)
+    assert "ports" not in cap["network"]
