@@ -315,9 +315,55 @@ def _collect_doc(existing: dict | None = None) -> dict:
 
     prev_oidc = _gd(ex, "oidc")
     oidc = {}
-    oidc_on = _unwrap(questionary.confirm(
-        "OIDC 로그인(Cognito 등)을 설정합니까?", default=bool(prev_oidc)).ask())
-    if not oidc_on and prev_oidc:
+    oidc_on = False
+    sel = ""
+    # 배포가 만드는 Cognito 가 OIDC 소스인 경로(eks/ecs)에서는 issuer/client/
+    # URL 을 묻는 게 오히려 오도 — 외부 IdP 를 쓸 때만 필요한 값이다.
+    _OIDC_IDP_KEYS = ("issuer_url", "client_id", "authorize_url", "token_url",
+                      "client_secret", "audience")
+    if target == "ecs":
+        # ecs 는 render 가 IdP 키를 아예 읽지 않는다(terraform Cognito 출력이
+        # OIDC 소스) — 보조 필드만 보존하고 들어간 IdP 값은 제거한다.
+        dropped = sorted(k for k in _OIDC_IDP_KEYS if prev_oidc.get(k))
+        if dropped:
+            console.print(f"[yellow]ⓘ ecs 는 OIDC 엔드포인트를 배포가 자동 "
+                          f"관리합니다 — {', '.join(dropped)} 은(는) 무시되므로 "
+                          "제거합니다[/yellow]")
+        oidc = {k: v for k, v in prev_oidc.items()
+                if k not in _OIDC_IDP_KEYS and v}
+    elif target == "eks":
+        # eks 도 배포가 Cognito 생성 + apply 가 output 으로 자동 배선 — 기본은
+        # 비워두는 게 맞다. 단 hosted UI 콜백은 https 전용이라 domain.name 필요.
+        sel = _unwrap(questionary.select(
+            "OIDC 로그인 방식",
+            choices=[
+                Choice("배포가 Cognito 생성 — apply 시 자동 배선 (권장)", "auto"),
+                Choice("외부 OIDC IdP 연결 — issuer/client 수동 입력", "ext"),
+                Choice("OIDC 없음 — dev_login 경로만", "none"),
+            ],
+            default=("ext" if prev_oidc.get("issuer_url")
+                     else ("auto" if domain_name else "none"))).ask())
+        if sel == "auto":
+            if not domain_name:
+                console.print("[yellow]⚠ Cognito hosted UI 콜백은 https 전용이라 "
+                              "domain.name 없이는 OIDC 가 배선되지 않습니다 — "
+                              "dev_login 경로로 진행됩니다[/yellow]")
+            dropped = sorted(k for k in _OIDC_IDP_KEYS if prev_oidc.get(k))
+            if dropped:
+                console.print(f"[yellow]ⓘ 외부 IdP 필드 {', '.join(dropped)} "
+                              "제거 — 배포가 Cognito 를 자동 배선합니다[/yellow]")
+            oidc = {k: v for k, v in prev_oidc.items()
+                    if k not in _OIDC_IDP_KEYS and v}
+        elif sel == "ext":
+            oidc_on = True
+        # none — oidc={} → 아래 제거확인 흐름으로
+    else:  # compose — IdP 를 아무것도 만들지 않는다
+        oidc_on = _unwrap(questionary.confirm(
+            "외부 OIDC IdP 가 있습니까? (없으면 No — features.dev_login 권장)",
+            default=bool(prev_oidc)).ask())
+    # ecs 스트립과 eks-auto 는 선택 자체가 IdP 제거 동의 — 이중 확인 생략
+    if (not oidc_on and prev_oidc and not oidc
+            and target != "ecs" and sel != "auto"):
         if not _unwrap(questionary.confirm(
                 "기존 OIDC 설정이 있습니다 — 제거합니까?", default=False).ask()):
             oidc_on = True
