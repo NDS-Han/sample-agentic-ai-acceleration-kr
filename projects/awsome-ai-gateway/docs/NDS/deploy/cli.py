@@ -802,9 +802,15 @@ def cmd_render(args) -> int:
             console.print(f"  [yellow]기존 값과 달라 보존됨(수동 확인): {', '.join(res['preserved'])}")
         for n in res.get("notes", []):
             console.print(f"  [yellow]ⓘ {n}")
+        # 붙여넣기용 — 절대경로 전체를 찍으면 터미널 폭에서 줄바꿈돼 -f 인자가
+        # 잘린 채 실행된다. cwd 아래의 gen dir 이면 상대 경로로 짧게 찍는다.
+        try:
+            rel_out = out.relative_to(Path.cwd())
+        except ValueError:
+            rel_out = out
         console.print(
-            f"\n기동: [bold]docker compose --env-file {out/'.env'} "
-            f"-f {out/'docker-compose.yml'} up -d --build[/bold]\n"
+            f"\n기동: [bold]docker compose --env-file {rel_out/'.env'} "
+            f"-f {rel_out/'docker-compose.yml'} up -d --build[/bold]\n"
             "  (--env-file 필수 — 없으면 ${POSTGRES_PASSWORD} 등이 repo 루트 .env 나\n"
             "   기본값으로 interpolate 되어 앱과 DB의 비밀번호가 어긋납니다)")
         return 0
