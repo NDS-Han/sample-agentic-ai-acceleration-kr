@@ -359,7 +359,8 @@ def _collect_doc(existing: dict | None = None) -> dict:
         # none — oidc={} → 아래 제거확인 흐름으로
     else:  # compose — IdP 를 아무것도 만들지 않는다
         oidc_on = _unwrap(questionary.confirm(
-            "외부 OIDC IdP 가 있습니까? (없으면 No — features.dev_login 권장)",
+            "외부 OIDC IdP 가 있습니까? (없으면 No — 다음 질문에서 dev_login "
+            "여부를 묻습니다)",
             default=bool(prev_oidc)).ask())
     # ecs 스트립과 eks-auto 는 선택 자체가 IdP 제거 동의 — 이중 확인 생략
     if (not oidc_on and prev_oidc and not oidc
@@ -410,6 +411,20 @@ def _collect_doc(existing: dict | None = None) -> dict:
         if admin_emails:
             oidc["admin_emails"] = [e.strip()
                                     for e in admin_emails.split(",") if e.strip()]
+
+    # 로그인 경로가 실제로 비는 경우만 dev_login 을 묻는다 — compose+IdP 없음,
+    # eks 에서 OIDC 없음 선택, eks auto+도메인 없음(Cognito 콜백 불가라
+    # dev_login 경로로 떨어지는 경우). ecs 는 Cognito 자동 배선이라 항상 경로가
+    # 있어 묻지 않는다. 무인증 ADMIN 토큰이라 자동으로 켜지 않고 선택을 넘긴다.
+    needs_login_path = (not oidc_on and (
+        target == "compose"
+        or (target == "eks" and (sel != "auto" or not domain_name))))
+    dev_login = bool(prev_feat.get("dev_login"))
+    if needs_login_path:
+        dev_login = _unwrap(questionary.confirm(
+            "외부 로그인 경로가 없습니다 — features.dev_login 을 켭니까? "
+            "(무인증 ADMIN 토큰 — 평가 전용, allowed_cidrs/SSH 터널로 제한 필수)",
+            default=dev_login).ask())
 
     images = {}
     if target in ("ecs", "eks"):
@@ -614,11 +629,14 @@ def _collect_doc(existing: dict | None = None) -> dict:
             "bi_insight": "bi_insight" in features,
             "pricing_lambda": "pricing_lambda" in features,
             "observability": "observability" in features,
-            # 체크박스가 다루지 않는 플래그(dev_login, 향후 추가 플래그)는 보존 —
+            # 체크박스가 다루지 않는 플래그(향후 추가 플래그)는 보존 —
             # configure 가 수동 선언을 조용히 지우는 걸 막는다
             **{k: v for k, v in prev_feat.items()
                if k not in ("notifications", "web_search", "body_logging",
                             "bi_insight", "pricing_lambda", "observability")},
+            # dev_login 은 위 질문에서 명시 답변했을 때만 덮어쓴다 — 질문이
+            # 안 돌았으면 이전 선언을 보존, No 면 false 를 명시해 이전 true 도 끈다
+            **({"dev_login": dev_login} if needs_login_path else {}),
         },
         "clients": _gd(ex, "clients") or {"models_profile": "global"},
     }
@@ -2124,8 +2142,13 @@ def cmd_client_values(args) -> int:
         # 없고, compose 의 none 은 caddy 가 포트 라우팅만 연다 → ALB DNS/
         # 공인 IP 폴백으로 떨어진다. compose 의 host 블록은 caddy auto-HTTPS,
         # ecs route53-acm 은 ACM+443 — 이 분기는 전부 https 가 맞다.
-        gw = f"https://gateway.{cfg.domain.name}"
-        adm = f"https://admin-api.{cfg.domain.name}"
+        # compose 에서 https 호스트 포트를 바꿨으면 URL 에도 붙는다(ecs 는
+        # ports 미적용이라 443 고정)
+        hs = ""
+        if target == "compose" and cfg.network.ports.https != 443:
+            hs = f":{cfg.network.ports.https}"
+        gw = f"https://gateway.{cfg.domain.name}{hs}"
+        adm = f"https://admin-api.{cfg.domain.name}{hs}"
     else:
         outs = _tf_outputs_soft(_tf_env_dir(cfg))
         dns = str(outs.get("alb_dns_name") or "")
@@ -2134,7 +2157,8 @@ def cmd_client_values(args) -> int:
         elif target == "compose":
             ip = _public_ip()
             if ip:
-                gw, adm = f"http://{ip}:8000", f"http://{ip}:8080"
+                p = cfg.network.ports
+                gw, adm = f"http://{ip}:{p.gateway}", f"http://{ip}:{p.admin_api}"
                 notes.append("compose+도메인 없음: 공인 IP 자동 탐지 — 배포 EC2 외 머신에서 "
                              "실행했다면 출력 IP 대신 EC2 퍼블릭 IP 로 교체하세요")
 

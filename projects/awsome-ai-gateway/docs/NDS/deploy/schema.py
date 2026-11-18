@@ -56,6 +56,18 @@ class DeployConfig:
 
 
 @dataclass
+@dataclass
+class PortsConfig:
+    """compose 전용 — Caddy 가 바인드하는 호스트 포트(유일한 인입점이라
+    이것만 바꾸면 된다). 컨테이너 측 포트는 Caddyfile 과 고정이라 불변."""
+    http: int = 80         # domain 부착 시 HTTP
+    https: int = 443       # domain 부착 시 HTTPS
+    gateway: int = 8000    # domain mode=none — gateway-proxy
+    admin_api: int = 8080  # domain mode=none — admin-api
+    admin_ui: int = 3000   # domain mode=none — admin-ui
+
+
+@dataclass
 class NetworkConfig:
     mode: str = "public"
     allowed_cidrs: list[str] = field(default_factory=list)
@@ -63,6 +75,7 @@ class NetworkConfig:
     # (gateway 데이터플레인은 public 유지 — ops 8-I 목표형). mode=private 은
     # 3개 Ingress 전부를 internal 로 만들어 게이트웨이까지 끊기므로 다른 의미다.
     admin_internal: bool = False
+    ports: PortsConfig = field(default_factory=PortsConfig)
 
 
 @dataclass
@@ -269,6 +282,8 @@ class GatewayConfig:
     def warnings(self) -> list[str]:
         """검증은 통과하지만 운영상 주의가 필요한 조합."""
         w: list[str] = []
+        if self.deploy.target != "compose" and self.network.ports != PortsConfig():
+            w.append("network.ports 는 compose 전용입니다 — eks/ecs 배포에서는 무시됩니다")
         open_cidrs = {"0.0.0.0/0", "::/0"}
         if self.network.mode == "public" and not self.network.allowed_cidrs:
             if self.deploy.target == "ecs":
@@ -873,6 +888,36 @@ def _safe_bool(v: Any, errors: list[str], path: str, default: bool = False) -> b
     return default
 
 
+def _port_val(v: Any, dflt: int, path: str, errors: list[str]) -> int:
+    if v in (None, ""):
+        return dflt
+    try:
+        if isinstance(v, bool) or (isinstance(v, float) and not v.is_integer()):
+            raise ValueError
+        n = int(v)
+        if not (1 <= n <= 65535):
+            raise ValueError
+        return n
+    except (TypeError, ValueError):
+        errors.append(f"{path} 는 1-65535 정수 포트여야 합니다: {v!r}")
+        return dflt
+
+
+def _ports_from(v: Any, errors: list[str]) -> "PortsConfig":
+    m = _require_mapping(v, "network.ports", errors)
+    if not m:
+        return PortsConfig()
+    _check_unknown(m, frozenset({"http", "https", "gateway", "admin_api", "admin_ui"}),
+                   "network.ports", errors)
+    return PortsConfig(
+        http=_port_val(m.get("http"), 80, "network.ports.http", errors),
+        https=_port_val(m.get("https"), 443, "network.ports.https", errors),
+        gateway=_port_val(m.get("gateway"), 8000, "network.ports.gateway", errors),
+        admin_api=_port_val(m.get("admin_api"), 8080, "network.ports.admin_api", errors),
+        admin_ui=_port_val(m.get("admin_ui"), 3000, "network.ports.admin_ui", errors),
+    )
+
+
 def _require_mapping(node: Any, path: str, errors: list[str]) -> dict:
     if node is None:
         return {}
@@ -948,7 +993,7 @@ _AWS_KEYS = frozenset(("region", "account_id", "allowed_roles"))
 _DEPLOY_KEYS = frozenset(("target", "size_tier", "sizing", "capacity_tier",
                           "tfstate_bucket", "tfstate_table", "release",
                           "namespace", "tf_env_dir"))
-_NETWORK_KEYS = frozenset(("mode", "allowed_cidrs", "admin_internal"))
+_NETWORK_KEYS = frozenset(("mode", "allowed_cidrs", "admin_internal", "ports"))
 _DOMAIN_KEYS = frozenset(("mode", "name", "zone_id", "hosts"))
 _DOMAIN_HOST_KEYS = frozenset(("gateway", "admin_ui", "admin_api"))
 _FEATURE_KEYS = frozenset(("notifications", "alerting", "bi_insight", "pricing_lambda",
@@ -1062,6 +1107,7 @@ def from_dict(raw: dict) -> GatewayConfig:
                                      "network.allowed_cidrs", errors),
             admin_internal=_safe_bool(network.get("admin_internal", False), errors,
                                       "network.admin_internal"),
+            ports=_ports_from(network.get("ports"), errors),
         ),
         domain=DomainConfig(
             mode=_opt_str(domain.get("mode"), "none"),

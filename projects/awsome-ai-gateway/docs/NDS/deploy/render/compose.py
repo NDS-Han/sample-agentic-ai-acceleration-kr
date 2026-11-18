@@ -152,10 +152,14 @@ def _absolutize_mount(v) -> str:
 
 
 def _caddy_service(cfg: GatewayConfig) -> dict:
-    ports = ["80:80", "443:443"]
+    p = cfg.network.ports
+    ports = [f"{p.http}:80", f"{p.https}:443"]
     if cfg.domain.mode == "none":
-        # 도메인이 없으면 포트별 HTTP 라우팅
-        ports = [f"{p}:{p}" for p in WEB_PORTS.values()]
+        # 도메인이 없으면 포트별 HTTP 라우팅 — 호스트 측만 설정값, 컨테이너 측은
+        # Caddyfile 리슨 포트(WEB_PORTS)와 고정
+        host = {"gateway-proxy": p.gateway, "admin-api": p.admin_api,
+                "admin-ui": p.admin_ui}
+        ports = [f"{host[s]}:{cp}" for s, cp in WEB_PORTS.items()]
     return {
         "image": "caddy:2-alpine",
         "restart": "unless-stopped",

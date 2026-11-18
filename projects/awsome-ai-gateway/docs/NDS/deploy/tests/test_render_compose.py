@@ -294,3 +294,49 @@ def test_render_newline_aborts_before_any_file_write(tmp_path):
         for k, v in merged.items():
             if "\n" in str(v):
                 raise SystemExit(f"{k}")
+
+
+def test_ports_default_bindings(tmp_path):
+    _, out = render_to(tmp_path, cfg())
+    assert out["services"]["caddy"]["ports"] == [
+        "8000:8000", "8080:8080", "3000:3000"]
+
+
+def test_ports_custom_host_side(tmp_path):
+    _, out = render_to(tmp_path, cfg(
+        network={"ports": {"gateway": 9000, "admin_api": 9080,
+                           "admin_ui": 9300}}))
+    # 호스트 측만 설정값 — 컨테이너 측 리슨 포트와 Caddyfile 은 불변
+    assert out["services"]["caddy"]["ports"] == [
+        "9000:8000", "9080:8080", "9300:3000"]
+    body = (tmp_path / "Caddyfile").read_text()
+    assert ":8000" in body and "admin-ui:3000" in body
+
+
+def test_ports_domain_mode_http_https(tmp_path):
+    _, out = render_to(tmp_path, cfg(
+        domain={"mode": "route53-acm", "name": "example.com"},
+        network={"ports": {"http": 8080, "https": 8443}}))
+    assert out["services"]["caddy"]["ports"] == ["8080:80", "8443:443"]
+
+
+def test_ports_invalid_rejected():
+    import pytest
+    with pytest.raises(schema.SchemaError):
+        cfg(network={"ports": {"gateway": 99999}})
+    with pytest.raises(schema.SchemaError):
+        cfg(network={"ports": {"admin_ui": "abc"}})
+    with pytest.raises(schema.SchemaError):
+        cfg(network={"ports": {"bogus": 1234}})
+
+
+def test_ports_eks_warns_ignored():
+    c = cfg(network={"ports": {"gateway": 9000}})
+    c.deploy.target = "eks"  # eks 검증 요구조건 우회 — 경고 분기만 확인
+    assert any("compose 전용" in w for w in c.warnings())
+
+
+def test_ports_partial_override_keeps_defaults(tmp_path):
+    _, out = render_to(tmp_path, cfg(network={"ports": {"gateway": 9000}}))
+    assert out["services"]["caddy"]["ports"] == [
+        "9000:8000", "8080:8080", "3000:3000"]
