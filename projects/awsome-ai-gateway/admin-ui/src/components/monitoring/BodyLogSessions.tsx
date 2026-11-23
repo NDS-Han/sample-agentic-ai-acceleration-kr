@@ -28,10 +28,11 @@ import { Usd } from '@/components/common/Usd';
 import { clientLabel } from '@/lib/constants/gateway';
 import {
   BodyRecordContent,
-  cacheTokenParts,
+  CacheCell,
+  CallStatusBadge,
   clientDisplay,
+  EMPTY_CELL,
   fmtTokenFlow,
-  statusTone,
 } from './bodyLogRender';
 
 // 한 호출을 펼치면 그 호출만 단건 조회한다 — 클릭 한 번으로 50건 열람이 감사되는
@@ -123,17 +124,8 @@ export function BodyLogSessions({
   onFiltersApplied?: (_f: SessionFilters) => void;
 }) {
   const t = useTranslations('monitoring.bodyLogs');
-  const tev = useTranslations('monitoring.events');
   const pit = usePointInTime();
   const { toast } = useToast();
-
-  // usage status → 번역 라벨. 모르는 값은 원문 폴백(EventLog/뷰어와 동일 규칙).
-  const STATUS_LABELS: Record<string, string> = {
-    ERROR: tev('types.ERROR'),
-    TIMEOUT: tev('types.TIMEOUT'),
-    SLOW_REQUEST: tev('types.SLOW_REQUEST'),
-    SUCCESS: tev('types.SUCCESS'),
-  };
 
   const [filters, setFilters] = useState<SessionFilters>(
     initialFilters ?? { days: DEFAULT_SESSION_DAYS, user: '', client: '', hasError: false },
@@ -680,35 +672,28 @@ export function BodyLogSessions({
                     {pit.dateTime(call.requested_at)}
                   </span>
                   <span className="truncate">{call.model_alias ?? '-'}</span>
-                  {/* 정상 호출에 매 행 색 배지를 달면 드문 오류가 색에 묻힌다 —
-                      SUCCESS 는 빈 셀, 이상 상태만 번역 라벨 배지로 표시한다. */}
+                  {/* 상태 열 — 요청 상세와 같은 배지(OK/Error/Timeout). 예전엔
+                      SUCCESS 를 빈 셀로 둬서 열 전체가 비어 보였다. */}
                   <span>
-                    {call.status && call.status !== 'SUCCESS' ? (
-                      <Badge tone={statusTone(call.status)}>
-                        {STATUS_LABELS[call.status] ?? call.status}
-                      </Badge>
-                    ) : null}
+                    <CallStatusBadge status={call.status} />
                   </span>
                   <span className="num text-right text-xs text-muted-foreground">
-                    {call.latency_ms != null ? `${(call.latency_ms / 1000).toFixed(1)}s` : ''}
+                    {call.latency_ms != null ? `${(call.latency_ms / 1000).toFixed(1)}s` : EMPTY_CELL}
                   </span>
                   <span className="num text-right text-xs text-muted-foreground">
-                    {call.cost_usd != null ? <Usd value={call.cost_usd} /> : ''}
+                    {call.cost_usd != null ? <Usd value={call.cost_usd} /> : EMPTY_CELL}
                   </span>
                   <span
                     className="num text-right text-xs text-muted-foreground"
                     title={t('colTokensTitle')}
                   >
-                    {fmtTokenFlow(call.input_tokens, call.output_tokens) ?? ''}
+                    {fmtTokenFlow(call.input_tokens, call.output_tokens) ?? EMPTY_CELL}
                   </span>
                   <span
                     className="num text-right text-xs text-muted-foreground"
                     title={t('colCacheTitle')}
                   >
-                    {(() => {
-                      const c = cacheTokenParts(call.cache_read_tokens, call.cache_write_tokens);
-                      return c ? t('cacheShort', c) : '';
-                    })()}
+                    <CacheCell read={call.cache_read_tokens} write={call.cache_write_tokens} />
                   </span>
                   <span className="flex justify-end gap-1">
                     {res?.data?.duplicates ? (

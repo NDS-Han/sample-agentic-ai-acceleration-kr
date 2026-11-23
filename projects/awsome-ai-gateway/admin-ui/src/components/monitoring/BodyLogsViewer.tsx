@@ -23,7 +23,7 @@ import { Usd } from '@/components/common/Usd';
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/common/Table';
 import { ErrorState } from '@/components/common/ErrorState';
 import { Button } from '@/components/common/Button';
-import { BodyRecordContent, cacheTokenParts, clientDisplay, fmtTokenFlow } from './bodyLogRender';
+import { BodyRecordContent, CacheCell, clientDisplay, fmtTokenFlow } from './bodyLogRender';
 import { eventTone, eventTypeLabels, EVENT_TYPE_FILTERS } from './eventMeta';
 
 // request_body 방언: anthropic/openai chat = messages[], responses API = input.
@@ -326,10 +326,7 @@ export function BodyLogsViewer({
                     {fmtTokenFlow(ev.input_tokens, ev.output_tokens) ?? '—'}
                   </Td>
                   <Td numeric className="text-xs text-muted-foreground">
-                    {(() => {
-                      const c = cacheTokenParts(ev.cache_read_tokens, ev.cache_write_tokens);
-                      return c ? t('cacheShort', c) : '—';
-                    })()}
+                    <CacheCell read={ev.cache_read_tokens} write={ev.cache_write_tokens} />
                   </Td>
                   <Td>
                     {/* EventLog 와 같은 톤·번역 라벨 — 같은 이벤트가 화면마다
