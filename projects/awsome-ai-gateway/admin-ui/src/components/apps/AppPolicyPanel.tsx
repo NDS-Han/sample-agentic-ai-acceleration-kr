@@ -40,6 +40,16 @@ const APP_PARAM = 'app';
 // 인원이 많아지면 나머지는 '전체 보기'로 펼친다.
 const USERS_INITIAL_ROWS = 50;
 
+
+/**
+ * 페이지 스크롤(<main>)에 붙는 표 헤더. sticky 는 스크롤 컨테이너의 padding 안쪽
+ * (<main> p-6 = 24px 아래)에 붙어, 그 24px 틈으로 뒤쪽 행이 비쳐 보였다.
+ * th 위에 main 패딩 높이(h-6)만큼 bg-card 띠를 덧대 틈을 막는다 — 붙지 않은 평소엔
+ * 카드(overflow-clip) 밖이라 잘려 보이지 않는다. <main> 의 p-6 을 바꾸면 h-6 도 맞출 것.
+ */
+const STICKY_THEAD =
+  "[&_th]:sticky [&_th]:top-0 [&_th]:z-10 [&_th]:bg-card [&_th]:before:pointer-events-none [&_th]:before:absolute [&_th]:before:inset-x-0 [&_th]:before:bottom-full [&_th]:before:h-6 [&_th]:before:bg-card [&_th]:before:content-['']";
+
 export function AppPolicyPanel() {
   const t = useTranslations('apps');
   const tc = useTranslations('common');
@@ -652,7 +662,7 @@ export function AppPolicyPanel() {
                 만들지 않음), Table 래퍼는 기본 overflow-x-auto 를 overflow-visible 로. */}
             <div className="glass rounded-apple overflow-clip">
               <Table wrapperClassName="overflow-visible">
-                <THead className="[&_th]:sticky [&_th]:top-0 [&_th]:z-10 [&_th]:bg-card">
+                <THead className={STICKY_THEAD}>
                   <Tr>
                     <Th>{t('colModel')}</Th>
                     <Th>{t('colAllowAll')}</Th>
@@ -743,7 +753,7 @@ export function AppPolicyPanel() {
               {/* 유저 수만큼 길어진다 — 모델 표와 같은 페이지 스크롤+sticky 헤더.
                   USERS_INITIAL_ROWS 를 넘으면 아래 '전체 보기'로 펼친다. */}
               <Table wrapperClassName="overflow-visible">
-                <THead className="[&_th]:sticky [&_th]:top-0 [&_th]:z-10 [&_th]:bg-card">
+                <THead className={STICKY_THEAD}>
                   <Tr><Th>{t('colUser')}</Th><Th>{t('colAccess')}</Th><Th>ID</Th></Tr>
                 </THead>
                 <TBody>
