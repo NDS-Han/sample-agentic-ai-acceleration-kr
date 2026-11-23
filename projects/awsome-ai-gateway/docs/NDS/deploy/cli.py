@@ -2097,13 +2097,17 @@ def cmd_capture(args) -> int:
                     backup = cfg_path.with_suffix(cfg_path.suffix + ".bak")
                     _atomic_write(backup, cfg_path.read_text())
                     backup.chmod(0o600)
-                    _atomic_write(cfg_path, yaml.safe_dump(
-                        existing, sort_keys=False, allow_unicode=True))
+                    body = yaml.safe_dump(
+                        existing, sort_keys=False, allow_unicode=True)
+                    # 표준 안전 주석(tfstate·hosts·0.0.0.0/0 등)은 캡처본과 같은
+                    # 세트로 복원한다 — 수작업 주석만 .bak 에 남는다
+                    _atomic_write(cfg_path, _annotate_capture_yaml(body, existing))
                     # 흡수된 값에 시크릿성 키가 섞일 수 있다 — _write_config 와
                     # 같은 소유자 전용 권한으로 조인다(사용자가 만든 0644 유지 금지)
                     cfg_path.chmod(0o600)
                     console.print(f"[green]{adopted} 개 필드를 {cfg_path} 에 흡수했습니다 "
-                                  f"(주석은 보존되지 않습니다 — 이전본: {backup.name})")
+                                  f"(표준 주석은 복원됩니다 — 수작업 주석은 이전본 "
+                                  f"{backup.name} 참조)")
             else:
                 console.print("[yellow]--interactive 로 각 항목의 채택/유지를 선택할 수 있습니다")
         return 0
