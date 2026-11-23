@@ -25,8 +25,8 @@ import {
   type TrendWindow,
   type UsageTrend,
 } from '@/lib/utils/rateLimitUsage';
-import { useReportingTz } from '@/components/common/ReportingTimezoneProvider';
-import { ReportingTzCaption } from '@/components/common/ReportingTzCaption';
+import { useDisplayTz } from '@/components/common/ReportingTimezoneProvider';
+import { BrowserTzCaption } from '@/components/common/ReportingTzCaption';
 
 const WINDOWS: TrendWindow[] = ['1h', '6h', '24h', '7d'];
 const WINDOW_LABEL: Record<TrendWindow, string> = {
@@ -48,10 +48,13 @@ interface UsageTrendChartProps {
   };
 }
 
-// X축/툴팁은 브라우저 로컬 TZ 가 아니라 앱 전역 리포팅 TZ(REPORTING_TIMEZONE)로
-// 그린다 — 버킷은 서버가 리포팅 TZ 기준으로 자르는데 라벨만 로컬 TZ 면 같은
-// 버킷이 다른 시각으로 읽힌다. timeZone 미지정 시 브라우저 TZ 로 fallback.
+// X축/툴팁 라벨. 서버 버킷은 epoch 를 bucket_sec 로 내림한 절대 시각 창
+// (1h/6h/24h/7d 모두 '지금부터 N 시간 전' — 달력 일/월 버킷이 아니다)이라
+// 리포팅 TZ 경계와 무관하다. 그래서 모니터링 표와 같은 브라우저 TZ 로 그리고
+// 호출부가 TZ 이름을 캡션으로 붙인다. timeZone 미지정 시 런타임 TZ.
 // 시 suffix 는 로케일로 — "14시" 는 ko 전용, en 은 "14:00" 이 자연스럽다.
+// 30/45분 오프셋 TZ(IST 등)에서는 UTC 정시 버킷이 '05:30' 에 떨어지므로 분이
+// 00 이 아니면 'HH:MM' 으로 그대로 보여 준다('05시' 로 반올림하지 않음).
 // locale 생략 시 ko 로 취급(기존 호출·테스트 시그니처 유지).
 export function fmtTick(
   t: number,
@@ -70,10 +73,12 @@ export function fmtTick(
   const get = (k: Intl.DateTimeFormatPartTypes) =>
     parts.find((p) => p.type === k)?.value ?? '';
   const hh = get('hour').padStart(2, '0');
+  const mm = get('minute');
   if (bucketSec >= 3600) {
-    return `${get('month')}/${get('day')} ${locale === 'ko' ? `${hh}시` : `${hh}:00`}`;
+    const clock = locale === 'ko' && mm === '00' ? `${hh}시` : `${hh}:${mm}`;
+    return `${get('month')}/${get('day')} ${clock}`;
   }
-  return `${hh}:${get('minute')}`;
+  return `${hh}:${mm}`;
 }
 
 function fmtValue(v: number, metric: Metric): string {
@@ -84,7 +89,9 @@ function fmtValue(v: number, metric: Metric): string {
 
 export function UsageTrendChart({ scope, scopeId, limits }: UsageTrendChartProps) {
   const t = useTranslations('rateLimits');
-  const reportingTz = useReportingTz();
+  // 브라우저 TZ — 마운트 전 null. 차트는 fetch(마운트 후) 뒤에만 그려지므로
+  // 실제 라벨은 항상 브라우저 TZ 로 나온다.
+  const displayTz = useDisplayTz() ?? undefined;
   const locale = useLocale();
   const [window, setWindow] = useState<TrendWindow>('24h');
   const [metric, setMetric] = useState<Metric>('rpm');
@@ -149,8 +156,8 @@ export function UsageTrendChart({ scope, scopeId, limits }: UsageTrendChartProps
           ))}
         </div>
       </div>
-      {/* 시간 축 버킷은 리포팅 TZ(배포 리전) 기준. */}
-      <ReportingTzCaption kind="hours" />
+      {/* 절대 시각 창 — 축은 보는 사람의 브라우저 TZ(모니터링 표와 같은 시계). */}
+      <BrowserTzCaption />
       <div className="mt-1 flex items-center gap-1">
         {(['rpm', 'tpm', 'cph'] as Metric[]).map((m) => (
           <button
@@ -184,7 +191,7 @@ export function UsageTrendChart({ scope, scopeId, limits }: UsageTrendChartProps
               <CartesianGrid strokeDasharray="3 3" className="stroke-border" vertical={false} />
               <XAxis
                 dataKey="t"
-                tickFormatter={(v) => fmtTick(v, trend.bucket_sec, reportingTz, locale)}
+                tickFormatter={(v) => fmtTick(v, trend.bucket_sec, displayTz, locale)}
                 tick={{ fontSize: 10 }}
                 tickLine={false}
                 axisLine={false}
@@ -200,7 +207,7 @@ export function UsageTrendChart({ scope, scopeId, limits }: UsageTrendChartProps
               <Tooltip
                 // 진행 중 버킷(마지막 점)은 아직 다 차지 않았다 — 툴팁 라벨에 표시.
                 labelFormatter={(v, items) =>
-                  fmtTick(Number(v), trend.bucket_sec, reportingTz, locale) +
+                  fmtTick(Number(v), trend.bucket_sec, displayTz, locale) +
                   (items?.[0]?.payload?.partial ? ` ${t('trendPartial')}` : '')
                 }
                 formatter={(v) => [fmtValue(Number(v), metric), metric.toUpperCase()]}

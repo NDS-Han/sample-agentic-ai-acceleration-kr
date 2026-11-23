@@ -12,8 +12,9 @@ import { describe, expect, it } from 'vitest';
 
 import messages from '../../../messages/en.json';
 import { ReportingTimezoneProvider } from '@/components/common/ReportingTimezoneProvider';
-import { ReportingTzCaption } from '@/components/common/ReportingTzCaption';
+import { BrowserTzCaption, ReportingTzCaption } from '@/components/common/ReportingTzCaption';
 import { usePointInTime } from '@/components/common/usePointInTime';
+import { tzAbbr } from '@/lib/utils/timezone';
 
 function wrap(node: React.ReactNode, tz = 'Asia/Kolkata') {
   return (
@@ -63,5 +64,18 @@ describe('usePointInTime', () => {
     const html = renderToString(wrap(<Stamp iso="2026-11-06T03:43:00Z" />));
     expect(html).toContain('<b data-testid="h">Time</b>');
     expect(html).toMatch(/<i data-testid="v"><\/i>/);
+  });
+});
+
+describe('BrowserTzCaption', () => {
+  it('리포팅 TZ 가 아니라 브라우저 TZ 이름을 적는다', () => {
+    render(wrap(<BrowserTzCaption />, 'Asia/Kolkata'));
+    const browserTz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    expect(screen.getByText(`Times in ${tzAbbr(browserTz)} (your browser)`)).toBeTruthy();
+  });
+
+  it('서버 렌더에는 TZ 이름이 없다', () => {
+    const html = renderToString(wrap(<BrowserTzCaption />));
+    expect(html).not.toContain('Times in');
   });
 });

@@ -4,8 +4,8 @@
 
 import { useTranslations } from 'next-intl';
 
-import { useIsClient, useReportingTz } from '@/components/common/ReportingTimezoneProvider';
-import { tzZoneText } from '@/lib/utils/timezone';
+import { useDisplayTz, useIsClient, useReportingTz } from '@/components/common/ReportingTimezoneProvider';
+import { tzAbbr, tzZoneText } from '@/lib/utils/timezone';
 
 /**
  * 리포팅 TZ(REPORTING_TIMEZONE, 배포 리전) 기준으로 나뉜 차트·표의 캡션 —
@@ -32,6 +32,25 @@ export function ReportingTzCaption({
       aria-hidden={!isClient || undefined}
     >
       {isClient ? t(kind, { zone: tzZoneText(tz) }) : ' '}
+    </p>
+  );
+}
+
+/**
+ * 브라우저 TZ 로 그린 시간 축(절대 시각 창 차트)의 캡션 — 'Times in GMT+9 (your
+ * browser)'. 표는 열 제목에 TZ 를 붙이지만 차트 축에는 제목이 없어 캡션으로 적는다.
+ * 마운트 전에는 TZ 를 모르므로 빈 줄.
+ */
+export function BrowserTzCaption({ className = '' }: { className?: string }) {
+  const t = useTranslations('common');
+  const tz = useDisplayTz();
+  return (
+    <p
+      className={`text-[11px] text-muted-foreground ${className}`}
+      title={tz ? t('viewerTzHint', { tz }) : undefined}
+      aria-hidden={!tz || undefined}
+    >
+      {tz ? t('browserTzCaption', { zone: tzAbbr(tz) }) : '\u00a0'}
     </p>
   );
 }
