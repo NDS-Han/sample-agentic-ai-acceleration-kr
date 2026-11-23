@@ -45,15 +45,21 @@ FONT = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue',
 # ── 그래프 ─────────────────────────────────────────────────────────────────
 # 패널 비율이 넓어(폼 칼럼을 뺀 나머지 전부) 가로로 긴 좌표계를 쓴다 — slice 로
 # 채우므로 넓은 화면에선 위아래가, 좁은 화면에선 좌우가 잘린다.
-GRAPH_W, GRAPH_H = 1000, 800
-HUB = (690, 400)            # 게이트웨이 — 문구(왼쪽 가운데)와 겹치지 않게 오른쪽
+# 그래프는 페이지 전체 너비의 좌표계(xMinYMid slice)로 그리고 패널 모양으로
+# 잘라낸다(clipPath) — 중첩 svg 의 CSS width(calc)는 Chrome 이 무시해 패널과
+# 그래프 폭이 어긋났다(넓은 화면: 패널 오른쪽이 빔, 중간 폭: 흰 영역으로 삐져나옴).
+GRAPH_W, GRAPH_H = 1600, 800
+# 게이트웨이 — 문구(왼쪽 가운데) 아래·오른쪽. 높이가 배율을 정하는 중간 폭
+# (1024~1280px)에서도 패널 안쪽에 남도록 왼쪽으로 당겨 둔다.
+HUB = (540, 560)
 SEED = 7                    # 고정 시드 — 재생성해도 같은 그림(커밋 diff 안정)
-N_NODES = 64                # 배경 성좌 노드 수
+N_NODES = 110               # 배경 성좌 노드 수
 MIN_GAP = 62                # 노드 간 최소 거리
 N_CLIENTS = 12              # 허브로 들어오는 엣지(트래픽 점이 흐름)
 N_MODELS = 6                # 허브에서 나가는 엣지
 # 문구가 놓이는 영역(그래프 좌표 근사) — 노드를 두지 않아 글자가 묻히지 않게
-COPY_ZONE = (0, 300, 470, 500)
+COPY_ZONE = (0, 280, 480, 520)
+MODEL_X_MAX = HUB[0] + 280  # 모델 노드는 중간 폭 화면에서도 보이는 범위
 
 
 def _layout():
@@ -81,7 +87,8 @@ def _layout():
             mesh.add((min(i, j), max(i, j)))
     left = sorted((i for i, p in enumerate(pts) if p[0] < HUB[0] - 120),
                   key=lambda i: math.dist(pts[i], HUB))
-    right = sorted((i for i, p in enumerate(pts) if p[0] > HUB[0] + 80),
+    right = sorted((i for i, p in enumerate(pts)
+                    if HUB[0] + 60 < p[0] < MODEL_X_MAX),
                    key=lambda i: math.dist(pts[i], HUB))
     # 허브에 가까운 왼쪽 노드들 — 트래픽 점이 엇갈리도록 각도 순 정렬
     clients = sorted(left[:N_CLIENTS],
@@ -155,8 +162,9 @@ NARROW_PX = 1024
 
 LAYOUT_STYLE = (
     f".panel{{width:calc(100% - {FORM_COLUMN_PX}px)}}"
+    ".copy-narrow{display:none}"
     f"@media (max-width:{NARROW_PX - 1}px){{.panel{{width:100%}}"
-    ".copy{display:none}}"
+    ".copy{display:none}.copy-narrow{display:inline}}"
 )
 MOTION_STYLE = (
     ".ring{transform-box:fill-box;transform-origin:center;"
@@ -179,13 +187,16 @@ def build() -> str:
         '<svg xmlns="http://www.w3.org/2000/svg" width="100%" height="100%">'
         f'<style>{style}</style>'
         '<rect width="100%" height="100%" fill="#ffffff"/>'
+        '<defs><clipPath id="panel-clip">'
+        '<rect class="panel" width="50%" height="100%"/></clipPath></defs>'
         f'<rect class="panel" width="50%" height="100%" fill="{PANEL}"/>'
-        # 그래프 — 패널을 꽉 채우고 넘치는 부분은 잘라낸다
-        '<svg class="panel" x="0" y="0" width="50%" height="100%" '
+        # 그래프 — 페이지 전체 좌표계로 그리고 패널(clipPath) 밖은 잘라낸다
+        '<g clip-path="url(#panel-clip)">'
+        '<svg x="0" y="0" width="100%" height="100%" '
         f'viewBox="0 0 {GRAPH_W} {GRAPH_H}" '
-        f'preserveAspectRatio="xMidYMid slice">{g}</svg>'
+        f'preserveAspectRatio="xMinYMid slice">{g}</svg></g>'
         # 문구 — 잘리지 않게 왼쪽 가운데 앵커
-        '<svg class="panel copy" x="0" y="0" width="50%" height="100%" viewBox="0 0 640 800" '
+        '<svg class="copy" x="0" y="0" width="50%" height="100%" viewBox="0 0 640 800" '
         'preserveAspectRatio="xMinYMid meet">'
         f'<text x="56" y="372" fill="#ffffff" font-family="{FONT}" '
         f'font-size="40" font-weight="700" letter-spacing="-0.8">{HEADING[0]}</text>'
@@ -194,10 +205,19 @@ def build() -> str:
         f'<text x="56" y="462" fill="#b4b4b4" font-family="{FONT}" '
         f'font-size="16">{SUBTITLE}</text></svg>'
         # 하단 문구 — 왼쪽 아래 앵커
-        '<svg class="panel copy" x="0" y="0" width="50%" height="100%" viewBox="0 0 640 800" '
+        '<svg class="copy" x="0" y="0" width="50%" height="100%" viewBox="0 0 640 800" '
         'preserveAspectRatio="xMinYMax meet">'
         f'<text x="56" y="752" fill="#a1a1a1" font-family="{FONT}" '
         f'font-size="12">{FOOTER}</text></svg>'
+        # 좁은 화면 — 가운데 문구는 폼 카드에 가려지므로 숨기고, 폼 위쪽 여백
+        # (Cognito main-layout 위 162px)에 한 줄로 둔다. 데스크톱 창을 줄인
+        # 경우 기준(휴대폰 가로 모드 같은 낮은 높이는 고려하지 않음).
+        '<g class="copy-narrow">'
+        f'<text x="40" y="72" fill="#ffffff" font-family="{FONT}" '
+        f'font-size="24" font-weight="700" letter-spacing="-0.4">'
+        f'{HEADING[0]} {HEADING[1]}</text>'
+        f'<text x="40" y="100" fill="#b4b4b4" font-family="{FONT}" '
+        f'font-size="14">{SUBTITLE}</text></g>'
         '</svg>\n'
     )
 
