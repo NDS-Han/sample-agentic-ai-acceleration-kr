@@ -33,6 +33,7 @@ import {
 import { ModelShareDonutClient } from '@/components/dashboard/ModelShareDonutClient';
 import { ClientShareDonutClient } from '@/components/dashboard/ClientShareDonutClient';
 import { CostTrendCard } from '@/components/dashboard/CostTrendCard';
+import { monthRange } from '@/lib/utils/trendSeries';
 import { TopSpendTable, type TopSpendRow } from '@/components/dashboard/TopSpendTable';
 import { PeriodSelector } from '@/components/dashboard/PeriodSelector';
 import { ClientFilter } from '@/components/dashboard/ClientFilter';
@@ -248,7 +249,11 @@ async function TrendAndDistribution({ period, client }: { period: string; client
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-[1.6fr_1fr]">
         {/* 섹션별 실패를 조용한 빈 차트 대신 재시도 가능한 에러 상태로 표시 */}
         {analyticsResult.status === 'fulfilled' ? (
-          <CostTrendCard trends={analytics.trends ?? []} trendsByTeam={analytics.trends_by_team ?? []} />
+          <CostTrendCard
+            trends={analytics.trends ?? []}
+            trendsByTeam={analytics.trends_by_team ?? []}
+            range={monthRange(period)}
+          />
         ) : (
           <ErrorState />
         )}

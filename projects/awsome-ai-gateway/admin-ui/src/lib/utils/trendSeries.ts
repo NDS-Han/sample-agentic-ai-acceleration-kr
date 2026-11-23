@@ -9,11 +9,13 @@
  *
  * 규칙:
  *  - 날짜 축 = 합계 + 모든 팀 포인트의 날짜 합집합(오름차순)에 첫날~마지막날
- *    사이 빠진 날짜(YYYY-MM-DD)를 채운 연속 축. 빠진 날을 축에서 빼면
- *    11-06 → 11-09 처럼 건너뛴 구간이 한 칸 기울기로 이어져 실측처럼 보였다.
- *    어느 시리즈든 그 날짜에 포인트가 없으면 null — 0 으로 접으면 "그날 비용 0"
- *    이라는 거짓 사실이 되므로 차트에서 끊어 그린다(recharts 는 connectNulls
- *    미설정 = gap).
+ *    사이 빠진 날짜(YYYY-MM-DD)를 채운 연속 축. opts.range(조회 기간)가 있으면
+ *    기간 첫날~말일까지 축을 넓힌다 — 마지막 사용일에서 선이 끊겨 "그 뒤는
+ *    모름"처럼 보이지 않게.
+ *  - 포인트가 없는 날 = 사용 기록이 없는 날 = 실제 비용 $0 → 0. 단 opts.today
+ *    이후(아직 오지 않은 날)는 null 로 비워 둔다(recharts connectNulls 미설정 = gap).
+ *    예전엔 빈 날을 모두 null 로 끊어, 11-05→11-06 에서 올라간 선이 내려오지
+ *    않고 끊긴 채 끝나 마지막 값이 계속되는 것처럼 읽혔다.
  *  - selectedIds 에 든 팀만 개별 시리즈. 나머지 팀은 날짜별 합산 'other'
  *    시리즈 하나로 접는다 — 꺼둔 팀의 비용이 화면에서 사라지지 않는다.
  *  - 합계 시리즈는 trends 값 그대로 — 팀 시리즈 합산으로 재계산하지 않는다.
@@ -126,6 +128,27 @@ export function fillDateGaps(sorted: string[]): string[] {
   );
 }
 
+/** 조회 기간(포함 구간, YYYY-MM-DD). */
+export interface TrendRange {
+  start: string;
+  end: string;
+}
+
+export interface TrendSeriesOptions {
+  /** 조회 기간 — 주면 축을 기간 전체로 넓힌다. */
+  range?: TrendRange;
+  /** 리포팅 TZ 기준 오늘(YYYY-MM-DD) — 이후 날짜는 0 이 아니라 null. */
+  today?: string;
+}
+
+/** 'YYYY-MM' → 그 달 1일~말일. 형식이 아니면 undefined. */
+export function monthRange(period: string | undefined): TrendRange | undefined {
+  if (!period || !/^\d{4}-\d{2}$/.test(period)) return undefined;
+  const [y, m] = period.split('-').map(Number);
+  const last = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  return { start: `${period}-01`, end: `${period}-${String(last).padStart(2, '0')}` };
+}
+
 /** 기본 선택 = 비용 상위 TOP_TEAM_COUNT 개 팀 id. */
 export function defaultSelectedTeamIds(trendsByTeam: TeamTrendSeries[]): Set<string> {
   return new Set(rankTeams(trendsByTeam).slice(0, TOP_TEAM_COUNT).map((t) => t.teamId));
@@ -140,6 +163,7 @@ export function buildTrendSeries(
    * Chart.js canvas 는 CSS 변수를 못 읽으므로 실색 배열을 넘겨야 한다.
    */
   colors: readonly string[] = TEAM_COLORS,
+  opts: TrendSeriesOptions = {},
 ): TrendSeriesSet {
   const ranked = rankTeams(trendsByTeam);
   const selected = selectedIds ?? new Set(ranked.slice(0, TOP_TEAM_COUNT).map((t) => t.teamId));
@@ -147,7 +171,15 @@ export function buildTrendSeries(
   const totalByDate = new Map(trends.map((p) => [p.date, Number(p.cost_usd)]));
   const dateSet = new Set<string>(totalByDate.keys());
   for (const s of ranked) for (const d of s.byDate.keys()) dateSet.add(d);
+  // 데이터가 하나도 없으면 축을 만들지 않는다 — 렌더는 빈 상태로 간다.
+  const { range, today } = opts;
+  if (dateSet.size > 0 && range && ISO_DAY.test(range.start) && ISO_DAY.test(range.end)) {
+    dateSet.add(range.start);
+    dateSet.add(range.end);
+  }
   const dates = fillDateGaps([...dateSet].sort());
+  // 포인트 없는 날: 오늘까지는 $0, 오늘 이후는 null(미래). ISO 문자열 비교 = 날짜 비교.
+  const missing = (d: string): number | null => (today && d > today ? null : 0);
 
   const on = ranked.filter((t) => selected.has(t.teamId));
   const off = ranked.filter((t) => !selected.has(t.teamId));
@@ -164,17 +196,17 @@ export function buildTrendSeries(
 
   return {
     dates,
-    total: dates.map((d) => totalByDate.get(d) ?? null),
+    total: dates.map((d) => totalByDate.get(d) ?? missing(d)),
     series: on.map((t) => ({
       ...metaById.get(t.teamId)!,
-      values: dates.map((d) => t.byDate.get(d) ?? null),
+      values: dates.map((d) => t.byDate.get(d) ?? missing(d)),
     })),
     allTeams,
     other:
       off.length > 0
         ? dates.map((d) => {
-            // 꺼진 팀 전원이 그 날짜에 포인트가 없으면 0 이 아니라 null —
-            // '기타' 선도 실측이 없는 날에 가짜 0 을 긋지 않는다.
+            // 꺼진 팀 전원이 그 날짜에 포인트가 없으면 다른 시리즈와 같은 규칙
+            // (오늘까지 0, 이후 null).
             let sum = 0;
             let hit = false;
             for (const tt of off) {
@@ -184,7 +216,7 @@ export function buildTrendSeries(
                 hit = true;
               }
             }
-            return hit ? sum : null;
+            return hit ? sum : missing(d);
           })
         : null,
     hasTeamSeries: ranked.length > 0,

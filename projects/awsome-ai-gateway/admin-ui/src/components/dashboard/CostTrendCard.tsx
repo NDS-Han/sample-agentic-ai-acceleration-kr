@@ -29,16 +29,22 @@ import { fmtUsdExact, fmtUsdTick, niceTicks } from '@/lib/utils/format';
 import {
   buildTrendSeries,
   defaultSelectedTeamIds,
+  TEAM_COLORS,
   type TeamSeriesMeta,
   type TeamTrendSeries,
   type TrendPoint,
+  type TrendRange,
 } from '@/lib/utils/trendSeries';
+import { reportingNowParts } from '@/lib/utils/period';
+import { useReportingTz } from '@/components/common/ReportingTimezoneProvider';
 
 export { defaultSelectedTeamIds };
 
 interface CostTrendCardProps {
   trends: TrendPoint[];
   trendsByTeam?: TeamTrendSeries[];
+  /** 조회 기간 — 주면 축을 기간 전체로 넓히고 사용 없는 날을 $0 으로 잇는다. */
+  range?: TrendRange;
 }
 
 export interface TeamSeriesDef {
@@ -69,9 +75,10 @@ export function buildTrendChartData(
   trends: TrendPoint[],
   trendsByTeam: TeamTrendSeries[],
   selectedIds?: ReadonlySet<string>,
+  opts: { range?: TrendRange; today?: string } = {},
 ): TrendChartData {
   const { dates, total, series, allTeams, other, hasTeamSeries } =
-    buildTrendSeries(trends, trendsByTeam, selectedIds);
+    buildTrendSeries(trends, trendsByTeam, selectedIds, TEAM_COLORS, opts);
 
   const data = dates.map((d, i) => {
     const row: Record<string, number | string | null> = {
@@ -129,15 +136,21 @@ function LineSwatch({ color, dash, width = 2 }: { color: string; dash?: string; 
   );
 }
 
-export function CostTrendCard({ trends, trendsByTeam = [] }: CostTrendCardProps) {
+export function CostTrendCard({ trends, trendsByTeam = [], range }: CostTrendCardProps) {
   const t = useTranslations('dashboard');
+  const tz = useReportingTz();
+  // 리포팅 TZ 기준 오늘 — 이후 날짜는 그리지 않는다(버킷 날짜와 같은 기준).
+  const today = useMemo(() => {
+    const { y, m, d } = reportingNowParts(tz);
+    return `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+  }, [tz]);
   const topIds = useMemo(() => defaultSelectedTeamIds(trendsByTeam), [trendsByTeam]);
   // null = 기본 선택(상위 N). 사용자가 칩을 누르면 명시 선택이 된다.
   const [picked, setPicked] = useState<Set<string> | null>(null);
   const effective = picked ?? topIds;
   const { data, series, allTeams, showOther, hasTeamSeries } = useMemo(
-    () => buildTrendChartData(trends, trendsByTeam, effective),
-    [trends, trendsByTeam, effective],
+    () => buildTrendChartData(trends, trendsByTeam, effective, { range, today }),
+    [trends, trendsByTeam, effective, range, today],
   );
 
   // nice ticks — 기본 균등 분할은 $0.135, $0.09 같은 어중간한 눈금이 나온다.
@@ -252,8 +265,8 @@ export function CostTrendCard({ trends, trendsByTeam = [] }: CostTrendCardProps)
               labelStyle={{ color: 'hsl(var(--muted-foreground))' }}
               formatter={((value: number, name: string) => [fmtUsdExact(Number(value)), name]) as never}
             />
-            {/* type=linear + connectNulls 미설정: 실측이 없는 날은 곡선 보간도,
-                gap 잇기도 하지 않는다 — 사용량이 없는 날짜는 있는 그대로 비어 보인다. */}
+            {/* type=linear + connectNulls 미설정: 사용 없는 날은 $0 으로 이어 그리고,
+                오늘 이후(null)만 비운다. */}
             <Area
               yAxisId="cost"
               type="linear"
