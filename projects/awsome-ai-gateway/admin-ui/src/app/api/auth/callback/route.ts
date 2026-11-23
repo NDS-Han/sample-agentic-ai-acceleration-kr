@@ -107,8 +107,14 @@ function timingSafeEqual(a: string, b: string): boolean {
 }
 
 /** 임시 쿠키를 응답에서 지운다. 실패 경로에서도 반드시 호출한다(재사용 방지). */
+// 만료된 state 쿠키로 돌아온 콜백을 로그인부터 자동 재시작했다는 표식 — 1회만.
+// 재시작 뒤에도 state 쿠키가 없다면 만료가 아니라 쿠키가 저장되지 않는 환경
+// (Secure 쿠키를 HTTP 로, 서드파티 쿠키 차단 등)이므로 무한 루프 대신 오류를 보인다.
+const RESTART_COOKIE = 'oidc_restart';
+const RESTART_COOKIE_MAX_AGE = 60;
+
 function clearTempCookies(res: NextResponse, secure: boolean): void {
-  for (const name of ['oidc_state', 'oidc_verifier', 'oidc_nonce']) {
+  for (const name of ['oidc_state', 'oidc_verifier', 'oidc_nonce', RESTART_COOKIE]) {
     res.cookies.set(name, '', {
       httpOnly: true,
       sameSite: 'lax',
@@ -224,6 +230,24 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   // ── state 검사(보안 핵심) ──
   const state = params.get('state');
   const stateCookie = request.cookies.get('oidc_state')?.value;
+
+  // state 쿠키가 아예 없음 = 로그인 화면을 10분 넘게 띄워 둔 뒤 로그인한 경우가
+  // 대부분이다. 받은 code 는 쓰지 않고(검증할 state 가 없으므로 교환 금지) 로그인을
+  // 새 state 로 처음부터 다시 시작한다 — IdP 세션이 살아 있으면 사용자는 재입력 없이
+  // 바로 돌아온다. 쿠키는 있는데 값이 다른 경우(위조 가능성)는 아래에서 그대로 거절.
+  if (state && !stateCookie && request.cookies.get(RESTART_COOKIE)?.value !== '1') {
+    const res = redirectRelative('/api/auth/login', { status: 303 });
+    clearTempCookies(res, secure);
+    res.cookies.set(RESTART_COOKIE, '1', {
+      httpOnly: true,
+      sameSite: 'lax',
+      path: '/',
+      maxAge: RESTART_COOKIE_MAX_AGE,
+      secure,
+    });
+    res.headers.set('Cache-Control', 'no-store');
+    return res;
+  }
   if (!state || !stateCookie || !timingSafeEqual(state, stateCookie)) {
     return failure(
       400,

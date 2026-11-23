@@ -437,16 +437,36 @@ describe('GET /api/auth/callback — state 검사(보안 핵심)', () => {
     expect((await res.text()).length).toBeGreaterThan(0);
   });
 
-  it('state 쿠키가 없음(만료) → 거절, admin_jwt 없음', async () => {
+  it('state 쿠키가 없음(만료) → code 는 버리고 로그인을 1회 자동 재시작한다', async () => {
     configureOidc();
-    stubTokenEndpoint({ id_token: jwtWithExp(null) });
+    const calls = stubTokenEndpoint({ id_token: jwtWithExp(null) });
     const res = await callbackGET(
       req('http://admin.test/api/auth/callback?code=abc&state=S', {
         cookies: { oidc_verifier: 'v'.repeat(43) },
       }),
     );
+    expect(res.status).toBe(303);
+    expect(res.headers.get('location')).toBe('/api/auth/login');
+    const jar = setCookies(res);
+    expect(jar['admin_jwt']).toBeUndefined();
+    // 검증할 state 가 없으니 토큰 교환은 하지 않는다.
+    expect(calls.length).toBe(0);
+    expect(cookieValue(jar['oidc_restart'])).toBe('1');
+    expect(jar['oidc_restart']).toMatch(/HttpOnly/i);
+  });
+
+  it('재시작 후에도 state 쿠키가 없음(쿠키 저장 불가) → 루프 대신 거절하고 표식을 지운다', async () => {
+    configureOidc();
+    stubTokenEndpoint({ id_token: jwtWithExp(null) });
+    const res = await callbackGET(
+      req('http://admin.test/api/auth/callback?code=abc&state=S', {
+        cookies: { oidc_verifier: 'v'.repeat(43), oidc_restart: '1' },
+      }),
+    );
     expect(res.status).toBe(400);
-    expect(setCookies(res)['admin_jwt']).toBeUndefined();
+    const jar = setCookies(res);
+    expect(jar['admin_jwt']).toBeUndefined();
+    expect(jar['oidc_restart']).toMatch(/Max-Age=0|Expires=Thu, 01 Jan 1970/);
   });
 
   it('state 쿼리 파라미터가 아예 없음 → 거절, admin_jwt 없음', async () => {
