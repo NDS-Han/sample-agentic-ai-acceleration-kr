@@ -1340,6 +1340,41 @@ def _tf_init(cfg: GatewayConfig, env_dir: Path) -> subprocess.CompletedProcess:
     return _run_quiet(argv, cwd=env_dir, timeout=300)
 
 
+def _warn_stale_backend(cfg: GatewayConfig, env_dir: Path) -> None:
+    """init 실패 후엔 tf_outputs 가 .terraform 캐시 backend 로 state 를 읽는다.
+
+    캐시 backend 가 선언(deploy.tfstate_* 또는 기본 추론)과 다르면 outputs 는
+    **다른 env 의 state** 값이다 — DB/Redis 엔드포인트·IRSA ARN 이 stale 한 채
+    --set 으로 흘러간다. init 실패 경고만으로는 이 위험이 구분되지 않으므로
+    캐시와 선언을 대조해 불일치일 때만 경고한다. 보조 검사용 — 자체 실패는
+    본 흐름을 막지 않는다."""
+    try:
+        from .capture import _tf_backend
+        from .bootstrap import default_tfstate_names
+
+        cached = _tf_backend(env_dir)
+        if not cached:
+            return
+        decl_b, decl_t = default_tfstate_names(cfg, eks=True)
+        bad = [(n, c, d) for n, c, d in
+               (("bucket", str(cached.get("bucket", "")), decl_b),
+                ("dynamodb_table", str(cached.get("dynamodb_table", "")),
+                 decl_t))
+               if c and c != d]
+        if bad:
+            detail = ", ".join(f"{n}: 선언 {d!r} ≠ 캐시 {c!r}"
+                               for n, c, d in bad)
+            print(f"⚠ 선언된 tfstate 와 .terraform 캐시 backend 가 다릅니다 "
+                  f"({detail}) —\n"
+                  "  이어지는 terraform output 은 **캐시 backend** 의 state "
+                  "입니다. 다른 env 의 값이 --set 으로 들어갈 수 있으니 "
+                  "deploy.tfstate_bucket/tfstate_table 을 실제 state 로 "
+                  "맞추고 terraform init 이 성공한 뒤 다시 실행하세요",
+                  file=sys.stderr)
+    except Exception:
+        pass
+
+
 def _managed_infra_plan(cfg: GatewayConfig, gen_dir: Path,
                         env_dir: Path, context: str = "") -> subprocess.CompletedProcess | None:
     """managed overlay 소유 모듈로 좁힌 terraform plan — rc 0=수렴, 2=drift.
@@ -2050,6 +2085,7 @@ def plan(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "") 
             print(f"⚠ terraform init 실패 — {(ini.stderr or '').strip()[:200]}\n"
                   "  새 머신이라면 deploy.tfstate_bucket/tfstate_table 선언을 "
                   "확인하세요", file=sys.stderr)
+            _warn_stale_backend(cfg, env_dir)
     outs = tf_outputs(env_dir) if env_dir else {}
     # soft 경고로 두면 이어지는 update-kubeconfig --alias 가 확인 전에 기존
     # context 를 backend 클러스터로 덮어쓴다 — preview(--plan)만 띄워도
@@ -2196,6 +2232,7 @@ def apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "")
             print(f"⚠ terraform init 실패 — {(ini.stderr or '').strip()[:200]}\n"
                   "  새 머신이라면 deploy.tfstate_bucket/tfstate_table 선언을 "
                   "확인하세요", file=sys.stderr)
+            _warn_stale_backend(cfg, env_dir)
     outs = tf_outputs(env_dir) if env_dir else {}
     # ensure_infra 의 managed apply 가 enable_chat_agent=false 로 output 을
     # 재저장하면 아래 off-teardown 신호(chat_agent_name 실측)가 지워져 유료

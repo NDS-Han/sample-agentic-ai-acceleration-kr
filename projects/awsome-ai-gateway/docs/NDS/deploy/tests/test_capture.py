@@ -1558,3 +1558,39 @@ def test_branding_helper_ignores_default_and_blank():
     assert capture._branding("  ") is None
     assert capture._branding(schema.DEFAULT_BRAND_NAME) is None
     assert capture._branding(" X ") == {"name": "X"}
+
+
+def test_captured_yaml_key_comments(tmp_path):
+    """_annotate_capture_yaml — 키별 사고예방 주석을 경로 매칭으로 심고,
+    값 의존 주석(0.0.0.0/0 경고)은 조건을 만족할 때만 단다.
+    출력은 주석 포함 그대로 yaml.safe_load 된다."""
+    import yaml as _yaml
+    from deploy import cli
+    doc = {
+        "version": 1, "env": "dev",
+        "aws": {"region": "ap-south-1", "account_id": "1234"},
+        "deploy": {"target": "eks", "size_tier": "t3",
+                   "tfstate_bucket": "b", "tfstate_table": "t",
+                   "capacity_tier": "500"},
+        "network": {"mode": "public",
+                    "allowed_cidrs": ["10.0.0.0/8", "0.0.0.0/0"]},
+        "domain": {"mode": "route53-acm", "name": "x.example",
+                   "hosts": {"gateway": "g.x"}},
+        "images": {"tag": "v1", "tags": {"adminApi": "x"}},
+    }
+    body = cli._annotate_capture_yaml(_yaml.safe_dump(doc, sort_keys=False),
+                                      doc)
+    lines = body.splitlines()
+    # 경로 매칭 — 같은 키명이 다른 섹션에 있어도 오매칭 없음
+    ts = lines.index("  tfstate_bucket: b")
+    assert any("init 404" in lines[i] for i in (ts - 2, ts - 1))
+    hosts = lines.index("  hosts:")
+    assert "파생 규칙" in lines[hosts - 1] or "파생 규칙" in lines[hosts - 2]
+    # 조건부 — 0.0.0.0/0 있을 때만 경고
+    assert any("인터넷 전체 오픈" in l for l in lines)
+    doc2 = {"version": 1, "network": {"allowed_cidrs": ["10.0.0.0/8"]}}
+    body2 = cli._annotate_capture_yaml(_yaml.safe_dump(doc2), doc2)
+    assert "인터넷 전체 오픈" not in body2
+    # 주석이 yaml 을 깨지 않음 — 주석 스트립 후 원본과 동일
+    stripped = "\n".join(l for l in lines if not l.strip().startswith("#"))
+    assert _yaml.safe_load(stripped) == doc

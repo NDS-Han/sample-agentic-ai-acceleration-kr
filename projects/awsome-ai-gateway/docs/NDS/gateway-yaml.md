@@ -262,9 +262,18 @@ deploy:
 
 ### `deploy.tfstate_bucket` / `deploy.tfstate_table`
 
-ecs/eks 경로의 terraform state 위치. 비우면 `llm-gateway-tfstate-<account_id>`
-규칙으로 추론하고, account_id 도 없으면 placeholder 가 생성됩니다
-(그 경우 apply 전에 채워야 합니다).
+ecs/eks 경로의 terraform state 위치. 기본 추론은 경로마다 다릅니다 —
+ecs 는 `llm-gateway-tfstate-<account_id>`, eks 는 bootstrap 관례를 따라
+`llm-gateway-vanilla-tfstate-<account_id>` / `llm-gateway-vanilla-tflock`
+입니다. account_id 도 없으면 placeholder 가 생성됩니다(그 경우 apply
+전에 채워야 합니다).
+
+⚠️ 기본 추론이 맞는 건 **bootstrap-tfstate.sh 로 만든 신규 state**뿐입니다.
+기존 배포(다른 명명으로 bootstrap 된 state 포함)를 이 도구로 운영할 때는
+실제 bucket/table 을 반드시 명시하세요 — 미선언 시 init 이 엉뚱한 버킷을
+찾아 404 가 나고, `.terraform` 캐시가 살아 있는 머신에선 조용히 다른
+state 를 읽어 stale 한 --set 값이 들어갈 수 있습니다. 캡처된 yaml
+(`doctor --capture`)은 `.terraform` backend 를 읽어 이 키를 역생성합니다.
 
 ### `network`
 

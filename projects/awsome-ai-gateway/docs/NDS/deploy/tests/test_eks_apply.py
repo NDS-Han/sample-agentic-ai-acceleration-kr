@@ -1854,3 +1854,30 @@ def test_env_dir_guard_name_match_requires_environments_root(tmp_path,
                             "images": {"tag": "v1"}})
     eks_apply._check_env_dir_declared(cfg, outside, hard=False)
     assert "판독할 수 없" in capsys.readouterr().err
+
+
+def test_warn_stale_backend_flags_cache_mismatch(tmp_path, capsys):
+    """선언 backend ≠ .terraform 캐시 backend — init 실패 후 tf_outputs 가
+    다른 env 의 state 를 읽을 수 있다는 경고가 나간다. 캐시 없으면 침묵."""
+    import json
+    from deploy import schema
+    base = {"version": 1, "env": "dev",
+            "aws": {"region": "ap-south-1", "account_id": "123456789012"},
+            "deploy": {"target": "eks", "size_tier": "t3",
+                       "tfstate_bucket": "real-bucket",
+                       "tfstate_table": "real-table"},
+            "features": {"notifications": {"provider": "mock"}},
+            "images": {"tag": "v1"}}
+    cfg = schema.from_dict(base)
+    env_dir = tmp_path / "env"
+    (env_dir / ".terraform").mkdir(parents=True)
+
+    eks_apply._warn_stale_backend(cfg, env_dir)
+    assert capsys.readouterr().err == ""       # 캐시 없음 → 침묵
+
+    (env_dir / ".terraform" / "terraform.tfstate").write_text(json.dumps(
+        {"backend": {"type": "s3", "config": {
+            "bucket": "stale-bucket", "dynamodb_table": "stale-table"}}}))
+    eks_apply._warn_stale_backend(cfg, env_dir)
+    err = capsys.readouterr().err
+    assert "캐시 backend" in err and "stale-bucket" in err

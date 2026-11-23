@@ -1851,8 +1851,52 @@ def _detect_gen_dir(args) -> tuple[Path, str]:
         "\n  이 도구로 만들지 않은 배포는 --gen-dir <compose 파일이 있는 디렉토리>")
 
 
+# 캡처 yaml 의 키별 주석 — "왜 이 값이 명시됐는지/어긋나면 뭐가 깨지는지"만 단다.
+# 일반 스키마 설명은 gateway-yaml.md 역할이라 넣지 않는다.
+_CAPTURE_COMMENTS: dict[str, str] = {
+    "deploy.release": "캡처된 실제 릴리스 — 기본값과 다른 배포도 이 대상을 가리킨다",
+    "deploy.namespace": "캡처된 실제 네임스페이스",
+    "deploy.tf_env_dir": "terraform env 디렉토리(repo 상대경로) — outputs·managed overlay 의 정보원",
+    "deploy.tfstate_bucket": "캡처된 실제 state backend — eks 기본 추론(llm-gateway-vanilla-*)과\n다르면 이 명시가 없으면 init 404 로 실패한다",
+    "deploy.capacity_tier": "eks 용량 밴드 — Claude Code형 인터랙티브 프로파일(동시 스트림 ≈ N×0.075)\n프리셋: \"500\" | \"1000\" | \"3000\" | \"6000\" | \"6000+\"",
+    "deploy.sizing": "capacity_tier 프리셋의 개별 오버라이드 — 명시 키만 적용된다",
+    "aws.account_id": "allowedAwsAccounts 첫 계정 — STS VK 발급 허용 계정 경계",
+    "domain.hosts": "캡처된 실제 호스트 — 파생 규칙(gateway./admin./admin-api.{name})과 다르면\n이 값이 우선한다. 비우면 파생명으로 바뀌어 발급된 클라이언트 URL 이 깨진다",
+    "images.tags": "서비스별 핀 — images.tag 와 다른 서비스만 기록. 나머지는 images.tag 를 따른다",
+    "branding.name": "admin-ui 사이드바·탭 제목 (ADMIN_BRAND_NAME)",
+}
+
+
+def _annotate_capture_yaml(body: str, doc: dict) -> str:
+    """safe_dump 결과에 _CAPTURE_COMMENTS 를 키별로 주입한다.
+
+    들여쓰기(2칸/단계)로 경로 스택을 추적해 `deploy.tfstate_bucket` 같은
+    dotted path 로 매칭 — 같은 키명이 다른 섹션에 있어도 오매칭이 없다.
+    allowed_cidrs 의 0.0.0.0/0 경고처럼 값에 따라 다는 주석만 doc 을 본다."""
+    comments = dict(_CAPTURE_COMMENTS)
+    cidrs = _gd(doc, "network").get("allowed_cidrs") or []
+    if any(str(c) in ("0.0.0.0/0", "::/0") for c in cidrs):
+        comments["network.allowed_cidrs"] = (
+            "⚠ 0.0.0.0/0 · ::/0 포함 — 사실상 인터넷 전체 오픈. "
+            "실사용 전 실제 IP 대역으로 좁히세요")
+    out: list[str] = []
+    stack: list[str] = []
+    for line in body.splitlines():
+        m = re.match(r"^(\s*)([A-Za-z_][\w-]*):", line)
+        if m:
+            depth = len(m.group(1)) // 2
+            stack = stack[:depth] + [m.group(2)]
+            text = comments.get(".".join(stack))
+            if text:
+                pad = m.group(1)
+                out += [f"{pad}# {cl}" for cl in text.splitlines()]
+        out.append(line)
+    return "\n".join(out) + "\n"
+
+
 def _captured_to_yaml(path: Path, doc: dict, notes: list[str]) -> None:
     body = yaml.safe_dump(doc, sort_keys=False, allow_unicode=True)
+    body = _annotate_capture_yaml(body, doc)
     if notes:
         body += "\n# --- capture notes ---\n" + "".join(f"# {n}\n" for n in notes)
     path.parent.mkdir(parents=True, exist_ok=True)
