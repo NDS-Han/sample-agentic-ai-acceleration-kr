@@ -5,7 +5,7 @@
 import { memo, useMemo, useState } from 'react';
 import { useTranslations } from 'next-intl';
 import { Cell, Pie, PieChart } from 'recharts';
-import { fmtUsd } from '@/lib/utils/format';
+import { fmtSharePct, fmtUsd, roundSharesTo100 } from '@/lib/utils/format';
 import type { ClientShareResponse } from '@/lib/actions/dashboard';
 import { CATEGORICAL_PALETTE } from '@/lib/utils/chartTheme';
 import { labelFor } from '@/lib/utils/modelLabel';
@@ -62,6 +62,12 @@ export function ClientShareDonutClient({ data }: Props) {
         value: c.cost_usd,
         fill: COLORS[i % COLORS.length],
       })),
+    [data],
+  );
+  // 각자 toFixed(1) 하면 99.95% + 0.05% 가 100.0% + 0.1% = 100.1% 로 보인다 —
+  // 최대 나머지 방식으로 합을 100.0 에 맞추고, 0 으로 내려간 비0 항목은 '<0.1%'.
+  const sharesRounded = useMemo(
+    () => roundSharesTo100(data.clients.map((c) => c.share_pct)),
     [data],
   );
 
@@ -138,7 +144,7 @@ export function ClientShareDonutClient({ data }: Props) {
             </span>
             <span className="tabular-nums text-xs text-right">{fmtUsd(c.cost_usd)}</span>
             <span className="text-muted-foreground tabular-nums text-xs text-right">
-              {c.share_pct.toFixed(1)}%
+              {fmtSharePct(sharesRounded[i], c.share_pct)}
             </span>
           </li>
         ))}

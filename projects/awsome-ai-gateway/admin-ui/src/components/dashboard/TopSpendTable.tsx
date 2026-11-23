@@ -12,6 +12,7 @@
 import { useTranslations } from 'next-intl';
 import Link from 'next/link';
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/common/Table';
+import { fmtUsd } from '@/lib/utils/format';
 
 interface TopSpendRow {
   id: string;
@@ -40,11 +41,6 @@ interface TopSpendTableProps {
   teamBudgetAppliedLabel?: string;
 }
 
-// $1.55 처럼 소수점까지 보여야 소액 사용자 비용이 뭉개지지 않는다(이전엔 정수 반올림으로
-// $1 미만 차이가 전부 "$1"로 보여 실사용액을 구분 못 했다).
-function fmtUsd(n: number): string {
-  return `$${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-}
 
 export function TopSpendTable({
   title,

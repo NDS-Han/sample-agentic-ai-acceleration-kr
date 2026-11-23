@@ -24,8 +24,8 @@ import {
   YAxis,
   CartesianGrid,
   Tooltip,
-  Legend,
 } from 'recharts';
+import { fmtUsd, fmtUsdTick, niceTicks } from '@/lib/utils/format';
 import {
   buildTrendSeries,
   defaultSelectedTeamIds,
@@ -101,6 +101,34 @@ export function buildTrendChartData(
   };
 }
 
+/**
+ * 앞뒤 날짜가 모두 null 인 단독 실측점 — 선이 그어지지 않아(connectNulls 없음)
+ * 아예 안 보이므로 그 점만 dot 으로 찍는다. 이어지는 구간엔 dot 을 두지 않는다.
+ */
+function isolatedDot(
+  data: TrendChartData['data'],
+  key: string,
+  color: string,
+) {
+  // recharts 가 dot 함수에 넘기는 props 중 쓰는 것만.
+  return function IsolatedDot(props: { cx?: number; cy?: number; index?: number }) {
+    const { cx, cy, index = 0 } = props;
+    const v = data[index]?.[key];
+    const lone = v != null && data[index - 1]?.[key] == null && data[index + 1]?.[key] == null;
+    if (!lone || cx == null || cy == null) return <g key={`${key}-${index}`} />;
+    return <circle key={`${key}-${index}`} cx={cx} cy={cy} r={3} fill={color} stroke="none" />;
+  };
+}
+
+/** 범례 견본 — 시리즈의 색과 대시 패턴을 그대로 보여준다(색약/단색 출력 구분). */
+function LineSwatch({ color, dash, width = 2 }: { color: string; dash?: string; width?: number }) {
+  return (
+    <svg width="16" height="6" aria-hidden="true" className="shrink-0">
+      <line x1="0" y1="3" x2="16" y2="3" stroke={color} strokeWidth={width} strokeDasharray={dash} />
+    </svg>
+  );
+}
+
 export function CostTrendCard({ trends, trendsByTeam = [] }: CostTrendCardProps) {
   const t = useTranslations('dashboard');
   const topIds = useMemo(() => defaultSelectedTeamIds(trendsByTeam), [trendsByTeam]);
@@ -111,6 +139,19 @@ export function CostTrendCard({ trends, trendsByTeam = [] }: CostTrendCardProps)
     () => buildTrendChartData(trends, trendsByTeam, effective),
     [trends, trendsByTeam, effective],
   );
+
+  // nice ticks — 기본 균등 분할은 $0.135, $0.09 같은 어중간한 눈금이 나온다.
+  // 켜진 시리즈(합계·팀·기타) 최댓값을 덮는 1·2·2.5·5×10ⁿ 간격으로 고정.
+  const yTicks = useMemo(() => {
+    let max = 0;
+    for (const row of data) {
+      for (const [k, v] of Object.entries(row)) {
+        if (k !== 'label' && typeof v === 'number' && v > max) max = v;
+      }
+    }
+    return niceTicks(max);
+  }, [data]);
+  const yStep = yTicks.length > 1 ? yTicks[1] - yTicks[0] : 1;
 
   const toggleTeam = (teamId: string) => {
     const next = new Set(effective);
@@ -126,8 +167,14 @@ export function CostTrendCard({ trends, trendsByTeam = [] }: CostTrendCardProps)
       <div className="text-sm font-semibold tracking-tight">{t('costTrendTitle')}</div>
       <div className="mb-3 text-xs text-muted-foreground">{t('costTrendSubtitle')}</div>
 
+      {/* 범례는 이 칩 줄 하나 — 예전엔 차트 아래 recharts Legend 가 같은 팀을
+          한 번 더 나열했다. 합계·기타는 토글 대상이 아니라 정적 항목으로 둔다. */}
       {hasTeamSeries && data.length > 0 && (
-        <div className="mb-3 flex flex-wrap gap-1.5">
+        <div className="mb-3 flex flex-wrap items-center gap-1.5">
+          <span className="inline-flex items-center gap-1.5 px-1 py-1 text-[11px] text-foreground">
+            <LineSwatch color="hsl(var(--chart-1))" width={3} />
+            {t('costSeriesTotal')}
+          </span>
           {allTeams.map((tm) => {
             const on = effective.has(tm.teamId);
             return (
@@ -143,14 +190,17 @@ export function CostTrendCard({ trends, trendsByTeam = [] }: CostTrendCardProps)
                     : 'border-border text-muted-foreground hover:bg-secondary/60'
                 }`}
               >
-                <span
-                  className="inline-block h-2.5 w-2.5 shrink-0 rounded-full"
-                  style={{ backgroundColor: on ? tm.color : 'hsl(var(--muted-foreground))' }}
-                />
+                <LineSwatch color={on ? tm.color : 'hsl(var(--muted-foreground))'} dash={tm.dash} />
                 <span className="max-w-[12rem] truncate">{tm.name}</span>
               </button>
             );
           })}
+          {showOther && (
+            <span className="inline-flex items-center gap-1.5 px-1 py-1 text-[11px] text-muted-foreground">
+              <LineSwatch color="hsl(var(--muted-foreground))" dash="2 4" />
+              {t('costSeriesOther')}
+            </span>
+          )}
         </div>
       )}
 
@@ -164,7 +214,7 @@ export function CostTrendCard({ trends, trendsByTeam = [] }: CostTrendCardProps)
         // 남기지 않도록 아웃라인을 제거한다.
         // flex-1 로 카드 남은 높이를 전부 차지 — 옆 도넛 카드에 맞춰 늘어난 만큼
         // 차트가 같이 커진다. 단독 배치(분석 페이지)에서는 min-h 만큼만 잡힌다.
-        <div className={`flex-1 [&_.recharts-wrapper]:outline-none [&_.recharts-wrapper_*]:outline-none [&_svg]:outline-none ${hasTeamSeries ? 'min-h-[232px]' : 'min-h-[200px]'}`}>
+        <div className="flex-1 min-h-[200px] [&_.recharts-wrapper]:outline-none [&_.recharts-wrapper_*]:outline-none [&_svg]:outline-none">
         <ResponsiveContainer width="100%" height="100%">
           <ComposedChart data={data} margin={{ top: 8, right: 8, left: -8, bottom: 0 }}>
             <defs>
@@ -188,7 +238,9 @@ export function CostTrendCard({ trends, trendsByTeam = [] }: CostTrendCardProps)
               fontSize={11}
               tickLine={false}
               axisLine={false}
-              tickFormatter={(v: number) => `$${v >= 1000 ? `${(v / 1000).toFixed(1)}k` : v}`}
+              ticks={yTicks}
+              domain={[0, yTicks[yTicks.length - 1]]}
+              tickFormatter={(v: number) => fmtUsdTick(v, yStep)}
             />
             <Tooltip
               contentStyle={{
@@ -198,20 +250,8 @@ export function CostTrendCard({ trends, trendsByTeam = [] }: CostTrendCardProps)
                 fontSize: '12px',
               }}
               labelStyle={{ color: 'hsl(var(--muted-foreground))' }}
-              formatter={((value: number, name: string) => [
-                `$${Number(value).toLocaleString('en-US', { maximumFractionDigits: 2 })}`,
-                name,
-              ]) as never}
+              formatter={((value: number, name: string) => [fmtUsd(Number(value)), name]) as never}
             />
-            {hasTeamSeries && (
-              <Legend
-                verticalAlign="bottom"
-                height={28}
-                iconSize={11}
-                iconType="plainline"
-                wrapperStyle={{ fontSize: '11px', paddingTop: '6px' }}
-              />
-            )}
             {/* type=linear + connectNulls 미설정: 실측이 없는 날은 곡선 보간도,
                 gap 잇기도 하지 않는다 — 사용량이 없는 날짜는 있는 그대로 비어 보인다. */}
             <Area
@@ -222,6 +262,7 @@ export function CostTrendCard({ trends, trendsByTeam = [] }: CostTrendCardProps)
               stroke="hsl(var(--chart-1))"
               strokeWidth={3}
               fill="url(#costFill)"
+              dot={isolatedDot(data, 'total', 'hsl(var(--chart-1))')}
             />
             {series.map((s) => (
               <Line
@@ -233,7 +274,7 @@ export function CostTrendCard({ trends, trendsByTeam = [] }: CostTrendCardProps)
                 stroke={s.color}
                 strokeWidth={1.8}
                 strokeDasharray={s.dash}
-                dot={false}
+                dot={isolatedDot(data, s.dataKey, s.color)}
               />
             ))}
             {showOther && (
@@ -245,7 +286,7 @@ export function CostTrendCard({ trends, trendsByTeam = [] }: CostTrendCardProps)
                 stroke="hsl(var(--muted-foreground))"
                 strokeWidth={1.8}
                 strokeDasharray="2 4"
-                dot={false}
+                dot={isolatedDot(data, 'other', 'hsl(var(--muted-foreground))')}
               />
             )}
           </ComposedChart>

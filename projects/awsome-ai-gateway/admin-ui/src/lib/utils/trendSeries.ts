@@ -8,9 +8,12 @@
  * recharts 는 행으로, Chart.js 는 dataset 으로 각자 변환해 쓴다.
  *
  * 규칙:
- *  - 날짜 축 = 합계 + 모든 팀 포인트의 날짜 합집합(오름차순). 어느 시리즈든
- *    그 날짜에 포인트가 없으면 null — 0 으로 접으면 "그날 비용 0" 이라는 거짓
- *    사실이 되므로 차트에서 끊어 그린다(recharts 는 connectNulls 미설정 = gap).
+ *  - 날짜 축 = 합계 + 모든 팀 포인트의 날짜 합집합(오름차순)에 첫날~마지막날
+ *    사이 빠진 날짜(YYYY-MM-DD)를 채운 연속 축. 빠진 날을 축에서 빼면
+ *    11-06 → 11-09 처럼 건너뛴 구간이 한 칸 기울기로 이어져 실측처럼 보였다.
+ *    어느 시리즈든 그 날짜에 포인트가 없으면 null — 0 으로 접으면 "그날 비용 0"
+ *    이라는 거짓 사실이 되므로 차트에서 끊어 그린다(recharts 는 connectNulls
+ *    미설정 = gap).
  *  - selectedIds 에 든 팀만 개별 시리즈. 나머지 팀은 날짜별 합산 'other'
  *    시리즈 하나로 접는다 — 꺼둔 팀의 비용이 화면에서 사라지지 않는다.
  *  - 합계 시리즈는 trends 값 그대로 — 팀 시리즈 합산으로 재계산하지 않는다.
@@ -101,6 +104,28 @@ function rankTeams(trendsByTeam: TeamTrendSeries[]): RankedTeam[] {
     .sort((a, b) => b.total - a.total);
 }
 
+const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
+const DAY_MS = 86_400_000;
+// 가드 — 잘못된 입력(수년 범위)으로 축이 수천 칸이 되지 않게.
+const MAX_FILL_DAYS = 366;
+
+/**
+ * 정렬된 날짜 목록의 첫날~마지막날 사이 빠진 날을 채운다. 모든 값이
+ * YYYY-MM-DD 일 때만 — 다른 버킷 형식(월/시간)은 그대로 둔다. UTC 산술이라
+ * 브라우저 TZ·DST 와 무관하다(날짜 문자열 자체가 리포팅 TZ 기준 버킷).
+ */
+export function fillDateGaps(sorted: string[]): string[] {
+  if (sorted.length < 2 || !sorted.every((d) => ISO_DAY.test(d))) return sorted;
+  const start = Date.parse(`${sorted[0]}T00:00:00Z`);
+  const end = Date.parse(`${sorted[sorted.length - 1]}T00:00:00Z`);
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return sorted;
+  const span = Math.round((end - start) / DAY_MS);
+  if (span + 1 <= sorted.length || span >= MAX_FILL_DAYS) return sorted;
+  return Array.from({ length: span + 1 }, (_, i) =>
+    new Date(start + i * DAY_MS).toISOString().slice(0, 10),
+  );
+}
+
 /** 기본 선택 = 비용 상위 TOP_TEAM_COUNT 개 팀 id. */
 export function defaultSelectedTeamIds(trendsByTeam: TeamTrendSeries[]): Set<string> {
   return new Set(rankTeams(trendsByTeam).slice(0, TOP_TEAM_COUNT).map((t) => t.teamId));
@@ -122,7 +147,7 @@ export function buildTrendSeries(
   const totalByDate = new Map(trends.map((p) => [p.date, Number(p.cost_usd)]));
   const dateSet = new Set<string>(totalByDate.keys());
   for (const s of ranked) for (const d of s.byDate.keys()) dateSet.add(d);
-  const dates = [...dateSet].sort();
+  const dates = fillDateGaps([...dateSet].sort());
 
   const on = ranked.filter((t) => selected.has(t.teamId));
   const off = ranked.filter((t) => !selected.has(t.teamId));

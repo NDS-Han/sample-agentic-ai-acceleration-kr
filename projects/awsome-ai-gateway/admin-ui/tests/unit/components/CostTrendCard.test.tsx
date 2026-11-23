@@ -136,6 +136,16 @@ describe('buildTrendChartData', () => {
     expect(new Set(dashes).size).toBe(5);
   });
 
+  it('기간 중 실측 없는 날짜도 축에 넣고 값은 null 이다 — 0 으로 채우지 않는다', () => {
+    const r = buildTrendChartData(
+      [pt('2026-11-06', 0.1), pt('2026-11-09', 0.2)],
+      [team('a', 'A', [['2026-11-06', 0.1], ['2026-11-09', 0.2]])],
+    );
+    expect(r.data.map((d) => d.label)).toEqual(['11-06', '11-07', '11-08', '11-09']);
+    expect(r.data.map((d) => d.total)).toEqual([0.1, null, null, 0.2]);
+    expect(r.data.map((d) => d.team_a)).toEqual([0.1, null, null, 0.2]);
+  });
+
   it('빈 입력이면 빈 데이터다 — 렌더는 빈 상태로 간다', () => {
     const r = buildTrendChartData([], []);
     expect(r.data).toEqual([]);

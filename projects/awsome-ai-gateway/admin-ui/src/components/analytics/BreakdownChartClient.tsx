@@ -14,7 +14,7 @@ import {
   YAxis,
 } from 'recharts';
 import { useTranslations } from 'next-intl';
-import { fmtUsd } from '@/lib/utils/format';
+import { fmtUsd, fmtUsdTick, niceTicks } from '@/lib/utils/format';
 import type { ModelBreakdown, TeamBreakdown } from '@/types/entities';
 import { CATEGORICAL_PALETTE, useChartTheme } from '@/lib/utils/chartTheme';
 
@@ -30,17 +30,6 @@ export function BreakdownChartClient({ labels, values, title }: BreakdownChartCl
 
   const points = labels.map((label, i) => ({ label, value: values[i] ?? 0 }));
 
-  // 축 라벨은 -45° 회전 — 회전 텍스트의 수직 확장(≈길이·0.7)이 XAxis height 를
-  // 넘으면 svg 경계에서 라벨 앞부분이 잘린다("Claude Sonnet 5.5" → "~laude …").
-  // 표시는 20자로 자르고(전체 이름은 툴팁이 담당), 축 높이는 최대 표시 길이에
-  // 맞춰 회전 라벨이 온전히 들어가게 한다.
-  const TICK_MAX_CHARS = 20;
-  const maxTickChars = Math.min(
-    TICK_MAX_CHARS,
-    points.reduce((m, p) => Math.max(m, p.label.length), 0),
-  );
-  const xAxisHeight = Math.max(70, 24 + maxTickChars * 4.2);
-
   if (points.length === 0) {
     return (
       <div className="flex items-center justify-center h-48 text-sm text-muted-foreground">
@@ -49,34 +38,52 @@ export function BreakdownChartClient({ labels, values, title }: BreakdownChartCl
     );
   }
 
-  const formatTick = (label: string) =>
-    label.length > TICK_MAX_CHARS ? `${label.slice(0, TICK_MAX_CHARS - 1)}…` : label;
+  // 가로 막대(layout="vertical") — 세로 막대의 -45° 회전 라벨은 모델명이 잘렸다
+  // ("Claude Sonnet 5.5" → "~laude …"). 이름을 Y축에 가로로 두면 전체가 보인다.
+  // Y축 폭은 가장 긴 이름에 맞추되(11px ≈ 글자당 6.4px) 카드 폭을 다 먹지 않게
+  // 상한을 둔다 — 상한을 넘는 이름만 말줄임, 전체 이름은 툴팁.
+  const LABEL_MAX_CHARS = 36;
+  const maxChars = Math.min(
+    LABEL_MAX_CHARS,
+    points.reduce((m, p) => Math.max(m, p.label.length), 0),
+  );
+  const yAxisWidth = Math.max(72, Math.round(maxChars * 6.4) + 12);
+  const formatLabel = (label: string) =>
+    label.length > LABEL_MAX_CHARS ? `${label.slice(0, LABEL_MAX_CHARS - 1)}…` : label;
+  // 막대 하나당 고정 높이 — 항목 수에 따라 차트가 늘어나 라벨을 건너뛰지 않는다.
+  const chartHeight = Math.max(160, points.length * 32 + 40);
+
+  const ticks = niceTicks(points.reduce((m, p) => Math.max(m, p.value), 0));
+  const step = ticks.length > 1 ? ticks[1] - ticks[0] : 1;
 
   return (
     <div>
       <div className="mb-2 text-center text-sm font-medium">{title}</div>
-      <ResponsiveContainer width="100%" height={300}>
-        <BarChart data={points} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
-          <CartesianGrid vertical={false} stroke={theme.grid} />
+      <ResponsiveContainer width="100%" height={chartHeight}>
+        <BarChart
+          data={points}
+          layout="vertical"
+          margin={{ top: 4, right: 16, left: 0, bottom: 0 }}
+        >
+          <CartesianGrid horizontal={false} stroke={theme.grid} />
           <XAxis
-            dataKey="label"
-            // 라벨이 많으면 겹치지 않게 건너뛰며 표시 — 상세는 툴팁이 담당.
-            interval="preserveStartEnd"
-            minTickGap={24}
-            angle={-45}
-            textAnchor="end"
-            height={xAxisHeight}
-            tickFormatter={formatTick}
+            type="number"
+            ticks={ticks}
+            domain={[0, ticks[ticks.length - 1]]}
+            tickFormatter={(v) => fmtUsdTick(Number(v), step)}
             tick={{ fontSize: 11, fill: theme.textMuted }}
             axisLine={{ stroke: theme.grid }}
             tickLine={false}
           />
           <YAxis
-            tickFormatter={(v) => `$${Number(v).toFixed(2)}`}
+            type="category"
+            dataKey="label"
+            interval={0}
+            width={yAxisWidth}
+            tickFormatter={formatLabel}
             tick={{ fontSize: 11, fill: theme.textMuted }}
             axisLine={false}
             tickLine={false}
-            width={64}
           />
           <Tooltip
             cursor={{ fill: 'rgba(127,127,127,0.10)' }}
@@ -92,18 +99,15 @@ export function BreakdownChartClient({ labels, values, title }: BreakdownChartCl
             labelStyle={{ color: theme.text }}
             itemStyle={{ color: theme.text }}
           />
-          {/* 막대마다 카테고리 색 — 항목 구분 또렷. */}
-          <Bar dataKey="value" radius={[6, 6, 0, 0]}>
+          {/* 막대마다 카테고리 색 — 항목 구분 또렷. 축 눈금이 $ 단위라
+              예전 하단의 'Item'/'USD' 모서리 라벨은 두지 않는다. */}
+          <Bar dataKey="value" radius={[0, 6, 6, 0]} barSize={18}>
             {points.map((_, i) => (
               <Cell key={i} fill={CATEGORICAL_PALETTE[i % CATEGORICAL_PALETTE.length]} />
             ))}
           </Bar>
         </BarChart>
       </ResponsiveContainer>
-      <div className="mt-1 flex justify-between text-[10px] text-muted-foreground">
-        <span>{t('item')}</span>
-        <span>USD</span>
-      </div>
     </div>
   );
 }

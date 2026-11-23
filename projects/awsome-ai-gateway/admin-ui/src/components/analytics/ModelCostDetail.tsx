@@ -6,7 +6,7 @@
 import { useTranslations } from 'next-intl';
 import type { ModelCostAnalyticsResponse } from '@/lib/actions/analytics-models';
 import { fmtPricePerM } from '@/lib/utils/pricing';
-import { fmtUsd } from '@/lib/utils/format';
+import { fmtLatencyMs, fmtUsd } from '@/lib/utils/format';
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/common/Table';
 import { CATEGORICAL_PALETTE } from '@/lib/utils/chartTheme';
 import { modelDisplay } from '@/lib/utils/modelLabel';
@@ -119,8 +119,14 @@ export function ModelCostDetail({ data }: { data: ModelCostAnalyticsResponse }) 
                     </Td>
                     <Td numeric>{fmtPricePerM(m.cost_per_1k_tokens)}</Td>
                     {/* 백엔드는 avg() NULL 을 0으로 내린다 — '0ms' 는 지연이 0 이
-                        아니라 데이터 없음이므로 대시(-)로 표시한다. */}
-                    <Td numeric>{m.avg_latency_ms > 0 ? `${m.avg_latency_ms}ms` : '—'}</Td>
+                        아니라 데이터 없음이므로 대시(-)로 표시한다. 1초 이상은
+                        55931ms 대신 55.9s — 원값은 title 로. */}
+                    <Td
+                      numeric
+                      title={m.avg_latency_ms > 0 ? `${m.avg_latency_ms.toLocaleString('en-US')}ms` : undefined}
+                    >
+                      {fmtLatencyMs(m.avg_latency_ms)}
+                    </Td>
                   </Tr>
                 );
               })}

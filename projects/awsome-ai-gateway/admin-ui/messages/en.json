@@ -892,7 +892,6 @@
     "costUsd": "Cost (USD)",
     "costSeriesTotal": "Total",
     "costSeriesOther": "Other",
-    "item": "Item",
     "date": "Date",
     "invalidDateRange": "The start date must be before the end date. Please adjust the date range.",
     "customSeedHint": "Custom ranges show recorded usage only — amounts migrated from earlier data aren't included.",
