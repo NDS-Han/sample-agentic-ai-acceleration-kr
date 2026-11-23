@@ -9,7 +9,7 @@ ecs/eks 전용(Cognito 를 terraform `module.cognito` 가 만드는 배포).
 |---|---|---|
 | user pool 요금제 | `ESSENTIALS` | in-place (이미 Essentials 면 변화 없음) |
 | Hosted UI 도메인 | `managed_login_version = 2` | in-place (도메인 재생성 없음) |
-| 브랜딩 스타일 | `awscc_cognito_managed_login_branding.this` | 생성 — 앱 클라이언트(`cli`) 1개에 1개 |
+| 브랜딩 스타일 | `awscc_cognito_managed_login_branding.this` | 생성 — 앱 클라이언트(`cli`) 1개에 1개. 내용 변경은 교체(destroy+create, ~1분) |
 | classic `ui_customization` | 그대로 둠 | Managed Login 에서는 안 쓰임. 되돌리면 다시 쓰임 |
 
 admin-ui 와 gateway-cli 가 같은 앱 클라이언트를 쓰므로 두 로그인 화면이 같아집니다.
@@ -19,9 +19,19 @@ admin-ui 와 gateway-cli 가 같은 앱 클라이언트를 쓰므로 두 로그�
 | 파일 | 내용 |
 |---|---|
 | `settings.json` | 브랜딩 설정(색·폼 위치·헤더/푸터 끔 등). 색은 `#` 없는 RGBA hex |
-| `background.svg` | 페이지 배경 — 왼쪽 50% 그래프 패널(노드·엣지 SMIL 애니메이션 + 영문 문구), 오른쪽 흰 바탕 |
+| `background.svg` | 페이지 배경 — 왼쪽 그래프 패널(노드·엣지 + CSS @keyframes 움직임 + 영문 문구), 오른쪽 폼 영역 |
 | `generate_background.py` | `background.svg` 생성기 — 문구·노드를 바꾸면 `python3 generate_background.py` 후 커밋 |
 | `favicon.svg` | 탭 아이콘(고스트 로고) |
+
+- 폼 정렬 — Cognito 폼은 END 정렬(402px 카드 + 81px 여백)이라, 흰 영역을
+  `calc(100% - 564px)`로 두고 나머지를 패널이 채웁니다. 1024px 미만은 패널이
+  전체를 덮고 문구를 숨깁니다(폼 카드가 경계에 걸치지 않게).
+- 에셋 검증 — `<animate>`/`<animateMotion>`(SMIL)은 Cognito 가 **거부**합니다.
+  `<style>` 안의 CSS `@keyframes`는 허용됩니다 — 움직임은 CSS 로만 둡니다.
+- 에셋/설정을 바꾸면 `terraform_data.managed_login_branding_rev` 해시 트리거가
+  브랜딩을 **교체**합니다 — `client_id` 가 createOnly 라 in-place update 가
+  AWS 에서 거부되기 때문입니다(awscc/CloudControl 제약). `./deploy apply` 는
+  이 교체를 허용 목록으로 통과시킵니다.
 
 - 왼쪽 문구는 이미지라 **언어 전환을 따르지 않습니다**(영어 고정). `branding.name`
   과도 연동되지 않습니다 — 바꾸려면 생성기의 `HEADING`/`SUBTITLE`/`FOOTER`.
