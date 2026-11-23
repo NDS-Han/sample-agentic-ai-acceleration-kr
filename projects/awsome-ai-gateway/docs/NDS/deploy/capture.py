@@ -1644,8 +1644,35 @@ def capture_eks(namespace: str = "llm-gateway", release: str = "llm-gateway",
         doc["oidc"] = oidc
     if infra:
         doc["infra"] = infra
-    if (_b := _branding(_dmap(_val(v, "adminUi", "env", default={}))
-                        .get("ADMIN_BRAND_NAME"))):
+    brand_val = _dmap(_val(v, "adminUi", "env", default={})) \
+        .get("ADMIN_BRAND_NAME")
+    if not brand_val:
+        # values 에 없으면 라이브 deployment env 도 본다 — kubectl set env 등
+        # 비-helm 경로로 주입된 값은 values 기록 없이 라이브에만 남는다.
+        # 릴리스 소유 매니페스트에 기록된 deploy 만 읽는다 (라벨 위조 차단).
+        for item in _instance_items(
+                deploys.get("items", []), release,
+                _manifest_owned(owned_all, "Deployment")):
+            dname = str(_dmap(item.get("metadata")).get("name") or "")
+            if not dname.endswith("-admin-ui"):
+                continue
+            spec = _dmap(_dmap(_dmap(item.get("spec")).get("template"))
+                         .get("spec"))
+            for c in spec.get("containers") or []:
+                if not isinstance(c, dict) or c.get("name") != "admin-ui":
+                    continue
+                brand_val = next(
+                    (str(e.get("value") or "")
+                     for e in c.get("env") or []
+                     if isinstance(e, dict)
+                     and e.get("name") == "ADMIN_BRAND_NAME"), "")
+                if brand_val:
+                    notes.append(
+                        "branding.name 을 라이브 deployment env 에서 읽었습니다 "
+                        "— helm values 기록이 없습니다 (비-helm 경로로 주입됐을 "
+                        "수 있습니다)")
+            break
+    if (_b := _branding(brand_val)):
         doc["branding"] = _b
     return doc, notes
 

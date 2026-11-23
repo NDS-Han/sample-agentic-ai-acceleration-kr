@@ -1594,3 +1594,42 @@ def test_captured_yaml_key_comments(tmp_path):
     # 주석이 yaml 을 깨지 않음 — 주석 스트립 후 원본과 동일
     stripped = "\n".join(l for l in lines if not l.strip().startswith("#"))
     assert _yaml.safe_load(stripped) == doc
+
+
+def _admin_ui_deploy(env_list):
+    return {"items": [{
+        "metadata": {"name": "llm-gateway-admin-ui",
+                     "labels": {"app.kubernetes.io/instance": "llm-gateway"}},
+        "spec": {"template": {"spec": {"containers": [
+            {"name": "admin-ui", "env": env_list}]}}},
+    }]}
+
+
+def test_eks_capture_branding_live_env_fallback(monkeypatch):
+    """values 에 ADMIN_BRAND_NAME 이 없어도 라이브 deployment env 에 있으면
+    캡처한다 — kubectl set env 등 비-helm 경로는 values 기록이 없다."""
+    monkeypatch.setattr(capture, "_helm_values",
+                        lambda *a, **kw: _eks_values())
+    monkeypatch.setattr(
+        capture, "_kubectl_json",
+        lambda res, *a, **kw:
+            _admin_ui_deploy([{"name": "ADMIN_BRAND_NAME",
+                               "value": "농심 AI"}])
+            if res == "deployments" else {})
+    doc, notes = capture.capture_eks()
+    assert doc["branding"] == {"name": "농심 AI"}
+    assert any("비-helm" in n for n in notes)
+
+
+def test_eks_capture_branding_absent_everywhere(monkeypatch):
+    """values·라이브 모두 없으면 branding 블록 자체가 없다 — 기본값을
+    캡처본에 쓰지 않아 채택본이 선언을 기본값으로 되돌리지 않는다."""
+    monkeypatch.setattr(capture, "_helm_values",
+                        lambda *a, **kw: _eks_values())
+    monkeypatch.setattr(
+        capture, "_kubectl_json",
+        lambda res, *a, **kw:
+            _admin_ui_deploy([{"name": "OTHER", "value": "x"}])
+            if res == "deployments" else {})
+    doc, _ = capture.capture_eks()
+    assert "branding" not in doc
