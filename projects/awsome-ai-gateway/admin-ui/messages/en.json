@@ -1307,7 +1307,26 @@
       "turnUser": "User",
       "turnAssistant": "Assistant",
       "turnTool": "Tool",
-      "turnReasoning": "Reasoning"
+      "turnReasoning": "Reasoning",
+      "summaryLastUser": "Last user text",
+      "summaryResponse": "Response text",
+      "summaryNoUser": "No user text in this request.",
+      "summaryNoResponse": "No response text.",
+      "summaryToolCalls": "Tool calls: {names}",
+      "charsCount": "{count, number} chars",
+      "injectedHint": "Injected block (collapsed) — expand to read, or use Raw JSON.",
+      "cacheReadLabel": "Cache read",
+      "cacheWriteLabel": "Cache write",
+      "cacheShort": "R {read} · W {write}",
+      "colNo": "#",
+      "colStatus": "Status",
+      "colLatency": "Latency",
+      "colTokens": "In→Out",
+      "colTokensTitle": "Input → output tokens (cache tokens shown separately)",
+      "colCache": "Cache R/W",
+      "colCacheTitle": "Cache read / cache write tokens — billed separately from input tokens, often most of the cost",
+      "widenTo30d": "Widen to 30 days",
+      "modelsMore": "+{count}"
     }
   },
   "errors": {

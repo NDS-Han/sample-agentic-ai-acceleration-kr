@@ -13,6 +13,7 @@ import { useToast } from '@/components/common/ToastProvider';
 import { usePointInTime } from '@/components/common/usePointInTime';
 import { fmtTokensCompact } from '@/lib/utils/format';
 import { Usd } from '@/components/common/Usd';
+import { clientLabel } from '@/lib/constants/gateway';
 
 // ── 본문 텍스트 추출 ──────────────────────────────────────────────────────────
 // request_body 방언: anthropic/openai chat = messages[], responses API = input.
@@ -59,6 +60,51 @@ function requestMessages(body: Record<string, unknown>): ChatMessage[] {
   if (typeof input === 'string') return [{ role: 'user', content: input }];
   if (Array.isArray(input)) return input as ChatMessage[];
   return [];
+}
+
+// ── 주입 블록(XML 태그로 감싼 컨텍스트) 분리 ───────────────────────────────────
+// Claude Code 는 user 메시지 안에 <system-reminder>, <local-command-stdout>,
+// 환경 정보·스킬 목록 등을 수천 줄 끼워 넣는다 — 실제 입력('hi')이 그 밑에
+// 묻히므로 줄 맨 앞에서 시작해 같은 이름으로 닫히는 태그 블록을 접어 둔다.
+// 원문은 펼치기와 Raw JSON 으로 그대로 볼 수 있다(표시만 바꾼다).
+
+export type TextSegment =
+  | { kind: 'text'; text: string }
+  | { kind: 'block'; tag: string; text: string };
+
+const INJECTED_BLOCK = /^<([A-Za-z][\w:.-]*)(?:\s[^>]*)?>[\s\S]*?<\/\1>/gm;
+
+export function splitInjectedBlocks(text: string): TextSegment[] {
+  const out: TextSegment[] = [];
+  let last = 0;
+  for (const m of text.matchAll(INJECTED_BLOCK)) {
+    const start = m.index ?? 0;
+    if (start > last) out.push({ kind: 'text', text: text.slice(last, start) });
+    out.push({ kind: 'block', tag: m[1], text: m[0] });
+    last = start + m[0].length;
+  }
+  if (last < text.length) out.push({ kind: 'text', text: text.slice(last) });
+  return out;
+}
+
+/** 주입 블록을 뺀 실제 텍스트 — 요약('마지막 사용자 텍스트')용. */
+export function stripInjectedBlocks(text: string): string {
+  return splitInjectedBlocks(text)
+    .filter((seg) => seg.kind === 'text')
+    .map((seg) => seg.text)
+    .join('')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+/** 가장 최근 user 턴 중 주입 블록을 빼고도 텍스트가 남는 것 — 툴 결과만 있는 턴은 건너뛴다. */
+export function lastUserText(turns: ConversationTurn[]): string {
+  for (let i = turns.length - 1; i >= 0; i--) {
+    if (turns[i].role !== 'user') continue;
+    const text = stripInjectedBlocks(turns[i].text);
+    if (text) return text;
+  }
+  return '';
 }
 
 // ── 전체 대화 스레드 ──────────────────────────────────────────────────────────
@@ -635,6 +681,61 @@ function toolInputJson(input: unknown): string {
   }
 }
 
+/** 턴 본문 — 주입 블록은 태그명·길이만 보이게 접고, 나머지 텍스트는 그대로. */
+function InjectedText({ text, className }: { text: string; className: string }) {
+  const t = useTranslations('monitoring.bodyLogs');
+  const segments = splitInjectedBlocks(text);
+  if (segments.length === 1 && segments[0].kind === 'text') {
+    return <pre className={className}>{text}</pre>;
+  }
+  return (
+    <div className="space-y-1">
+      {segments.map((seg, i) =>
+        seg.kind === 'text' ? (
+          seg.text.trim() ? (
+            <pre key={i} className={className}>
+              {seg.text.trim()}
+            </pre>
+          ) : null
+        ) : (
+          <Collapsible
+            key={i}
+            label={
+              <span className="font-mono" title={t('injectedHint')}>
+                {`<${seg.tag}>`} · {t('charsCount', { count: seg.text.length })}
+              </span>
+            }
+          >
+            <pre className="mt-1 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted p-2 text-xs text-muted-foreground">
+              {seg.text}
+            </pre>
+          </Collapsible>
+        ),
+      )}
+    </div>
+  );
+}
+
+/** 토큰 표기 — 입력→출력. 둘 다 없으면 null. */
+export function fmtTokenFlow(input?: number | null, output?: number | null): string | null {
+  if (input == null && output == null) return null;
+  return `${fmtTokensCompact(input)}→${fmtTokensCompact(output)}`;
+}
+
+/** 캐시 토큰이 하나라도 있으면 [읽기, 쓰기] 표기, 아니면 null. */
+export function cacheTokenParts(
+  read?: number | null,
+  write?: number | null,
+): { read: string; write: string } | null {
+  if (!(read && read > 0) && !(write && write > 0)) return null;
+  return { read: fmtTokensCompact(read ?? 0), write: fmtTokensCompact(write ?? 0) };
+}
+
+/** 앱 표시 라벨 — 다른 화면과 같은 'Claude Code'/'Other'. */
+export function clientDisplay(client: string | null | undefined): string | null {
+  return client ? clientLabel(client) : null;
+}
+
 // ── 공유 본문 뷰 — 다이얼로그(단건)와 세션 trace 카드(인라인)가 같이 쓴다 ──────
 
 export function BodyRecordContent({
@@ -687,6 +788,12 @@ export function BodyRecordContent({
     : 0;
   const turns = allTurns.slice(hiddenTurns);
 
+  // 상세 맨 위 요약 — 주입 블록·누적 history 를 헤치지 않고 이번 요청의
+  // 실제 입력과 응답을 바로 읽게 한다.
+  const summaryUser = lastUserText(allTurns);
+  const summaryResponse = resParts.text.trim();
+  const summaryTools = resParts.toolCalls.map((tc) => tc.name).filter(Boolean);
+
   const sysText = systemTextOf(reqBody);
   const toolsDef = reqBody.tools;
 
@@ -722,7 +829,7 @@ export function BodyRecordContent({
               <EmailText email={data.user_email} fallback={rec?.user_id} />
             </span>
           )}
-          {data.client && <Badge tone="neutral">{data.client}</Badge>}
+          {data.client && <Badge tone="neutral">{clientDisplay(data.client)}</Badge>}
           {rec?.is_streaming && <Badge tone="neutral">{t('streamTag')}</Badge>}
           {truncated && <Badge tone="amber">{t('truncated')}</Badge>}
           {data.oversized && <Badge tone="amber">{t('oversized')}</Badge>}
@@ -750,12 +857,24 @@ export function BodyRecordContent({
               <dd className="num inline"><Usd value={data.cost_usd} /></dd>
             </div>
           )}
-          {(data.input_tokens != null || data.output_tokens != null) && (
-            <div>
+          {fmtTokenFlow(data.input_tokens, data.output_tokens) && (
+            <div title={t('colTokensTitle')}>
               <dt className="inline">{t('tokensLabel')}</dt>{' '}
-              <dd className="num inline">
-                {fmtTokensCompact(data.input_tokens)}→{fmtTokensCompact(data.output_tokens)}
-              </dd>
+              <dd className="num inline">{fmtTokenFlow(data.input_tokens, data.output_tokens)}</dd>
+            </div>
+          )}
+          {/* 캐시 토큰은 입력과 별도로 과금된다 — 없으면 'Tokens 2→14 인데 $0.08'
+              처럼 비용과 토큰이 안 맞아 보인다. */}
+          {(data.cache_read_tokens ?? 0) > 0 && (
+            <div>
+              <dt className="inline">{t('cacheReadLabel')}</dt>{' '}
+              <dd className="num inline">{fmtTokensCompact(data.cache_read_tokens)}</dd>
+            </div>
+          )}
+          {(data.cache_write_tokens ?? 0) > 0 && (
+            <div>
+              <dt className="inline">{t('cacheWriteLabel')}</dt>{' '}
+              <dd className="num inline">{fmtTokensCompact(data.cache_write_tokens)}</dd>
             </div>
           )}
         </dl>
@@ -763,6 +882,37 @@ export function BodyRecordContent({
 
       {data.oversized && (
         <p className="mb-4 text-xs text-amber-600 dark:text-amber-400">{t('oversizedHint')}</p>
+      )}
+
+      {rec && (
+        <div className="mb-4 grid gap-3 rounded-md border border-border bg-muted/40 p-3 sm:grid-cols-2">
+          <div className="min-w-0">
+            <p className="mb-1 text-[11px] font-medium text-foreground">{t('summaryLastUser')}</p>
+            {summaryUser ? (
+              <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words text-sm">
+                {summaryUser}
+              </pre>
+            ) : (
+              <p className="text-xs text-muted-foreground">{t('summaryNoUser')}</p>
+            )}
+          </div>
+          <div className="min-w-0">
+            <p className="mb-1 text-[11px] font-medium text-teal-600 dark:text-teal-400">
+              {t('summaryResponse')}
+            </p>
+            {summaryResponse ? (
+              <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words text-sm">
+                {summaryResponse}
+              </pre>
+            ) : (
+              <p className="text-xs text-muted-foreground">
+                {summaryTools.length
+                  ? t('summaryToolCalls', { names: summaryTools.join(', ') })
+                  : t('summaryNoResponse')}
+              </p>
+            )}
+          </div>
+        </div>
       )}
 
       <div className="space-y-4">
@@ -801,10 +951,19 @@ export function BodyRecordContent({
             <>
               {/* system 프롬프트 — 응답을 좌우하는 컨텍스트라 빠뜨리면 안 된다 */}
               {sysText ? (
-                <Collapsible label={t('systemPrompt')}>
-                  <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded-md border border-border p-2 text-xs">
-                    {sysText}
-                  </pre>
+                <Collapsible
+                  label={
+                    <>
+                      {t('systemPrompt')} · {t('charsCount', { count: sysText.length })}
+                    </>
+                  }
+                >
+                  <div className="mt-1 max-h-96 overflow-auto rounded-md border border-border p-2">
+                    <InjectedText
+                      text={sysText}
+                      className="whitespace-pre-wrap break-words text-xs"
+                    />
+                  </div>
                 </Collapsible>
               ) : null}
               {Array.isArray(toolsDef) && toolsDef.length > 0 ? (
@@ -843,9 +1002,10 @@ export function BodyRecordContent({
                         {TURN_LABELS[turn.role] ?? turn.role}
                       </p>
                       {turn.text ? (
-                        <pre className="whitespace-pre-wrap break-words text-sm">
-                          {turn.text}
-                        </pre>
+                        <InjectedText
+                          text={turn.text}
+                          className="whitespace-pre-wrap break-words text-sm"
+                        />
                       ) : null}
                       {turn.tools.map((tu, j) => (
                         <Collapsible
