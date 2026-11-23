@@ -249,6 +249,11 @@ class InfraConfig:
     # eks 전용 — in-account Bedrock Mantle 호출 허용 리전. 비우면 env
     # variables.tf 기본값. 선언하면 managed overlay 가 module.irsa 정책을 소유.
     mantle_regions: list[str] = field(default_factory=list)
+    # eks 전용 — 선언된 EKS 목표 버전 ("1.34" 형식). 일반 apply 는 이 값으로
+    # 클러스터를 바꾸지 않는다 — live 와 다르면 경고만 하고, 실제 업그레이드는
+    # `deploy upgrade eks` 가 홉 단위 절차로 수행한다. 비우면 버전을 관리
+    # 하지 않는다는 뜻 (캡처는 라이브 버전을 역생성한다).
+    eks_version: str = ""
     db: InfraDbConfig = field(default_factory=InfraDbConfig)       # ecs 전용
     cache: InfraCacheConfig = field(default_factory=InfraCacheConfig)  # ecs 전용
 
@@ -407,6 +412,9 @@ class GatewayConfig:
         if self.deploy.target == "ecs" and self.infra.mantle_regions:
             w.append("infra.mantle_regions 는 eks 전용입니다 — "
                      "deploy.target=ecs 에서는 무시됩니다.")
+        if self.deploy.target != "eks" and self.infra.eks_version:
+            w.append("infra.eks_version 는 eks 전용입니다 — "
+                     f"deploy.target={self.deploy.target} 에서는 무시됩니다.")
         if self.deploy.target != "eks" and self.domain.hosts:
             w.append("domain.hosts 는 eks render 전용입니다 — "
                      f"deploy.target={self.deploy.target} 에서는 무시됩니다.")
@@ -851,6 +859,14 @@ class GatewayConfig:
         if sfx and not re.fullmatch(r"[a-z0-9-]+", sfx):
             e.append(f"infra.cognito_domain_suffix 는 소문자/숫자/하이픈만 "
                      f"가능합니다: {sfx!r}")
+        ev = self.infra.eks_version
+        if ev and not isinstance(ev, str):
+            # eks_version: 1.30 을 따옴표 없이 쓰면 yaml 이 float 1.3 으로 읽어
+            # minor 30 → 3 으로 왜곡된다 — 문자열 강제로 차단한다.
+            e.append(f'infra.eks_version 은 문자열이어야 합니다 — '
+                     f'eks_version: "{ev}" 처럼 따옴표로 감싸세요')
+        elif ev and not re.fullmatch(r"1\.\d+", ev):
+            e.append(f"infra.eks_version 은 '1.<minor>' 형식이어야 합니다: {ev!r}")
         if self.clients.models_profile not in MODEL_PROFILES:
             e.append(f"clients.models_profile 은 {MODEL_PROFILES} 중 하나여야 합니다.")
         bn = self.branding.name
@@ -1073,7 +1089,7 @@ _OIDC_KEYS = frozenset(("issuer_url", "audience", "client_id", "client_secret",
                         "reject_unmatched_groups", "admin_groups", "admin_emails"))
 _INFRA_KEYS = frozenset(("azs", "vpc_cidr", "cognito_domain_suffix", "db", "cache",
                         "cognito_groups", "bedrock_allowed_model_arns",
-                        "mantle_regions"))
+                        "mantle_regions", "eks_version"))
 
 
 def from_dict(raw: dict) -> GatewayConfig:
@@ -1244,6 +1260,9 @@ def from_dict(raw: dict) -> GatewayConfig:
             mantle_regions=_str_items(
                 infra.get("mantle_regions"), "infra.mantle_regions", errors,
                 item_re=_REGION_RE, item_desc="리전 ID"),
+            # _opt_str 코어션 금지 — float 1.30 → "1.3" 왜곡을 validate 의
+            # isinstance 검사가 잡으려면 raw 값이 필요하다.
+            eks_version=infra.get("eks_version") or "",
             db=InfraDbConfig(
                 mode=_opt_str(_infra_db.get("mode"), ""),
                 min_acu=_safe_float_or_none(_infra_db.get("min_acu"), errors,

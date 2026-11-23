@@ -1420,6 +1420,26 @@ def _target_modules(targets: list[str]) -> list[str]:
     return [t.removeprefix("-target=") for t in targets]
 
 
+def _warn_version_drift(cfg: GatewayConfig, outs: dict) -> None:
+    """infra.eks_version 선언 ↔ 라이브 클러스터 버전 drift 안내 — apply 는
+    버전을 바꾸지 않으므로 경고만 한다 (업그레이드는 deploy upgrade eks 몫).
+    describe-cluster 실패는 무시 — 보조 검사."""
+    want, cluster = cfg.infra.eks_version, str(outs.get("cluster_name") or "")
+    if not (want and cluster):
+        return
+    try:
+        from .capture import _aws_json
+        live = str((_aws_json(["eks", "describe-cluster",
+                               "--name", cluster], cfg.aws.region)
+                    .get("cluster") or {}).get("version") or "")
+    except Exception:
+        return
+    if live and live != want:
+        print(f"ⓘ infra.eks_version={want} 인데 라이브 클러스터는 {live} — "
+              "apply 는 클러스터 버전을 바꾸지 않습니다. 업그레이드는 "
+              "`deploy upgrade eks` 를 사용하세요", file=sys.stderr)
+
+
 def _inspect_managed_plan(env_dir: Path, plan_path: Path,
                           modules: list[str],
                           allow_alb_destroy: bool = False
@@ -2109,6 +2129,7 @@ def plan(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "") 
                   "확인하세요", file=sys.stderr)
             _warn_stale_backend(cfg, env_dir)
     outs = tf_outputs(env_dir) if env_dir else {}
+    _warn_version_drift(cfg, outs)
     # soft 경고로 두면 이어지는 update-kubeconfig --alias 가 확인 전에 기존
     # context 를 backend 클러스터로 덮어쓴다 — preview(--plan)만 띄워도
     # kubeconfig 가 변형되고, apply() 의 hard 검사는 이미 재지정된 context 를
@@ -2256,6 +2277,7 @@ def apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "")
                   "확인하세요", file=sys.stderr)
             _warn_stale_backend(cfg, env_dir)
     outs = tf_outputs(env_dir) if env_dir else {}
+    _warn_version_drift(cfg, outs)
     # ensure_infra 의 managed apply 가 enable_chat_agent=false 로 output 을
     # 재저장하면 아래 off-teardown 신호(chat_agent_name 실측)가 지워져 유료
     # Runtime 이 고아화된다 — 수렴 전 실측을 스냅샷한다.

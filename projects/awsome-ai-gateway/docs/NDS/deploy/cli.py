@@ -1864,6 +1864,7 @@ _CAPTURE_COMMENTS: dict[str, str] = {
     "domain.hosts": "캡처된 실제 호스트 — 파생 규칙(gateway./admin./admin-api.{name})과 다르면\n이 값이 우선한다. 비우면 파생명으로 바뀌어 발급된 클라이언트 URL 이 깨진다",
     "images.tags": "서비스별 핀 — images.tag 와 다른 서비스만 기록. 나머지는 images.tag 를 따른다",
     "branding.name": "admin-ui 사이드바·탭 제목 (ADMIN_BRAND_NAME)",
+    "infra.eks_version": "라이브 EKS 버전 — 목표가 다르면 `deploy upgrade eks --to 1.<minor>`\n(apply 는 클러스터 버전을 바꾸지 않는다 — 홉 단위 절차는 upgrade 전용)",
 }
 
 
@@ -2151,6 +2152,35 @@ def cmd_doctor(args) -> int:
     return 0
 
 
+def cmd_upgrade(args) -> int:
+    """deploy upgrade eks — EKS 버전 홉 단위 업그레이드 (apply 가 안 건드리는
+    절차형 작업 전담)."""
+    try:
+        cfg = _load_config(args)
+    except schema.SchemaError as exc:
+        console.print(f"[red]gateway.yaml 오류:\n{exc}")
+        return 1
+    if cfg.deploy.target != "eks":
+        console.print(f"[red]deploy.target={cfg.deploy.target} — "
+                      "upgrade eks 는 eks 배포 전용입니다")
+        return 1
+    env_dir = _tf_env_dir(cfg)
+    if not env_dir.is_dir():
+        console.print(f"[red]terraform env 디렉토리가 없습니다: {env_dir} — "
+                      "deploy.tf_env_dir 을 확인하세요")
+        return 1
+    from . import eks_upgrade
+    try:
+        return eks_upgrade.cmd_upgrade_eks(
+            cfg, env_dir, GEN_ROOT / cfg.env / "eks",
+            Path(args.config).resolve(),
+            to=args.to or "", yes=args.yes, plan=args.plan,
+            context=args.context or "")
+    except eks_upgrade.UpgradeError as exc:
+        console.print(f"[red]{exc}")
+        return 1
+
+
 def _tf_env_dir(cfg) -> Path:
     if cfg.deploy.target == "ecs":
         return REPO_ROOT / "deployment" / "terraform" / "environments" / "gateway-ecs"
@@ -2433,6 +2463,22 @@ def main(argv=None) -> int:
                     help="eks: terraform env 의 인프라까지 삭제 (EKS·Aurora·VPC 등 전부)")
     sp.add_argument("--context", default="", help="eks backend: kubeconfig context")
     sp.set_defaults(fn=cmd_teardown)
+
+    sp = sub.add_parser(
+        "upgrade",
+        help="[위험] eks 클러스터/애드온 홉 단위 업그레이드 — apply 는 버전을 바꾸지 않음")
+    sp.add_argument("component", choices=["eks"],
+                    help="업그레이드 대상 (현재 eks 만 지원)")
+    sp.add_argument("--to", default="",
+                    help="목표 버전 1.<minor> — 미지정 시 gateway.yaml infra.eks_version")
+    sp.add_argument("--plan", action="store_true",
+                    help="홉 계획과 애드온 기본 버전만 출력 (변경 없음)")
+    sp.add_argument("-y", "--yes", action="store_true",
+                    help="홉 실행 확인 생략 (CI 용 — 파드 재생성이 홉마다 발생)")
+    sp.add_argument("--context", default="",
+                    help="kubectl context — 파드 재생성 시 명시 지정")
+    sp.add_argument("--config", default=str(DEFAULT_CONFIG))
+    sp.set_defaults(fn=cmd_upgrade)
 
     args = p.parse_args(argv)
     try:

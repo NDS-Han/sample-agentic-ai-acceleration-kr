@@ -1539,6 +1539,18 @@ def capture_eks(namespace: str = "llm-gateway", release: str = "llm-gateway",
                              "terraform env 가 소유, gateway.yaml 표현 없음")
         except CaptureError:
             pass
+    if cluster:
+        try:
+            ver = str((_aws_json(["eks", "describe-cluster",
+                                  "--name", cluster], region)
+                       .get("cluster") or {}).get("version") or "")
+            if ver:
+                # 라이브 버전 = 선언 목표 — 채택본이 현재 클러스터를 그대로
+                # 기대 상태로 기록한다 (업그레이드는 deploy upgrade eks 몫)
+                infra["eks_version"] = ver
+        except CaptureError:
+            notes.append("eks describe-cluster 실패 — infra.eks_version 을 "
+                         "읽지 못했습니다")
     if outs.get("rds_proxy_enabled"):
         notes.append("RDS Proxy 사용 중 — module.aurora 소유라 캡처본에 기록하지 않습니다 "
                      "(application_db_endpoint 는 proxy 경유)")

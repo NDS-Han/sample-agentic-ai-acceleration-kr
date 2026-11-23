@@ -251,6 +251,7 @@ deploy:
 | `cognito_groups` | OIDC 팀 그룹. `Claude_` 접두 필수(없는 그룹은 로그인 거부 — 스키마 검증). `ClaudeAdmin`은 자동 포함 |
 | `bedrock_allowed_model_arns` | IRSA 정책 허용 ARN 패턴. 비우면 backend 기본(eks=variables.tf 최신 목록, ecs=`clients.models_profile` 매핑) — 명시 시 그 목록을 덮어씁니다 |
 | `mantle_regions` | **eks 전용** — in-account Bedrock Mantle 호출 허용 리전. 비우면 env variables.tf 기본값. 선언하면 managed overlay 가 module.irsa 정책을 소유합니다 |
+| `eks_version` | **eks 전용** — EKS 컨트롤플레인 기대 버전 (`"1.34"` 처럼 **따옴표 필수** — 따옴표 없는 `1.30`은 yaml이 float `1.3`으로 읽어 minor가 왜곡됩니다). 실제 적용 선언은 env `terraform.tfvars`의 `eks_cluster_version`/`eks_addon_versions`이고, 이 키는 라이브와의 drift 감지용입니다 — capture가 `describe-cluster` 실측으로 채우고, apply가 라이브와 다르면 안내를 띄웁니다. `apply`는 클러스터 버전을 바꾸지 않습니다 |
 | `db.engine_version` | **ecs 전용** — 기존 Aurora 클러스터의 실측 메이저 핀(예 `"16"`, `"16.13"`). parameter group family 를 그쪽에 맞춥니다. **기존 env 는 미선언 시 다음 plan 부터 family drift 가 뜨니 반드시 핀** — 신규 생성이면 비워 AWS 기본 버전을 씁니다 |
 | `db.*` | **ecs 전용** — tier 프리셋 위에 얹는 DB 세부 override: `mode`(serverless\|provisioned), `min_acu`/`max_acu`(0.5 단위, 0=일시정지), `instance_class`(provisioned 시). 매 `apply`마다 tfvars로 내려가므로 **업데이트 경로에서도 동작** — `configure`의 고급 분기나 직접 편집 후 apply. mode 전환은 재생성급 변경(노트 출력) |
 | `cache.*` | **ecs 전용** — ElastiCache override: `mode`(single\|replicated\|cluster), `node_type`(non-cluster·cluster 모두에 적용), `num_clusters`(non-cluster 노드 수 1~6 — replicated면 ≥2: primary+replica로 failover/Multi-AZ 자동), `num_node_groups`(cluster 샤드 수 1~90), `replicas_per_node_group`(cluster 샤드당 replica 1~5). `db.*`와 같은 override 관계. 토폴로지 키는 effective mode와 맞아야 하며 어긋나면 스키마가 거부합니다(terraform 무시 방지). node_type/mode 변경은 캐시 재기동·failover를 동반 |
@@ -259,6 +260,37 @@ deploy:
 단 `infra.db`/`infra.cache`(ecs)는 `deploy.sizing`처럼 매 apply의 tfvars에
 포함되므로 설치 후 크기 변경에도 씁니다. `validate`가 worst-case DB 커넥션
 예산을 이 override를 반영한 실효값으로 계산합니다.
+
+### `./deploy upgrade eks --to 1.<minor>` — EKS 버전 업그레이드
+
+`apply`는 클러스터 버전을 건드리지 않습니다(`eks_cluster_version`은 managed
+overlay 키가 아님) — 버전 변경은 순서가 있는 절차형 작업이라 전용 명령이 담당합니다:
+
+```bash
+./deploy upgrade eks --to 1.35        # 목표 명시
+./deploy upgrade eks                  # gateway.yaml infra.eks_version 사용
+./deploy upgrade eks --to 1.35 --plan # 홉 계획·애드온 기본 버전만 출력
+```
+
+동작 순서 — 라이브 버전을 `describe-cluster`로 읽은 뒤 **minor 한 칸씩** 홉을
+나눠(다중 점프는 EKS가 거부, 다운그레이드는 차단) 각 홉마다:
+
+1. env `terraform.tfvars`에 `eks_cluster_version` + `eks_addon_versions`
+   (`describe-addon-versions`의 해당 k8s 버전 `defaultVersion` 조합 — 조회
+   실패 시 진행하지 않음) 기록
+2. `terraform apply -target=module.eks` (스코프 밖 리소스는 건드리지 않음)
+3. 클러스터 `ACTIVE` + 버전 일치까지 대기(홉당 10~20분)
+4. 전체 deployment `rollout restart` — **Fargate kubelet은 파드 재생성 시에만
+   갱신**되므로 coredns/ESO/ALB controller를 포함해 전부 재기동합니다
+   (짧은 재기동 시간이 홉마다 발생합니다)
+
+완료되면 `gateway.yaml`의 `infra.eks_version`도 최종 버전으로 갱신합니다
+(선언=라이브 유지). 홉 중간에 실패하면 tfvars가 마지막 시도 버전을 남기고,
+재실행 시 라이브 조회로 재개됩니다.
+
+범위는 **클러스터 + 매니지드 애드온 3종**(coredns, kube-proxy, vpc-cni)뿐입니다
+— ALB controller·External Secrets 차트, Aurora 엔진은 별도 작업이며 이 명령이
+바꾸지 않습니다.
 
 ### `deploy.tfstate_bucket` / `deploy.tfstate_table`
 
