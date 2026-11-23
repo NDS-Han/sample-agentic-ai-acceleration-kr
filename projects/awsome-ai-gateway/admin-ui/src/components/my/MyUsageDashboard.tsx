@@ -16,7 +16,7 @@ import {
   YAxis,
 } from 'recharts';
 import type { MyBudgetResponse, MyUsageResponse, ModelUsage } from '@/lib/actions/my';
-import { fmtUsd, fmtUsdExact, usdTitle } from '@/lib/utils/format';
+import { fmtUsd, fmtUsdExact } from '@/lib/utils/format';
 import { modelDisplay } from '@/lib/utils/modelLabel';
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/common/Table';
 import { TokenMixDonutClient, TOKEN_BUCKETS } from '@/components/analytics/TokenMixDonutClient';
@@ -80,8 +80,7 @@ export function MyUsageDashboard({
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
             <KPICard
               title={t('totalCost')}
-              value={fmtUsd(totalCost)}
-              valueTitle={usdTitle(totalCost)}
+              value={fmtUsd(totalCost, { subCent: 'significant' })}
               icon={<DollarSign size={18} />}
               description={t('kpiCostDesc', { requests: totalRequests.toLocaleString() })}
             />

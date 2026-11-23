@@ -3,7 +3,7 @@
 // Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
 
 import { useTranslations } from 'next-intl';
-import { fmtUsd, usdTitle } from '@/lib/utils/format';
+import { fmtUsd } from '@/lib/utils/format';
 import { usePointInTime } from '@/components/common/usePointInTime';
 import type { MonitoringOverviewResponse } from '@/lib/actions/monitoring';
 
@@ -61,8 +61,8 @@ export function MonitoringOverview({ data }: { data: MonitoringOverviewResponse 
         />
         <StatCard
           label={t('totalCost')}
-          value={fmtUsd(h.total_cost_usd)}
-          valueTitle={usdTitle(h.total_cost_usd)}
+          // 단일 값 카드 — 1센트 미만도 유효숫자 2개($0.0071).
+          value={fmtUsd(h.total_cost_usd, { subCent: 'significant' })}
         />
         <StatCard label={t('activeModels')} value={String(data.active_models)} />
       </div>

@@ -86,6 +86,20 @@ describe('fmtUsd — 단일 비용 포맷', () => {
   it('precision 을 명시하면 그 자릿수 고정', () => {
     expect(fmtUsd(0.12345, 4)).toBe('$0.1235');
   });
+
+  it("subCent:'significant' — KPI 카드용, 1센트 미만도 유효숫자 2개", () => {
+    const kpi = { subCent: 'significant' } as const;
+    expect(fmtUsd(0.0071, kpi)).toBe('$0.0071');
+    expect(fmtUsd(0.000078, kpi)).toBe('$0.000078');
+    // ≥ $0.01 과 0 은 기본 규칙 그대로.
+    expect(fmtUsd(0, kpi)).toBe('$0.00');
+    expect(fmtUsd(0.009996, kpi)).toBe('$0.01');
+    expect(fmtUsd(1234.5, kpi)).toBe('$1,234.50');
+    // 옵션 객체의 precision 도 숫자 인자와 같다.
+    expect(fmtUsd(0.12345, { precision: 4 })).toBe('$0.1235');
+    // 기본값은 목록용 bucket.
+    expect(fmtUsd(0.0071, { subCent: 'bucket' })).toBe('< $0.01');
+  });
 });
 
 describe('fmtPricePerM — 단가도 같은 규칙', () => {

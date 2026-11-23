@@ -90,8 +90,7 @@ export function ServiceAccountDetail({ data, period }: Props) {
       <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
         <KPICard
           title={t('kpiCost')}
-          value={fmtUsd(s.cost_usd)}
-          valueTitle={usdTitle(s.cost_usd)}
+          value={fmtUsd(s.cost_usd, { subCent: 'significant' })}
           icon={<DollarSign size={18} />}
           description={t('kpiCostDesc', {
             success: s.success.toLocaleString(),
