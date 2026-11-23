@@ -247,6 +247,20 @@ class TestInspectUpgradePlan:
             tmp_path, tmp_path / "p", "1.35")
         assert any("파괴" in b for b in bad)
 
+    def test_time_sleep_replace_allowed(self, monkeypatch, tmp_path):
+        # terraform-aws-eks 의 데이터플레인 대기 리소스는 버전 변경마다
+        # 항상 create+delete — 상태 없는 sleep 이라 예외로 통과시킨다.
+        monkeypatch.setattr(
+            eks_upgrade, "_run_quiet",
+            lambda *a, **k: self._show([
+                self._rc("module.eks.module.eks.aws_eks_cluster.this[0]",
+                         ["update"], "1.34", "1.35"),
+                self._rc("module.eks.module.eks.time_sleep.this[0]",
+                         ["create", "delete"])]))
+        bad, changes, bump = eks_upgrade._inspect_upgrade_plan(
+            tmp_path, tmp_path / "p", "1.35")
+        assert not bad and bump and len(changes) == 2
+
     def test_version_bump_detected(self, monkeypatch, tmp_path):
         monkeypatch.setattr(
             eks_upgrade, "_run_quiet",

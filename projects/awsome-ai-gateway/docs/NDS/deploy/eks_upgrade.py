@@ -269,8 +269,13 @@ def _inspect_upgrade_plan(env_dir: Path, plan_path: Path,
             bad.append(f"{addr} — target 모듈(module.eks) 밖")
             continue
         if any(a in ("delete", "replace", "forget") for a in acts):
-            # 업그레이드 중 fargate profile/access entry 의 재생성·삭제는
-            # 클러스터 장애로 직결 — 절대 자동 승인하지 않는다.
+            # time_sleep 은 버전 변경마다 항상 create+delete 로 갈리는
+            # terraform-aws-eks 의 데이터플레인 대기 리소스 — 상태 데이터가
+            # 없어 재생성 = 다시 대기하는 것뿐이라 예외. 그 외 fargate
+            # profile/access entry 등의 재생성·삭제는 절대 자동 승인 안 함.
+            if ".time_sleep." in addr:
+                changes.append(addr)
+                continue
             bad.append(f"{addr} — 파괴적 변경({'+'.join(acts)}) — "
                        "terraform 단독 검토 필요")
             continue
