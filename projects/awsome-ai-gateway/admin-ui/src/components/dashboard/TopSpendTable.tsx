@@ -102,7 +102,10 @@ export function TopSpendTable({
                         <span className="block truncate">{r.name}</span>
                       )}
                       {r.subtitle && (
-                        <span className="block truncate text-[11px] font-normal text-muted-foreground">
+                        <span
+                          className="block truncate text-[11px] font-normal text-muted-foreground"
+                          title={r.subtitle}
+                        >
                           {r.subtitle}
                         </span>
                       )}
