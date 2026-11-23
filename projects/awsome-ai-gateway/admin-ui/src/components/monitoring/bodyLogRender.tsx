@@ -32,7 +32,12 @@ interface ChatMessage {
 }
 
 export function textFromContent(content: unknown): string {
-  if (typeof content === 'string') return content;
+  return textBlocksFromContent(content).join('\n');
+}
+
+/** content 의 텍스트 블록들 — 문자열 content 는 블록 하나. tool_use/result 는 제외. */
+export function textBlocksFromContent(content: unknown): string[] {
+  if (typeof content === 'string') return content ? [content] : [];
   if (Array.isArray(content)) {
     return content
       .map((p) => {
@@ -47,10 +52,9 @@ export function textFromContent(content: unknown): string {
         }
         return '';
       })
-      .filter(Boolean)
-      .join('\n');
+      .filter(Boolean);
   }
-  return '';
+  return [];
 }
 
 function requestMessages(body: Record<string, unknown>): ChatMessage[] {
@@ -65,14 +69,43 @@ function requestMessages(body: Record<string, unknown>): ChatMessage[] {
 // ── 주입 블록(XML 태그로 감싼 컨텍스트) 분리 ───────────────────────────────────
 // Claude Code 는 user 메시지 안에 <system-reminder>, <local-command-stdout>,
 // 환경 정보·스킬 목록 등을 수천 줄 끼워 넣는다 — 실제 입력('hi')이 그 밑에
-// 묻히므로 줄 맨 앞에서 시작해 같은 이름으로 닫히는 태그 블록을 접어 둔다.
-// 원문은 펼치기와 Raw JSON 으로 그대로 볼 수 있다(표시만 바꾼다).
+// 묻히므로 태그 블록을 접어 둔다. 원문은 펼치기와 Raw JSON 으로 그대로 볼 수
+// 있다(표시만 바꾼다 — 접힌 블록·사이 텍스트를 이으면 원문과 같다).
+//
+// 접는 규칙(본문 뷰):
+//  - 줄 맨 앞(들여쓰기 허용)에서 열리고 같은 이름으로 닫히는 태그 블록 — 이름 무관.
+//  - Claude Code 주입 태그(system-reminder, local-command-*, command-*)는 줄 중간
+//    (인라인)에 있어도 접는다. /model 같은 슬래시 명령은
+//    '<command-name>/model</command-name>\n            <command-message>…' 처럼
+//    두 번째 태그부터 들여쓰기로 붙는다.
+//  - 자기 완결 태그(<x/>)도 같은 위치 규칙.
+// 사용자가 쓴 임의의 인라인 태그(<b>…</b>)는 본문에서 접지 않는다.
 
 export type TextSegment =
   | { kind: 'text'; text: string }
   | { kind: 'block'; tag: string; text: string };
 
-const INJECTED_BLOCK = /^<([A-Za-z][\w:.-]*)(?:\s[^>]*)?>[\s\S]*?<\/\1>/gm;
+const TAG = String.raw`[A-Za-z][\w:.-]*`;
+const KNOWN_TAG = String.raw`(?:system-reminder|local-command-[\w-]*|command-[\w-]*)`;
+// 여는 태그의 속성 — '/>' 로 끝나는 자기 완결 태그를 여는 태그로 오인하지 않게
+// 닫는 '>' 앞의 '/' 를 배제한다. 자기 완결 쪽은 SELF_END 로.
+const ATTRS = String.raw`(?:\s[^>]*)?(?<!\/)`;
+const SELF_END = String.raw`(?:\s[^>]*)?\/>`;
+const LINE_START = String.raw`(?<=^[ \t]*)`;
+
+const INJECTED_BLOCK = new RegExp(
+  [
+    // 1) 줄 맨 앞(들여쓰기 허용) — 아무 태그 쌍
+    String.raw`${LINE_START}<(${TAG})${ATTRS}>[\s\S]*?<\/\1>`,
+    // 2) 어디서든 — 주입 태그 쌍
+    String.raw`<(${KNOWN_TAG})${ATTRS}>[\s\S]*?<\/\2>`,
+    // 3) 줄 맨 앞 — 자기 완결 태그
+    String.raw`${LINE_START}<(${TAG})${SELF_END}`,
+    // 4) 어디서든 — 주입 자기 완결 태그
+    String.raw`<(${KNOWN_TAG})${SELF_END}`,
+  ].join('|'),
+  'gm',
+);
 
 export function splitInjectedBlocks(text: string): TextSegment[] {
   const out: TextSegment[] = [];
@@ -80,31 +113,77 @@ export function splitInjectedBlocks(text: string): TextSegment[] {
   for (const m of text.matchAll(INJECTED_BLOCK)) {
     const start = m.index ?? 0;
     if (start > last) out.push({ kind: 'text', text: text.slice(last, start) });
-    out.push({ kind: 'block', tag: m[1], text: m[0] });
+    out.push({ kind: 'block', tag: m[1] ?? m[2] ?? m[3] ?? m[4], text: m[0] });
     last = start + m[0].length;
   }
   if (last < text.length) out.push({ kind: 'text', text: text.slice(last) });
   return out;
 }
 
-/** 주입 블록을 뺀 실제 텍스트 — 요약('마지막 사용자 텍스트')용. */
+// 요약용 — 본문 뷰보다 공격적으로, 위치·이름과 무관하게 모든 태그 블록을 지운다.
+const ANY_TAG_PAIR = new RegExp(String.raw`<(${TAG})${ATTRS}>[\s\S]*?<\/\1>`, 'g');
+const ANY_SELF_CLOSING = new RegExp(String.raw`<${TAG}${SELF_END}`, 'g');
+
+/** 태그 블록을 모두 뺀 실제 텍스트 — 남은 공백 줄은 접는다. 요약 전용(손실 있음). */
 export function stripInjectedBlocks(text: string): string {
-  return splitInjectedBlocks(text)
-    .filter((seg) => seg.kind === 'text')
-    .map((seg) => seg.text)
-    .join('')
+  let prev: string;
+  let out = text;
+  // 바깥 블록을 지우면 안쪽이 드러나는 중첩·인접 케이스까지 — 변화가 없을 때까지.
+  do {
+    prev = out;
+    out = out.replace(ANY_TAG_PAIR, '').replace(ANY_SELF_CLOSING, '');
+  } while (out !== prev);
+  return out
+    .replace(/^[ \t]+$/gm, '')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
 }
 
-/** 가장 최근 user 턴 중 주입 블록을 빼고도 텍스트가 남는 것 — 툴 결과만 있는 턴은 건너뛴다. */
+/**
+ * 요약의 '마지막 사용자 텍스트' — 가장 최근 user 턴의, 태그를 지우고도 텍스트가
+ * 남는 **마지막 텍스트 블록**. Claude Code 는 응답 없이 이어진 user 메시지를 한
+ * 메시지의 여러 블록으로 합쳐 보낸다(['hi', '<command-name>/model…', '<local-
+ * command-stdout>…', 'hi']) — 턴 전체를 이으면 이전 입력까지 섞이므로 마지막
+ * 블록만 쓴다. 전체는 아래 대화 뷰에 그대로 있다. 툴 결과만 있는 턴은 건너뛴다.
+ */
 export function lastUserText(turns: ConversationTurn[]): string {
   for (let i = turns.length - 1; i >= 0; i--) {
     if (turns[i].role !== 'user') continue;
-    const text = stripInjectedBlocks(turns[i].text);
-    if (text) return text;
+    const blocks = turns[i].blocks ?? [turns[i].text];
+    for (let j = blocks.length - 1; j >= 0; j--) {
+      const text = stripInjectedBlocks(blocks[j]);
+      if (text) return text;
+    }
   }
   return '';
+}
+
+// ── 긴 텍스트 접기 ────────────────────────────────────────────────────────────
+// 태그로 감싸지 않은 거대 블록(Claude Code 환경 정보 '# Environment' + 디퍼드 툴
+// 목록 + 스킬 목록 등 수천 줄)이 그대로 펼쳐져 대화가 묻힌다. 기준:
+//  - 40줄 초과 또는 4,000자 초과 → 접힘. 4,000자는 tool_result 표시 상한
+//    (TOOL_RESULT_DISPLAY_MAX)과 같고, 40줄은 다이얼로그 한 화면 남짓이다 —
+//    보통의 사용자 프롬프트·어시스턴트 답변은 펼친 채로 남는다.
+//  - 접힌 상태는 앞 5줄(최대 1,000자 — 한 줄짜리 거대 텍스트 대비)과
+//    'Show all (N lines, M chars)' 토글.
+export const LONG_TEXT_MAX_LINES = 40;
+export const LONG_TEXT_MAX_CHARS = 4000;
+export const LONG_TEXT_PREVIEW_LINES = 5;
+export const LONG_TEXT_PREVIEW_MAX_CHARS = 1000;
+
+function lineCount(text: string): number {
+  return text.split('\n').length;
+}
+
+export function isLongText(text: string): boolean {
+  return text.length > LONG_TEXT_MAX_CHARS || lineCount(text) > LONG_TEXT_MAX_LINES;
+}
+
+export function longTextPreview(text: string): string {
+  const head = text.split('\n').slice(0, LONG_TEXT_PREVIEW_LINES).join('\n');
+  return head.length > LONG_TEXT_PREVIEW_MAX_CHARS
+    ? `${head.slice(0, LONG_TEXT_PREVIEW_MAX_CHARS)}…`
+    : `${head}…`;
 }
 
 // ── 전체 대화 스레드 ──────────────────────────────────────────────────────────
@@ -125,6 +204,8 @@ export interface ToolResult {
 export interface ConversationTurn {
   role: string;
   text: string;
+  /** chat 메시지의 텍스트 블록(content[] 순서) — 요약이 마지막 블록을 고를 때 쓴다. */
+  blocks?: string[];
   tools: ToolUse[];
   results: ToolResult[];
   /** 원본 messages[]/input[] 의 인덱스 — historyStart 접기는 이 단위로 한다
@@ -229,7 +310,8 @@ export function conversationTurns(body: Record<string, unknown>): ConversationTu
     }
 
     // ── anthropic / openai chat 메시지 ────────────────────────────────────
-    const text = textFromContent(m?.content);
+    const blocks = textBlocksFromContent(m?.content);
+    const text = blocks.join('\n');
     const tools: ToolUse[] = [];
     const results: ToolResult[] = [];
     if (Array.isArray(m?.content)) {
@@ -257,6 +339,7 @@ export function conversationTurns(body: Record<string, unknown>): ConversationTu
       turns.push({
         role: typeof m?.role === 'string' ? m.role : '?',
         text,
+        blocks,
         tools,
         results,
         msgIndex,
@@ -681,21 +764,46 @@ function toolInputJson(input: unknown): string {
   }
 }
 
-/** 턴 본문 — 주입 블록은 태그명·길이만 보이게 접고, 나머지 텍스트는 그대로. */
+/** 긴 텍스트 — 기준(isLongText)을 넘으면 앞부분 + 'Show all' 토글. 내용은 그대로. */
+export function LongText({ text, className }: { text: string; className: string }) {
+  const t = useTranslations('monitoring.bodyLogs');
+  const [open, setOpen] = useState(false);
+  if (!isLongText(text)) return <pre className={className}>{text}</pre>;
+  return (
+    <div>
+      <pre className={className}>{open ? text : longTextPreview(text)}</pre>
+      <button
+        type="button"
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+        className="mt-0.5 text-xs text-primary hover:underline"
+      >
+        {open
+          ? t('showLessText')
+          : t('showAllText', { lines: lineCount(text), chars: text.length })}
+      </button>
+    </div>
+  );
+}
+
+// 조각 앞뒤의 빈 줄만 걷는다 — 들여쓰기·내용은 그대로(본문 뷰는 무손실).
+function trimBlankLines(text: string): string {
+  return text.replace(/^(?:[ \t]*\n)+/, '').replace(/(?:\n[ \t]*)+$/, '');
+}
+
+/** 턴 본문 — 주입 블록은 태그명·길이만 보이게 접고, 나머지 텍스트는 그대로(길면 접힘). */
 function InjectedText({ text, className }: { text: string; className: string }) {
   const t = useTranslations('monitoring.bodyLogs');
   const segments = splitInjectedBlocks(text);
   if (segments.length === 1 && segments[0].kind === 'text') {
-    return <pre className={className}>{text}</pre>;
+    return <LongText text={text} className={className} />;
   }
   return (
     <div className="space-y-1">
       {segments.map((seg, i) =>
         seg.kind === 'text' ? (
           seg.text.trim() ? (
-            <pre key={i} className={className}>
-              {seg.text.trim()}
-            </pre>
+            <LongText key={i} text={trimBlankLines(seg.text)} className={className} />
           ) : null
         ) : (
           <Collapsible
@@ -729,6 +837,34 @@ export function cacheTokenParts(
 ): { read: string; write: string } | null {
   if (!(read && read > 0) && !(write && write > 0)) return null;
   return { read: fmtTokensCompact(read ?? 0), write: fmtTokensCompact(write ?? 0) };
+}
+
+/** 표의 빈 셀 — 다른 열과 같은 em dash. */
+export const EMPTY_CELL = '—';
+
+const KNOWN_CALL_STATUS = new Set(['ERROR', 'TIMEOUT', 'SLOW_REQUEST', 'SUCCESS']);
+
+/** 호출 상태 배지 — 요청 상세와 같은 톤·번역 라벨(OK/Error/Timeout). 없으면 —. */
+export function CallStatusBadge({ status }: { status: string | null | undefined }) {
+  const tev = useTranslations('monitoring.events');
+  if (!status) return <span className="text-muted-foreground">{EMPTY_CELL}</span>;
+  const label = KNOWN_CALL_STATUS.has(status)
+    ? tev(`types.${status}` as 'types.SUCCESS')
+    : status;
+  return <Badge tone={statusTone(status)}>{label}</Badge>;
+}
+
+/** 캐시 R/W 셀 텍스트 — 캐시 토큰이 없으면 —. */
+export function CacheCell({
+  read,
+  write,
+}: {
+  read?: number | null;
+  write?: number | null;
+}) {
+  const t = useTranslations('monitoring.bodyLogs');
+  const c = cacheTokenParts(read, write);
+  return <>{c ? t('cacheShort', c) : EMPTY_CELL}</>;
 }
 
 /** 앱 표시 라벨 — 다른 화면과 같은 'Claude Code'/'Other'. */

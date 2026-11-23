@@ -1316,6 +1316,8 @@
       "summaryNoResponse": "No response text.",
       "summaryToolCalls": "Tool calls: {names}",
       "charsCount": "{count, number} chars",
+      "showAllText": "Show all ({lines, number} lines, {chars, number} chars)",
+      "showLessText": "Show less",
       "injectedHint": "Injected block (collapsed) — expand to read, or use Raw JSON.",
       "cacheReadLabel": "Cache read",
       "cacheWriteLabel": "Cache write",
