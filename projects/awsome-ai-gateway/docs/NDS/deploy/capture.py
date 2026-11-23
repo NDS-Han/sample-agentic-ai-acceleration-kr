@@ -979,6 +979,18 @@ def _tf_backend(env_dir: Path) -> dict:
     return dict((state.get("backend") or {}).get("config") or {})
 
 
+def _tf_backend_key(env_dir: Path) -> str:
+    """backend.tf 에 선언된 state key — env 마다 다른 경로라 -backend-config
+    로 주입되지 않는 유일한 backend 값. 캐시 backend 와 대조해 key 오염
+    (다른 key 로 수동 -reconfigure)을 잡는다."""
+    try:
+        m = re.search(r'key\s*=\s*"([^"]+)"',
+                      (env_dir / "backend.tf").read_text())
+    except OSError:
+        return ""
+    return m.group(1) if m else ""
+
+
 def _tfvars(env_dir: Path, extra_files: list[Path] | None = None) -> dict[str, object]:
     """env tfvars 의 스칼라/문자열 리스트 — 캡처 스키마 키용 부분집합 파서.
     terraform.tfvars + *.auto.tfvars + extra_files(gen managed overlay 등,

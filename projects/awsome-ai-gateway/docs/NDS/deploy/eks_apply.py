@@ -1343,9 +1343,15 @@ def _tf_init(cfg: GatewayConfig, env_dir: Path) -> subprocess.CompletedProcess:
         from .bootstrap import default_tfstate_names
         db, dt = default_tfstate_names(cfg, eks=True)
         bucket, table = bucket or db, table or dt
+    # region 도 선언값으로 넘긴다 — env backend.tf 의 region 은 deliverable
+    # 기본값(ap-northeast-2) 그대로인 경우가 있어, 실제 state 리전(ap-south-1
+    # 등)과 어긋나면 init 이 S3 301 로 실패한다. state 리전은 배포 리전과
+    # 같은 관례(bootstrap 이 cfg.aws.region 에 만든다) — key 만 backend.tf
+    # 소유로 남긴다 (env 마다 다른 경로).
     argv = ["terraform", "init", "-input=false", "-reconfigure",
             f"-backend-config=bucket={bucket}",
-            f"-backend-config=dynamodb_table={table}"]
+            f"-backend-config=dynamodb_table={table}",
+            f"-backend-config=region={cfg.aws.region}"]
     return _run_quiet(argv, cwd=env_dir, timeout=300)
 
 
@@ -1358,7 +1364,7 @@ def _warn_stale_backend(cfg: GatewayConfig, env_dir: Path) -> None:
     캐시와 선언을 대조해 불일치일 때만 경고한다. 보조 검사용 — 자체 실패는
     본 흐름을 막지 않는다."""
     try:
-        from .capture import _tf_backend
+        from .capture import _tf_backend, _tf_backend_key
         from .bootstrap import default_tfstate_names
 
         cached = _tf_backend(env_dir)
@@ -1368,8 +1374,15 @@ def _warn_stale_backend(cfg: GatewayConfig, env_dir: Path) -> None:
         bad = [(n, c, d) for n, c, d in
                (("bucket", str(cached.get("bucket", "")), decl_b),
                 ("dynamodb_table", str(cached.get("dynamodb_table", "")),
-                 decl_t))
-               if c and c != d]
+                 decl_t),
+                # key 는 backend.tf 소유 — 다른 key 로 수동 init 된 캐시는
+                # 빈/다른 state 를 읽는다 (캐시 오염 유형)
+                ("key", str(cached.get("key", "")),
+                 _tf_backend_key(env_dir)),
+                # region 은 선언 aws.region — 틀리면 init 이 301 로 실패하고
+                # 캐시가 다른 리전을 가리키면 outputs 도 그쪽이다
+                ("region", str(cached.get("region", "")), cfg.aws.region))
+               if c and d and c != d]
         if bad:
             detail = ", ".join(f"{n}: 선언 {d!r} ≠ 캐시 {c!r}"
                                for n, c, d in bad)

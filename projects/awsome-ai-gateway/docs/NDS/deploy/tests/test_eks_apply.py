@@ -1484,6 +1484,9 @@ def test_tf_init_always_reconfigures_backend(monkeypatch, tmp_path):
     assert "-reconfigure" in argv
     assert "-backend-config=bucket=my-bkt" in argv
     assert "-backend-config=dynamodb_table=my-tbl" in argv
+    # region 도 선언값 — backend.tf 기본값(deliverable)과 실제 state 리전이
+    # 어긋나면 init 이 S3 301 로 실패한다
+    assert "-backend-config=region=ap-northeast-2" in argv
 
 
 def test_load_meta_rejects_nonmapping(tmp_path):
@@ -1881,6 +1884,32 @@ def test_warn_stale_backend_flags_cache_mismatch(tmp_path, capsys):
     eks_apply._warn_stale_backend(cfg, env_dir)
     err = capsys.readouterr().err
     assert "캐시 backend" in err and "stale-bucket" in err
+
+
+def test_warn_stale_backend_flags_key_and_region(tmp_path, capsys):
+    """bucket/table 이 같아도 key(수동 -reconfigure 오염)나 region(backend.tf
+    기본값과 다른 실제 리전)이 다르면 다른 state 라 경고한다. key 선언은
+    backend.tf 에서 읽는다."""
+    import json
+    from deploy import schema
+    cfg = schema.from_dict({
+        "version": 1, "env": "dev",
+        "aws": {"region": "ap-south-1", "account_id": "123456789012"},
+        "deploy": {"target": "eks", "size_tier": "t3",
+                   "tfstate_bucket": "bkt", "tfstate_table": "tbl"},
+        "features": {"notifications": {"provider": "mock"}},
+        "images": {"tag": "v1"}})
+    env_dir = tmp_path / "env"
+    (env_dir / ".terraform").mkdir(parents=True)
+    (env_dir / "backend.tf").write_text(
+        'terraform { backend "s3" { key = "dev/terraform.tfstate" } }')
+    (env_dir / ".terraform" / "terraform.tfstate").write_text(json.dumps(
+        {"backend": {"type": "s3", "config": {
+            "bucket": "bkt", "dynamodb_table": "tbl",
+            "key": "terraform.tfstate", "region": "ap-northeast-2"}}}))
+    eks_apply._warn_stale_backend(cfg, env_dir)
+    err = capsys.readouterr().err
+    assert "key" in err and "region" in err
 
 
 def test_dynamic_set_args_injects_brand_name():
