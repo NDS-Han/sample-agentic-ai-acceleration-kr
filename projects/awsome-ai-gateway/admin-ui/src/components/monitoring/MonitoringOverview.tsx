@@ -40,7 +40,7 @@ export function MonitoringOverview({ data }: { data: MonitoringOverviewResponse 
             TZ 이름을 같이 적어 어느 시계 기준인지 분명히 한다. */}
         <span className="text-xs text-muted-foreground" title={pit.title}>
           {/* 마운트 전에는 비워 둔다 — 파드 TZ 로 그린 시각이 잠깐 보이지 않게. */}
-          {pit.tz ? t('asOf', { time: pit.dateTime(data.timestamp), tz: pit.abbr }) : '\u00a0'}
+          {pit.tz ? t('asOf', { time: pit.dateTime(data.timestamp), tz: pit.zoneAt(data.timestamp) }) : '\u00a0'}
         </span>
       </div>
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4">

@@ -163,13 +163,14 @@ export function MessageBubble({ message, onPlanProceed, sessionId }: Props) {
           {isUser ? t('you') : t('assistantName')}
           {/* 보낸 시각 — 브라우저 TZ + 이름. 마운트 전(pit.tz=null)에는 그리지 않는다. */}
           {message.createdAt && pit.tz && (
-            <span className="ml-2 text-muted-foreground/70" title={pit.title}>
+            <span className="ml-2 text-muted-foreground/70" title={pit.cellTitle(message.createdAt)}>
               {new Date(message.createdAt).toLocaleTimeString('ko-KR', {
                 hour: '2-digit',
                 minute: '2-digit',
                 timeZone: pit.tz,
               })}{' '}
-              {pit.abbr}
+              {/* 그 메시지 시점의 약어 — 'now' 약어면 DST 전환 전 메시지가 틀린다. */}
+              {pit.zoneAt(message.createdAt)}
             </span>
           )}
         </div>

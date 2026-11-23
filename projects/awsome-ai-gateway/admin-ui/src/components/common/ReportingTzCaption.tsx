@@ -5,12 +5,13 @@
 import { useTranslations } from 'next-intl';
 
 import { useDisplayTz, useIsClient, useReportingTz } from '@/components/common/ReportingTimezoneProvider';
-import { tzAbbr, tzZoneText } from '@/lib/utils/timezone';
+import { tzZoneLabel, tzZoneText } from '@/lib/utils/timezone';
 
 /**
  * 리포팅 TZ(REPORTING_TIMEZONE, 배포 리전) 기준으로 나뉜 차트·표의 캡션 —
- * 'Dates in IST (Asia/Kolkata)'. 시점 시각은 브라우저 TZ 라 두 시계를 헷갈리지
- * 않게 버킷 기준을 한 번 적는다. 이름은 env 의 IANA TZ 에서 유도(하드코딩 없음).
+ * 'Dates in IST (Asia/Kolkata)', 'Dates in ET (America/New_York)'. 시점 시각은 브라우저
+ * TZ 라 두 시계를 헷갈리지 않게 버킷 기준을 한 번 적는다. 이름은 env 의 IANA TZ 에서
+ * 유도(하드코딩 없음)하고 DST 독립이다 — 'EST'/'EDT' 같은 계절 약어를 쓰지 않는다.
  * 약어가 날짜(서머타임)에 따라 달라 SSR 과 어긋나지 않도록 마운트 후에만 그린다.
  */
 export function ReportingTzCaption({
@@ -51,7 +52,7 @@ export function BrowserTzCaption({ className = '' }: { className?: string }) {
       title={tz ? t('viewerTzHint', { tz }) : undefined}
       aria-hidden={!tz || undefined}
     >
-      {tz ? t('browserTzCaption', { zone: tzAbbr(tz) }) : '\u00a0'}
+      {tz ? t('browserTzCaption', { zone: tzZoneLabel(tz) }) : '\u00a0'}
     </p>
   );
 }

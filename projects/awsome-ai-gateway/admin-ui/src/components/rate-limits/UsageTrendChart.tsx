@@ -27,6 +27,7 @@ import {
 } from '@/lib/utils/rateLimitUsage';
 import { useDisplayTz } from '@/components/common/ReportingTimezoneProvider';
 import { BrowserTzCaption } from '@/components/common/ReportingTzCaption';
+import { tzHasDst, tzOffset } from '@/lib/utils/timezone';
 
 const WINDOWS: TrendWindow[] = ['1h', '6h', '24h', '7d'];
 const WINDOW_LABEL: Record<TrendWindow, string> = {
@@ -79,6 +80,23 @@ export function fmtTick(
     return `${get('month')}/${get('day')} ${clock}`;
   }
   return `${hh}:${mm}`;
+}
+
+/**
+ * 툴팁 라벨 — fmtTick 에 DST 존이면 그 시점의 UTC 오프셋을 붙인다.
+ * 가을 전환일엔 현지 01시대가 두 번 오므로('11/1 01:00' ×2) 오프셋('GMT-7'/'GMT-8')
+ * 없이는 두 점이 구분되지 않는다. DST 없는 존(Asia/Kolkata·Asia/Seoul)은 종전 그대로.
+ */
+export function fmtTooltipTime(
+  t: number,
+  bucketSec: number,
+  timeZone?: string,
+  locale: string = 'ko',
+): string {
+  const label = fmtTick(t, bucketSec, timeZone, locale);
+  const tz = timeZone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const at = new Date(t * 1000);
+  return tzHasDst(tz, at) ? `${label} ${tzOffset(tz, at)}` : label;
 }
 
 function fmtValue(v: number, metric: Metric): string {
@@ -207,7 +225,7 @@ export function UsageTrendChart({ scope, scopeId, limits }: UsageTrendChartProps
               <Tooltip
                 // 진행 중 버킷(마지막 점)은 아직 다 차지 않았다 — 툴팁 라벨에 표시.
                 labelFormatter={(v, items) =>
-                  fmtTick(Number(v), trend.bucket_sec, displayTz, locale) +
+                  fmtTooltipTime(Number(v), trend.bucket_sec, displayTz, locale) +
                   (items?.[0]?.payload?.partial ? ` ${t('trendPartial')}` : '')
                 }
                 formatter={(v) => [fmtValue(Number(v), metric), metric.toUpperCase()]}

@@ -75,6 +75,7 @@
     "unverifiedEmailHint": "This user's email is not verified in Cognito, so it is stored as an identifier. Set email_verified=true in Cognito, then click Sync Cognito.",
     "withZone": "{label} ({zone})",
     "viewerTzHint": "Shown in your browser time zone ({tz})",
+    "viewerTzCellHint": "{zone}, your browser time zone ({tz})",
     "browserTzCaption": "Times in {zone} (your browser)",
     "reportingTz": {
       "dates": "Dates in {zone}",
@@ -908,6 +909,8 @@
     "costSeriesOther": "Other",
     "date": "Date",
     "invalidDateRange": "The start date must be before the end date. Please adjust the date range.",
+    "rangeTooLong": "The date range can be at most {max, number} days (1 year). Shorten the range.",
+    "rangeMaxHint": "Up to {max, number} days (1 year)",
     "customSeedHint": "Custom ranges show recorded usage only — amounts migrated from earlier data aren't included.",
     "clientFilterLabel": "App filter applied:",
     "clientFilterClear": "Clear filter"

@@ -23,11 +23,36 @@ _TZ_ALIAS_HINTS: dict[str, str] = {
     "MST": "America/Denver",
     "MDT": "America/Denver",
     "GMT": "UTC",
+    "CET": "Europe/Berlin",
+    "CEST": "Europe/Berlin",
+    "BST": "Europe/London",
+    "EST5EDT": "America/New_York",
+    "PST8PDT": "America/Los_Angeles",
     "US/PACIFIC": "America/Los_Angeles",
     "US/EASTERN": "America/New_York",
     "US/CENTRAL": "America/Chicago",
     "US/MOUNTAIN": "America/Denver",
 }
+
+
+# 정규 IANA 이름의 지역 접두사. 이 밖의 이름("EST", "MST", "HST", "EST5EDT", "CET",
+# "US/Pacific", "GMT" …)은 tzdata 의 레거시/backward 항목이라 **설치된 tzdata 에 따라
+# 통과 여부가 갈린다** — Debian slim(런타임 이미지)은 tzdata 에 포함해 ZoneInfo 가
+# 받아 주지만, tzdata-legacy 를 분리한 배포판에선 거부된다. 특히 "EST"/"MST"/"HST"
+# 는 **DST 없는 고정 오프셋**이라 미국 배포가 America/New_York 대신 "EST" 를 쓰면
+# 여름 내내 일·월 경계가 1시간 어긋난다. 그래서 ZoneInfo 로드 가능 여부와 별개로
+# 모양부터 고정한다.
+_IANA_AREAS = (
+    "Africa", "America", "Antarctica", "Arctic", "Asia", "Atlantic",
+    "Australia", "Europe", "Indian", "Pacific", "Etc",
+)
+
+
+def _is_canonical_iana_shape(v: str) -> bool:
+    if v == "UTC":
+        return True
+    area, sep, rest = v.partition("/")
+    return bool(sep and rest) and area in _IANA_AREAS
 
 
 def _reporting_timezone_error(v: str) -> str:
@@ -348,6 +373,8 @@ class Settings(BaseSettings):
         aren't always valid `ZoneInfo` keys) instead of a 500 at query time."""
         from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+        if not _is_canonical_iana_shape(v):
+            raise ValueError(_reporting_timezone_error(v))
         try:
             ZoneInfo(v)
         except (ZoneInfoNotFoundError, ValueError) as e:

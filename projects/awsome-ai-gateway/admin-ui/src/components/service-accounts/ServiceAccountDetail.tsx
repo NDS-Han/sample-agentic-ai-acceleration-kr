@@ -170,11 +170,11 @@ export function ServiceAccountDetail({ data, period }: Props) {
                     {t(`keyStatus.${k.status}` as 'keyStatus.ACTIVE' | 'keyStatus.EXPIRED' | 'keyStatus.REVOKED')}
                   </Badge>
                 </Td>
-                <Td className="text-muted-foreground" title={pit.title}>
+                <Td className="text-muted-foreground" title={pit.cellTitle(k.issued_at) ?? pit.title}>
                   {pit.stamp(k.issued_at)}
                 </Td>
                 <Td className="text-muted-foreground">{fmtDate(k.expires_at, tz)}</Td>
-                <Td className="text-muted-foreground" title={pit.title}>
+                <Td className="text-muted-foreground" title={pit.cellTitle(k.last_request_at) ?? pit.title}>
                   {k.last_request_at ? pit.stamp(k.last_request_at) : '—'}
                 </Td>
                 <Td numeric className="text-muted-foreground">

@@ -127,7 +127,7 @@ export function EventLog({
           <TBody>
             {data.events.map((ev, i) => (
               <Tr key={`${ev.timestamp}-${i}`}>
-                <Td className="text-muted-foreground whitespace-nowrap num">
+                <Td className="text-muted-foreground whitespace-nowrap num" title={pit.cellTitle(ev.timestamp)}>
                   {pit.dateTime(ev.timestamp)}
                 </Td>
                 <Td>

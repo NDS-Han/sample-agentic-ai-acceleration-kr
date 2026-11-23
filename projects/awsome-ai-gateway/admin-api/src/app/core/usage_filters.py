@@ -26,7 +26,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import ColumnElement, and_, func, literal
 
 from app.core.config import get_settings
-from app.core.exceptions import ValidationError
+from app.core.exceptions import DateRangeTooLongError, ValidationError
 from app.models.usage import UsageLog, UsageStatus
 
 # 기본 리포팅 타임존(Asia/Seoul)의 고정 오프셋. 한국은 DST 가 없어 불변이다.
@@ -182,6 +182,12 @@ def kst_period_range_filter(column: ColumnElement, period: str) -> ColumnElement
 
 _DAY_RE = re.compile(r"([0-9]{4})-([0-9]{2})-([0-9]{2})")
 
+#: custom 일자 구간의 최대 길이(양끝 포함 일수) — 1년(윤년 포함). admin-ui 의
+#: MAX_RANGE_DAYS(src/lib/utils/period.ts)와 같은 값이어야 한다: UI 는 날짜 선택기
+#: min/max 와 안내로 막고, API 는 직접 호출까지 422 로 막는다. 상한이 없으면
+#: '2000-01-01~2100-12-31' 같은 구간이 일별 추이 쿼리를 수만 버킷으로 키운다.
+MAX_RANGE_DAYS = 366
+
 
 def day_range_to_utc(start_day: str, end_day: str) -> tuple[datetime, datetime]:
     """리포팅 타임존 기준 'YYYY-MM-DD' 두 개 → UTC 반개구간 [start, end).
@@ -193,6 +199,10 @@ def day_range_to_utc(start_day: str, end_day: str) -> tuple[datetime, datetime]:
     입력이 형식 검사를 통과해 엉뚱한 경계를 만들거나 `int()` 가 맨 ValueError 로 터져
     **500** 이 된다(period_to_utc_range 주석의 같은 교훈). 형식은 정규식으로, 달력
     유효성은 `date.fromisoformat` 으로 확인하고 어긋나면 ValidationError → **400**.
+    구간이 MAX_RANGE_DAYS 를 넘으면 DateRangeTooLongError → **422**.
+
+    DST: 경계는 리포팅 tz 의 **달력 날짜 00:00** 을 zoneinfo 로 UTC 에 옮긴 값이라
+    전환일 하루는 23h/25h 가 된다(고정 오프셋·`+24h` 산술이 아님).
     """
     for label, value in (("start", start_day), ("end", end_day)):
         if not (isinstance(value, str) and _DAY_RE.fullmatch(value)):
@@ -204,6 +214,12 @@ def day_range_to_utc(start_day: str, end_day: str) -> tuple[datetime, datetime]:
         raise ValidationError(f"invalid calendar date: {exc}") from exc
     if end_date < start_date:
         raise ValidationError(f"end day {end_day} precedes start day {start_day}")
+    span_days = (end_date - start_date).days + 1
+    if span_days > MAX_RANGE_DAYS:
+        raise DateRangeTooLongError(
+            f"date range {start_day}~{end_day} spans {span_days} days; "
+            f"the maximum is {MAX_RANGE_DAYS} days (1 year)"
+        )
     if not _PERIOD_MIN_YEAR <= start_date.year <= _PERIOD_MAX_YEAR:
         raise ValidationError(
             f"start year must be {_PERIOD_MIN_YEAR}-{_PERIOD_MAX_YEAR} (got {start_day!r})"
