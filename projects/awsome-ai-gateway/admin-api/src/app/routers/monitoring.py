@@ -142,6 +142,11 @@ async def monitoring_events(
             UsageLog.ttft_ms,
             UsageLog.cost_usd,
             UsageLog.downgraded_from,
+            UsageLog.client,
+            UsageLog.input_tokens,
+            UsageLog.output_tokens,
+            UsageLog.cache_read_tokens,
+            UsageLog.cache_creation_tokens,
         )
         # user_email 은 auth.users 조인 — agent/service 토큰 요청은 user_id 가
         # NULL 이라 outer join(없으면 그 행이 통째로 빠진다).
@@ -200,6 +205,14 @@ async def monitoring_events(
             "event_type": ev_type,
             "ttft_ms": row.ttft_ms,
             "latency_ms": row.latency_ms,
+            # 본문 로그 By request 목록의 비용·토큰 열 — 캐시 토큰이 없으면
+            # 'Tokens 2→14 인데 $0.08' 처럼 비용과 토큰이 안 맞아 보인다.
+            "client": row.client,
+            "cost_usd": float(row.cost_usd) if row.cost_usd is not None else None,
+            "input_tokens": row.input_tokens,
+            "output_tokens": row.output_tokens,
+            "cache_read_tokens": row.cache_read_tokens,
+            "cache_write_tokens": row.cache_creation_tokens,
             "detail": f"ttft={ttft_str}, total={row.latency_ms}ms, cost=${float(row.cost_usd):.4f}",
         })
 
