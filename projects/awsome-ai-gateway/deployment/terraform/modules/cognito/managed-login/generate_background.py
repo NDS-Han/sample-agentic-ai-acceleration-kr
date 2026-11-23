@@ -57,6 +57,8 @@ N_NODES = 110               # 배경 성좌 노드 수
 MIN_GAP = 62                # 노드 간 최소 거리
 N_CLIENTS = 12              # 허브로 들어오는 엣지(트래픽 점이 흐름)
 N_MODELS = 6                # 허브에서 나가는 엣지
+MESH_TRAFFIC = 0.55         # 배경 메시 엣지 중 희미한 점이 흐르는 비율
+TWINKLE_RATIO = 0.3         # 깜빡이는 노드 비율
 # 문구가 놓이는 영역(그래프 좌표 근사) — 노드를 두지 않아 글자가 묻히지 않게
 COPY_ZONE = (0, 280, 480, 520)
 MODEL_X_MAX = HUB[0] + 280  # 모델 노드는 중간 폭 화면에서도 보이는 범위
@@ -94,7 +96,7 @@ def _layout():
     clients = sorted(left[:N_CLIENTS],
                      key=lambda i: math.atan2(pts[i][1] - HUB[1], pts[i][0] - HUB[0]))
     models = right[:N_MODELS]
-    twinkle = set(rnd.sample(range(len(pts)), 10))
+    twinkle = set(rnd.sample(range(len(pts)), int(len(pts) * TWINKLE_RATIO)))
     return pts, sorted(mesh), clients, models, twinkle
 
 
@@ -106,7 +108,7 @@ def _line(p, q, stroke, width):
 PACKET_KEYFRAMES: list[str] = []
 
 
-def _packet(p, q, color, t, dur):
+def _packet(p, q, color, t, dur, r=2.6):
     """엣지 p→q 위 t(0~1) 지점의 트래픽 점 — 정지 위치가 곧 애니메이션의 한 프레임.
 
     CSS 로 시작 노드(-t)에서 끝 노드(1-t)까지 translate 한다. 음수 delay 로
@@ -121,13 +123,22 @@ def _packet(p, q, color, t, dur):
         f"100%{{transform:translate({dx * (1 - t):.1f}px,{dy * (1 - t):.1f}px);opacity:0}}}}"
         f".pk{n}{{animation:pk{n} {dur:.1f}s linear {-dur * t:.2f}s infinite}}")
     return (f'<circle class="pk{n}" cx="{x1 + dx * t:.1f}" cy="{y1 + dy * t:.1f}" '
-            f'r="2.6" fill="{color}"/>')
+            f'r="{r}" fill="{color}"/>')
 
 
 def graph() -> str:
     pts, mesh, clients, models, twinkle = _layout()
     PACKET_KEYFRAMES.clear()
+    import random
+    rnd = random.Random(SEED + 1)
     el = [_line(pts[i], pts[j], "#252525", 1) for i, j in mesh]
+    # 배경 메시에도 희미하고 느린 트래픽 — 그래프 전체가 살아 있게.
+    # 방향은 무작위, 속도·위상도 엣지마다 다르게.
+    for i, j in mesh:
+        if rnd.random() > MESH_TRAFFIC:
+            continue
+        a, b = (pts[i], pts[j]) if rnd.random() < 0.5 else (pts[j], pts[i])
+        el.append(_packet(a, b, "#3f8f86", rnd.random(), rnd.uniform(3.5, 7.5), r=1.8))
     el += [_line(pts[c], HUB, "#2b3735", 1.1) for c in clients]
     el += [_line(HUB, pts[m], "#24504b", 1.2) for m in models]
     for k, c in enumerate(clients):
@@ -171,7 +182,7 @@ MOTION_STYLE = (
     "animation:ring 2.8s ease-out infinite}"
     "@keyframes ring{0%{transform:scale(.4);opacity:.55}"
     "100%{transform:scale(1.6);opacity:0}}"
-    ".tw{animation:tw 5s ease-in-out infinite}"
+    ".tw{animation:tw 5s ease-in-out infinite}.tw:nth-of-type(3n){animation-duration:7s}.tw:nth-of-type(3n+1){animation-duration:3.6s}"
     "@keyframes tw{0%,100%{opacity:1}50%{opacity:.45}}"
 )
 REDUCED_MOTION = (
