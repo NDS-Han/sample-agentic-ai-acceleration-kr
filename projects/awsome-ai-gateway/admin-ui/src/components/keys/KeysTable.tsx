@@ -10,6 +10,7 @@ import { revokeKeyAction } from '@/lib/actions/keys';
 import { ConfirmDialog } from '@/components/common/ConfirmDialog';
 import { useToast } from '@/components/common/ToastProvider';
 import { Badge, type BadgeTone } from '@/components/common/Badge';
+import { EmailText } from '@/components/common/UnverifiedEmailBadge';
 import { Button } from '@/components/common/Button';
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/common/Table';
 import { useReportingTz } from '@/components/common/ReportingTimezoneProvider';
@@ -120,7 +121,7 @@ export function KeysTable({ keys, onRevoked }: KeysTableProps) {
               <Tr key={key.key_id}>
                 <Td className="font-mono mono-id text-xs">{key.key_prefix}</Td>
                 <Td className="text-foreground">
-                  {key.user_email ?? <span className="text-muted-foreground">—</span>}
+                  <EmailText email={key.user_email} fallback={<span className="text-muted-foreground">—</span>} />
                 </Td>
                 <Td>
                   <div className="flex items-center gap-1.5">

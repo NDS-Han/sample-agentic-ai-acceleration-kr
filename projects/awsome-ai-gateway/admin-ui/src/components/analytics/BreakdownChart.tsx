@@ -7,6 +7,7 @@ import { LazyBreakdownChart } from './LazyCharts';
 import { ErrorState } from '@/components/common/ErrorState';
 import { teamDisplayName } from '@/lib/utils/trendSeries';
 import { modelDisplay } from '@/lib/utils/modelLabel';
+import { userLabel } from '@/lib/userLabel';
 
 interface BreakdownChartProps {
   filter: AnalyticsFilterForm;
@@ -46,7 +47,7 @@ export async function BreakdownChart({ filter, latestMonth }: BreakdownChartProp
       title = t('costByTeam');
     } else if (filter.group_by === 'user') {
       // §60.9: 백엔드 by_user 집계 사용(이전엔 by_model 로 잘못 표시됐음).
-      labels = (data.by_user ?? []).map((b) => b.user || b.email);
+      labels = (data.by_user ?? []).map((b) => b.user || userLabel({ email: b.email }));
       values = (data.by_user ?? []).map((b) => Number(b.cost_usd));
       title = t('costByUser');
     } else {

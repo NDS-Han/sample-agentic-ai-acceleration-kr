@@ -11,9 +11,11 @@ import { baseAction, isConfirmedAction } from '@/lib/audit/action';
 import { useToast } from '@/components/common/ToastProvider';
 import { useReportingTz } from '@/components/common/ReportingTimezoneProvider';
 import { Badge, RoleBadge } from '@/components/common/Badge';
+import { UnverifiedEmailBadge } from '@/components/common/UnverifiedEmailBadge';
 import { Table, THead, TBody, Tr, Th, Td, TEmpty } from '@/components/common/Table';
 import { Button } from '@/components/common/Button';
 import { fmtDateTime } from '@/lib/utils/format';
+import { isSyntheticEmail, userLabel } from '@/lib/userLabel';
 import { ChangesPanel } from './ChangesPanel';
 import type { AuditLogItem } from '@/types/entities';
 
@@ -143,8 +145,23 @@ export function AuditLogListView({
       return <span className="text-muted-foreground">{t('actorDev')}</span>;
     }
     // '<uuid>@unknown' 는 이메일 해석 실패 sentinel — 이메일처럼 보이지만 식별자다.
-    if (it.actor_email && !it.actor_email.endsWith('@unknown')) {
+    if (it.actor_email && !isSyntheticEmail(it.actor_email)) {
       return it.actor_email;
+    }
+    // 이메일 미인증(합성) 사용자도 이름은 있다 — uuid 대신 이름 + 미인증 배지.
+    const name = userLabel({ email: null, display_name: it.actor_display_name });
+    if (name) {
+      return (
+        <span title={it.actor_user_id}>
+          {name}
+          {isSyntheticEmail(it.actor_email) && (
+            <>
+              {' '}
+              <UnverifiedEmailBadge />
+            </>
+          )}
+        </span>
+      );
     }
     return (
       <span title={it.actor_user_id}>

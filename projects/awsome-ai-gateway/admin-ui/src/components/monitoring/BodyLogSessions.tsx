@@ -16,6 +16,8 @@ import {
   type BodyLogSession,
 } from '@/lib/actions/body-logs';
 import { Badge } from '@/components/common/Badge';
+import { EmailText } from '@/components/common/UnverifiedEmailBadge';
+import { isSyntheticEmail } from '@/lib/userLabel';
 import { useToast } from '@/components/common/ToastProvider';
 import { useReportingTz } from '@/components/common/ReportingTimezoneProvider';
 import { fmtDateTime, fmtTokensCompact, fmtUsd } from '@/lib/utils/format';
@@ -530,7 +532,9 @@ export function BodyLogSessions({
             무뎌진다. */}
         <div className="glass rounded-apple p-4">
           <div className="flex flex-wrap items-center gap-2 text-sm">
-            <span className="font-medium">{selected.user_email ?? selected.user_id ?? '-'}</span>
+            <span className="font-medium" title={selected.user_id ?? undefined}>
+              <EmailText email={selected.user_email} fallback={selected.user_id ?? '-'} />
+            </span>
             {selected.client && <Badge tone="neutral">{selected.client}</Badge>}
             {selected.session_id === null && (
               <span title={t('heuristicSessionTitle')}>
@@ -854,8 +858,11 @@ export function BodyLogSessions({
                   <Td className="whitespace-nowrap text-muted-foreground">
                     {fmtDateTime(s.started_at, locale, tz)}
                   </Td>
-                  <Td className="max-w-40 truncate text-sm" title={s.user_email ?? s.user_id ?? ''}>
-                    {s.user_email ?? s.user_id ?? '-'}
+                  <Td
+                    className="max-w-40 truncate text-sm"
+                    title={(isSyntheticEmail(s.user_email) ? s.user_id : s.user_email ?? s.user_id) ?? ''}
+                  >
+                    <EmailText email={s.user_email} fallback={s.user_id ?? '-'} />
                   </Td>
                   <Td className="text-sm">
                     {s.client ?? '-'}

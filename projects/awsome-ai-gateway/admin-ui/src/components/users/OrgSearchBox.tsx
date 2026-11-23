@@ -8,6 +8,7 @@ import { Search, X, Users, Folder, User as UserIcon } from 'lucide-react';
 import type { OrgTreeNode, UserSearchItem } from '@/types/entities';
 import { searchUsersAction } from '@/lib/actions/users';
 import { searchOrgNodes, SEARCH_MIN_LENGTH, type OrgMatch } from '@/lib/utils/orgSearch';
+import { EmailText } from '@/components/common/UnverifiedEmailBadge';
 
 /** 검색어 입력 후 서버 조회까지의 지연. 타이핑 중 불필요한 왕복을 막는다. */
 const DEBOUNCE_MS = 250;
@@ -351,7 +352,7 @@ function UserRow({
       <span className="min-w-0 flex-1">
         <span className="block truncate font-medium">{user.display_name}</span>
         <span className="block truncate text-xs text-muted-foreground">
-          {user.email} · {user.team_name ?? unassignedLabel}
+          <EmailText email={user.email} /> · {user.team_name ?? unassignedLabel}
         </span>
       </span>
     </span>

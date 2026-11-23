@@ -70,7 +70,9 @@
     "unsavedChanges": "저장되지 않은 변경사항",
     "apply": "적용",
     "revert": "되돌리기",
-    "applyPartialNote": "섹션별로 순서대로 저장됩니다 — 하나가 실패하면 나머지는 건너뛰고, 이미 저장된 섹션은 유지됩니다."
+    "applyPartialNote": "섹션별로 순서대로 저장됩니다 — 하나가 실패하면 나머지는 건너뛰고, 이미 저장된 섹션은 유지됩니다.",
+    "unverifiedEmail": "이메일 미인증",
+    "unverifiedEmailHint": "Cognito에서 이메일이 인증되지 않아 식별자로 저장된 사용자입니다. Cognito에서 email_verified=true 처리 후 Sync Cognito를 누르세요."
   },
   "auth": {
     "login": "로그인",

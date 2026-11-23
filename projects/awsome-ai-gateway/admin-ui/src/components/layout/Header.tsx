@@ -10,6 +10,7 @@ import type { AdminSession } from '@/types/entities';
 import { LogOut, User, Globe } from 'lucide-react';
 import { setLocale } from '@/lib/actions/locale';
 import { RoleBadge } from '@/components/common/Badge';
+import { EmailText } from '@/components/common/UnverifiedEmailBadge';
 
 interface HeaderProps {
   session: AdminSession | null;
@@ -52,7 +53,9 @@ export function Header({ session }: HeaderProps) {
                 <span className="text-sm font-medium text-foreground leading-none">
                   {session.display_name}
                 </span>
-                <span className="text-xs text-muted-foreground mt-0.5">{session.email}</span>
+                <span className="text-xs text-muted-foreground mt-0.5">
+                  <EmailText email={session.email} />
+                </span>
               </div>
               {session.role && (
                 <RoleBadge

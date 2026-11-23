@@ -15,6 +15,8 @@ import {
 } from '@/lib/actions/monitoring';
 import { AppDialog } from '@/components/common/AppDialog';
 import { Badge } from '@/components/common/Badge';
+import { EmailText } from '@/components/common/UnverifiedEmailBadge';
+import { isSyntheticEmail } from '@/lib/userLabel';
 import { useToast } from '@/components/common/ToastProvider';
 import { useReportingTz } from '@/components/common/ReportingTimezoneProvider';
 import { fmtDateTime } from '@/lib/utils/format';
@@ -306,8 +308,11 @@ export function BodyLogsViewer({
                       <Copy size={12} aria-hidden="true" />
                     </button>
                   </Td>
-                  <Td className="max-w-40 truncate text-sm" title={ev.user_email ?? ev.user_id ?? ''}>
-                    {ev.user_email ?? ev.user_id ?? '—'}
+                  <Td
+                    className="max-w-40 truncate text-sm"
+                    title={(isSyntheticEmail(ev.user_email) ? ev.user_id : ev.user_email ?? ev.user_id) ?? ''}
+                  >
+                    <EmailText email={ev.user_email} fallback={ev.user_id ?? '—'} />
                   </Td>
                   <Td className="text-sm">{ev.model_alias}</Td>
                   <Td>

@@ -253,3 +253,63 @@ describe('TeamPanel — 통합 Apply 섹션별 결과 (T15)', () => {
     expect(screen.queryByText('loadFailed')).not.toBeInTheDocument();
   });
 });
+
+describe('TeamPanel — 팀 리더 라벨 (P3-25)', () => {
+  const member = (
+    id: string,
+    name: string,
+    email: string,
+    role: string,
+  ): OrgTreeNode =>
+    ({
+      id,
+      name,
+      type: 'USER',
+      children: [],
+      meta: {
+        member_count: null,
+        team_count: null,
+        leader_name: null,
+        leader_user_id: null,
+        email,
+        role,
+        team_name: 'Developers',
+      },
+    }) as OrgTreeNode;
+
+  const SYN = '61739d0a-1111-2222-3333-444455556666@unknown';
+  const NODE = {
+    ...TEAM_NODE,
+    children: [
+      member('u-admin', 'heomk', SYN, 'ADMIN'),
+      member('u-dev', 'Kim Dev', 'kim@example.com', 'DEVELOPER'),
+      member('u-syn-dev', 'Lee Dev', '0badc0de-aaaa-bbbb-cccc-ddddeeeeffff@unknown', 'DEVELOPER'),
+      member('u-lead', 'Park Lead', '12345678-aaaa-bbbb-cccc-ddddeeeeffff@unknown', 'TEAM_LEADER'),
+    ],
+    meta: { ...TEAM_NODE.meta, member_count: 4 },
+  } as OrgTreeNode;
+
+  beforeEach(() => {
+    vi.mocked(listActiveModelsAction).mockResolvedValue({ success: true, data: [] });
+    vi.mocked(getTeamEffectivePolicyAction).mockResolvedValue({ success: true, data: TEAM_POLICY });
+  });
+
+  it('드롭다운은 리더가 아닌 모든 멤버를 후보로 두고, 합성 이메일 대신 이름 + 미인증 표기', async () => {
+    render(<OrgDetailPanel node={NODE} />);
+    const options = (await screen.findAllByRole('option')).map((o) => o.textContent);
+    expect(options).toEqual([
+      'leaderAction.selectPlaceholder',
+      'heomk (unverifiedEmail) [Admin]',
+      'kim@example.com',
+      'Lee Dev (unverifiedEmail)',
+    ]);
+    expect(options.join(' ')).not.toMatch(/@unknown/);
+  });
+
+  it('현재 리더 목록도 합성 이메일 대신 이름 + 미인증 배지', async () => {
+    render(<OrgDetailPanel node={NODE} />);
+    expect(await screen.findByText('Park Lead')).toBeInTheDocument();
+    expect(screen.queryByText(/12345678-aaaa/)).not.toBeInTheDocument();
+    expect(screen.getAllByText('unverifiedEmail').length).toBeGreaterThan(0);
+  });
+});

@@ -28,6 +28,8 @@ import { UnsavedApplyBar } from '@/components/common/UnsavedApplyBar';
 import { SpinnerButton } from '@/components/common/SpinnerButton';
 import { useToast } from '@/components/common/ToastProvider';
 import { RoleBadge } from '@/components/common/Badge';
+import { EmailText } from '@/components/common/UnverifiedEmailBadge';
+import { isSyntheticEmail, userLabel } from '@/lib/userLabel';
 import { TeamModelPermissionPanel, type TeamModelPermissionHandle } from '@/components/models/TeamModelPermissionPanel';
 import { ScopeRateLimitPanel, type ScopeRateLimitHandle } from '@/components/users/ScopeRateLimitPanel';
 import { ScopeAppAccessPanel, type ScopeAppAccessHandle } from '@/components/users/ScopeAppAccessPanel';
@@ -193,7 +195,7 @@ function UserPanel({
   const [isLoadPending, startLoadTransition] = useTransition();
   const [isSavePending, startSaveTransition] = useTransition();
 
-  const email = node.meta.email ?? '-';
+  const email = node.meta.email ?? null;
   const role = node.meta.role ?? null;
   const teamName = node.meta.team_name ?? t('teamUnassigned');
 
@@ -532,7 +534,9 @@ function UserPanel({
       <h2 className="text-lg font-semibold mb-4">{node.name}</h2>
       <div className="flex items-center gap-2 text-sm mb-2">
         <span className="text-muted-foreground">{t('email')}</span>
-        <span className="font-medium">{email}</span>
+        <span className="font-medium">
+          <EmailText email={email} fallback="-" info />
+        </span>
       </div>
       <div className="flex items-center gap-2 text-sm mb-2">
         <span className="text-muted-foreground">{t('role')}</span>
@@ -1125,7 +1129,13 @@ function TeamPanel({
                 key={leaderNode.id}
                 className="flex items-center justify-between gap-2 rounded-apple-sm border px-3 py-1.5"
               >
-                <span className="text-sm">{leaderNode.meta.email}</span>
+                {/* 합성 이메일(<sub>@unknown)이면 이름 + 미인증 배지 — uuid 는 식별이 안 된다. */}
+                <span className="flex min-w-0 items-center gap-2 text-sm">
+                  <span className="truncate">{userLabel({ email: leaderNode.meta.email, display_name: leaderNode.name })}</span>
+                  {isSyntheticEmail(leaderNode.meta.email) && (
+                    <EmailText email={leaderNode.meta.email} />
+                  )}
+                </span>
                 <button
                   type="button"
                   disabled={isLeaderPending}
@@ -1152,7 +1162,9 @@ function TeamPanel({
               <option value="">{t('leaderAction.selectPlaceholder')}</option>
               {nonLeaderMembers.map((m) => (
                 <option key={m.id} value={m.id} disabled={m.meta.role === 'ADMIN'}>
-                  {m.meta.email}
+                  {/* <option> 은 텍스트만 — 배지 대신 라벨 헬퍼 + 미인증 문구를 붙인다. */}
+                  {userLabel({ email: m.meta.email, display_name: m.name })}
+                  {isSyntheticEmail(m.meta.email) ? ` (${tc('unverifiedEmail')})` : ''}
                   {m.meta.role === 'ADMIN' ? ' [Admin]' : ''}
                 </option>
               ))}

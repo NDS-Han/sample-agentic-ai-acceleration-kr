@@ -70,7 +70,9 @@
     "unsavedChanges": "Unsaved changes",
     "apply": "Apply",
     "revert": "Revert",
-    "applyPartialNote": "Sections save in order — if one fails the rest are skipped and earlier saves are kept."
+    "applyPartialNote": "Sections save in order — if one fails the rest are skipped and earlier saves are kept.",
+    "unverifiedEmail": "Email not verified",
+    "unverifiedEmailHint": "This user's email is not verified in Cognito, so it is stored as an identifier. Set email_verified=true in Cognito, then click Sync Cognito."
   },
   "auth": {
     "login": "Login",

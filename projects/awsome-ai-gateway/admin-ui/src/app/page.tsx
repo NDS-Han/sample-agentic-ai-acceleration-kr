@@ -39,6 +39,7 @@ import { ClientFilter } from '@/components/dashboard/ClientFilter';
 import { reportingNowParts } from '@/lib/utils/period';
 import { fmtUsd, fmtTokensCompact } from '@/lib/utils/format';
 import { teamDisplayName } from '@/lib/utils/trendSeries';
+import { userLabel } from '@/lib/userLabel';
 
 
 
@@ -316,7 +317,8 @@ async function TeamUserRanking({ period, client }: { period: string; client: str
     const teamBudgetApplied = usagePct == null && !!u.team_id && teamLimit != null;
     return {
       id: u.user_id,
-      name: u.name || u.email,
+      // 이름이 없을 때 합성 이메일(<sub>@unknown)을 그대로 노출하지 않는다.
+      name: u.name || userLabel({ email: u.email }),
       subtitle: u.team_name
         ? teamDisplayName({ team: u.team_name, dept_name: u.department_name })
         : null,

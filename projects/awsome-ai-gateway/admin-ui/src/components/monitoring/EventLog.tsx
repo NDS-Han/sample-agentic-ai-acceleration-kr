@@ -12,6 +12,8 @@ import {
   type MonitoringEventTypeFilter,
 } from '@/lib/actions/monitoring';
 import { Badge } from '@/components/common/Badge';
+import { EmailText } from '@/components/common/UnverifiedEmailBadge';
+import { isSyntheticEmail } from '@/lib/userLabel';
 import { useToast } from '@/components/common/ToastProvider';
 import { useReportingTz } from '@/components/common/ReportingTimezoneProvider';
 import { fmtDateTime } from '@/lib/utils/format';
@@ -157,9 +159,9 @@ export function EventLog({
                       title={ev.user_id ?? ''}
                       onClick={() => ev.user_id && copyUserId(ev.user_id)}
                       className="hover:underline underline-offset-2 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring rounded-sm"
-                      aria-label={`${ev.user_email ?? ev.user_id} — ${t('events.copyUserId')}`}
+                      aria-label={`${(isSyntheticEmail(ev.user_email) ? null : ev.user_email) ?? ev.user_id} — ${t('events.copyUserId')}`}
                     >
-                      {ev.user_email ?? `${ev.user_id!.slice(0, 8)}…`}
+                      <EmailText email={ev.user_email} fallback={ev.user_id ? `${ev.user_id.slice(0, 8)}…` : null} />
                     </button>
                   ) : (
                     <span title={t('events.agentUser')}>—</span>

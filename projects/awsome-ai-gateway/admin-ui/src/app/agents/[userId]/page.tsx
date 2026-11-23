@@ -5,6 +5,8 @@ import { adminAPI } from '@/lib/api-client';
 import { APIError } from '@/lib/utils/retry';
 import { currentCalendarMonth } from '@/lib/utils/period';
 import { ErrorState } from '@/components/common/ErrorState';
+import { EmailText } from '@/components/common/UnverifiedEmailBadge';
+import { userLabel } from '@/lib/userLabel';
 import type { ServiceAccountUsageResponse } from '@/types/entities';
 import { ServiceAccountDetail } from '@/components/service-accounts/ServiceAccountDetail';
 
@@ -53,10 +55,10 @@ export default async function ServiceAccountDetailPage({
     <div>
       <div className="mb-6">
         <h1 className="text-2xl font-bold">
-          {data.display_name || data.email}
+          {data.display_name || userLabel(data)}
         </h1>
         <p className="mt-1 text-sm text-muted-foreground">
-          {data.email}
+          <EmailText email={data.email} info />
           {data.team_name ? ` · ${data.team_name}` : ''}
         </p>
       </div>

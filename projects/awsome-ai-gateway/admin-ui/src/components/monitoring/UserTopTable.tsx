@@ -8,6 +8,7 @@ import { fmtTime, fmtUsd } from '@/lib/utils/format';
 import { useReportingTz } from '@/components/common/ReportingTimezoneProvider';
 import type { MonitoringUsersResponse } from '@/lib/actions/monitoring';
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/common/Table';
+import { EmailText } from '@/components/common/UnverifiedEmailBadge';
 
 // 에러율 강조 — 테마 토큰(다크/라이트 자동). 임계: ≥10% 위험, ≥5% 경고.
 function errorColor(pct: number) {
@@ -53,7 +54,9 @@ export function UserTopTable({ data }: { data: MonitoringUsersResponse }) {
             <Tr key={u.user_id}>
               <Td>
                 <div className="font-medium">{u.display_name}</div>
-                <div className="text-xs text-muted-foreground">{u.email}</div>
+                <div className="text-xs text-muted-foreground">
+                  <EmailText email={u.email} />
+                </div>
               </Td>
               <Td numeric>{u.requests.toLocaleString()}</Td>
               <Td numeric>{u.tokens.toLocaleString()}</Td>

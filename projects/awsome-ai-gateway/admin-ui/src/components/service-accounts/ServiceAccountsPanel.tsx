@@ -7,6 +7,8 @@ import { createPortal } from 'react-dom';
 import Link from 'next/link';
 import { useTranslations } from 'next-intl';
 import { Badge } from '@/components/common/Badge';
+import { UnverifiedEmailBadge } from '@/components/common/UnverifiedEmailBadge';
+import { isSyntheticEmail, userLabel } from '@/lib/userLabel';
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/common/Table';
 import { useToast } from '@/components/common/ToastProvider';
 import { useReportingTz } from '@/components/common/ReportingTimezoneProvider';
@@ -29,6 +31,7 @@ interface Props {
 
 export function ServiceAccountsPanel({ accounts, maxTtlDays, serviceKeysEnabled = true }: Props) {
   const t = useTranslations('serviceAccounts');
+  const tc = useTranslations('common');
   const tz = useReportingTz();
   const { toast } = useToast();
 
@@ -191,10 +194,20 @@ export function ServiceAccountsPanel({ accounts, maxTtlDays, serviceKeysEnabled 
                   <Link
                     href={`/agents/${a.user_id}`}
                     className="hover:text-primary hover:underline"
-                    title={a.display_name !== a.email ? a.email : undefined}
+                    title={
+                      a.display_name && a.display_name !== a.email && !isSyntheticEmail(a.email)
+                        ? a.email
+                        : undefined
+                    }
                   >
-                    {a.display_name || a.email}
+                    {a.display_name || userLabel(a)}
                   </Link>
+                  {isSyntheticEmail(a.email) && (
+                    <>
+                      {' '}
+                      <UnverifiedEmailBadge />
+                    </>
+                  )}
                 </Td>
                 <Td className="text-muted-foreground">{a.team_name ?? '—'}</Td>
                 <Td>
@@ -267,7 +280,7 @@ export function ServiceAccountsPanel({ accounts, maxTtlDays, serviceKeysEnabled 
             <div className="glass rounded-apple max-w-lg w-full p-6 bg-background">
               <h3 className="text-lg font-semibold mb-2">{t('saUnmarkTitle')}</h3>
               <p className="text-sm mb-2">
-                {t('saUnmarkMessage', { email: unmarkTarget.email })}
+                {t('saUnmarkMessage', { email: userLabel(unmarkTarget) })}
               </p>
               {unmarkTarget.active_key_prefix && (
                 <p className="text-sm text-destructive mb-2">
@@ -318,7 +331,8 @@ export function ServiceAccountsPanel({ accounts, maxTtlDays, serviceKeysEnabled 
                   <option value="">{t('saSelectPlaceholder')}</option>
                   {allUsers.map((u) => (
                     <option key={u.id} value={u.id}>
-                      {u.email}
+                      {userLabel(u)}
+                      {isSyntheticEmail(u.email) ? ` (${tc('unverifiedEmail')})` : ''}
                       {u.team_name ? ` (${u.team_name})` : ''}
                       {accounts.some((a) => a.user_id === u.id) ? ' — ' + t('saAlreadyFlagged') : ''}
                     </option>

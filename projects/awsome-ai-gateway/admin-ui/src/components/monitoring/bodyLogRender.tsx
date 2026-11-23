@@ -8,6 +8,7 @@ import { ChevronDown, ChevronRight, Copy, Wrench } from 'lucide-react';
 
 import type { BodyLogResponse } from '@/lib/actions/body-logs';
 import { Badge, type BadgeTone } from '@/components/common/Badge';
+import { EmailText } from '@/components/common/UnverifiedEmailBadge';
 import { useToast } from '@/components/common/ToastProvider';
 import { useReportingTz } from '@/components/common/ReportingTimezoneProvider';
 import { fmtDateTime, fmtTokensCompact, fmtUsd } from '@/lib/utils/format';
@@ -717,7 +718,9 @@ export function BodyRecordContent({
           <span>{data.requested_at ? fmtDateTime(data.requested_at, locale, tz) : '-'}</span>
           <span className="font-mono">{data.request_id}</span>
           {(data.user_email ?? rec?.user_id) && (
-            <span title={rec?.user_id ?? undefined}>{data.user_email ?? rec?.user_id}</span>
+            <span title={rec?.user_id ?? undefined}>
+              <EmailText email={data.user_email} fallback={rec?.user_id} />
+            </span>
           )}
           {data.client && <Badge tone="neutral">{data.client}</Badge>}
           {rec?.is_streaming && <Badge tone="neutral">{t('streamTag')}</Badge>}

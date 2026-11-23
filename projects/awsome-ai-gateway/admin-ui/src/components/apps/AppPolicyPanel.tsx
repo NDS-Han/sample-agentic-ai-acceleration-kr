@@ -10,6 +10,7 @@ import { setClientWebSearchAction, setClientRoutingAction } from '@/lib/actions/
 import type { AppPolicy, AppModelRef } from '@/lib/actions/apps';
 import { ConfirmDialog } from '@/components/common/ConfirmDialog';
 import { InfoTooltip } from '@/components/common/InfoTooltip';
+import { EmailText } from '@/components/common/UnverifiedEmailBadge';
 import { SpinnerButton } from '@/components/common/SpinnerButton';
 import { FormError } from '@/components/common/FormError';
 import { Table, THead, TBody, Tr, Th, Td, TEmpty } from '@/components/common/Table';
@@ -691,9 +692,11 @@ export function AppPolicyPanel() {
                             href={`/users?node=${u.user_id}`}
                             className="hover:underline underline-offset-4 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring rounded"
                           >
-                            {u.email ?? (
-                              <span className="text-muted-foreground">{t('noEmail')}</span>
-                            )}
+                            {/* 응답에 display_name 이 없다 — 합성 이메일은 배지만, 식별은 ID 열로. */}
+                            <EmailText
+                              email={u.email}
+                              fallback={<span className="text-muted-foreground">{t('noEmail')}</span>}
+                            />
                           </Link>
                         </Td>
                         <Td>
