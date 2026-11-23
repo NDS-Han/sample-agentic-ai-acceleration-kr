@@ -275,18 +275,29 @@ overlay 키가 아님) — 버전 변경은 순서가 있는 절차형 작업이
 동작 순서 — 라이브 버전을 `describe-cluster`로 읽은 뒤 **minor 한 칸씩** 홉을
 나눠(다중 점프는 EKS가 거부, 다운그레이드는 차단) 각 홉마다:
 
-1. env `terraform.tfvars`에 `eks_cluster_version` + `eks_addon_versions`
-   (`describe-addon-versions`의 해당 k8s 버전 `defaultVersion` 조합 — 조회
-   실패 시 진행하지 않음) 기록
-2. `terraform apply -target=module.eks` (스코프 밖 리소스는 건드리지 않음)
+1. env `terraform.tfvars`에 `eks_cluster_version` + `eks_addon_versions` 기록
+   — 애드온은 `describe-addon-versions`의 해당 k8s 버전 `defaultVersion`
+   조합이되 **현재 설치 버전이 목표 k8s와 호환이면 그대로 유지**합니다
+   (불필요한 롤링 방지). 비호환 핀이 기본값보다 높으면 자동 다운그레이드를
+   하지 않고 중단합니다. tfvars 파일이 없으면 access_entries 등이 기본값으로
+   초기화되므로 시작하지 않습니다.
+2. `terraform plan -out` → **범위 검사**(module.eks 밖 변경, destroy/replace,
+   moved/import 발견 시 중단 — fargate profile 재생성 같은 파괴 변경은 절대
+   자동 승인하지 않음) → `terraform apply <저장된 plan>`
 3. 클러스터 `ACTIVE` + 버전 일치까지 대기(홉당 10~20분)
-4. 전체 deployment `rollout restart` — **Fargate kubelet은 파드 재생성 시에만
-   갱신**되므로 coredns/ESO/ALB controller를 포함해 전부 재기동합니다
+4. 전체 deployment/statefulset `rollout restart` 후 **워크로드별
+   `rollout status` 대기** — Fargate kubelet은 파드 재생성 시에만
+   갱신되므로 coredns/ESO/ALB controller를 포함해 전부 재기동합니다
    (짧은 재기동 시간이 홉마다 발생합니다)
+
+시작 전 사전 점검: EKS upgrade insights의 ERROR 항목(제거 API 사용 등
+`UpdateClusterVersion` 차단 사유)이 있으면 중단하고, kubectl context가
+대상 클러스터와 다른 클러스터를 가리키면 파드 재생성을 차단합니다.
 
 완료되면 `gateway.yaml`의 `infra.eks_version`도 최종 버전으로 갱신합니다
 (선언=라이브 유지). 홉 중간에 실패하면 tfvars가 마지막 시도 버전을 남기고,
-재실행 시 라이브 조회로 재개됩니다.
+재실행 시 라이브 버전·애드온 실측을 함께 보고 남은 수렴(애드온 갱신/파드
+재생성)부터 이어서 진행합니다 — 컨트롤플레인만 올라간 반쪽 홉도 복구됩니다.
 
 범위는 **클러스터 + 매니지드 애드온 3종**(coredns, kube-proxy, vpc-cni)뿐입니다
 — ALB controller·External Secrets 차트, Aurora 엔진은 별도 작업이며 이 명령이

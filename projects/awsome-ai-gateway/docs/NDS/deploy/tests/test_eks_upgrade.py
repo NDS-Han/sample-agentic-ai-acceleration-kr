@@ -1,6 +1,7 @@
 # Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
 """eks_upgrade + infra.eks_version — 버전 파싱·홉 계산·tfvars 갱신·검증."""
-from pathlib import Path
+import json
+import subprocess
 
 import pytest
 
@@ -61,11 +62,17 @@ class TestAddonDefaults:
                 for i, v in enumerate(vs)]
             } for name, vs in versions.items()]}
 
+    def _three(self, **over):
+        base = {"coredns": ["v1.12.1-eksbuild.1"],
+                "kube-proxy": ["v1.34.0-eksbuild.1"],
+                "vpc-cni": ["v1.20.1-eksbuild.1"]}
+        base.update(over)
+        return base
+
     def test_picks_default_version(self, monkeypatch):
         monkeypatch.setattr(
             eks_upgrade, "_aws_json", lambda *a, **k: self._addons({
                 "coredns": ["v1.12.1-eksbuild.1"],
-                # 비기본 버전과 기본 버전이 섞여 있으면 기본만 고른다
                 "kube-proxy": ["v1.12.0-eksbuild.2",
                                "v1.12.3-eksbuild.1"],
                 "vpc-cni": ["v1.20.1-eksbuild.1"]}))
@@ -75,14 +82,44 @@ class TestAddonDefaults:
     def test_maps_all_addons(self, monkeypatch):
         monkeypatch.setattr(
             eks_upgrade, "_aws_json",
-            lambda *a, **k: self._addons({
-                "coredns": ["v1.12.1-eksbuild.1"],
-                "kube-proxy": ["v1.34.0-eksbuild.1"],
-                "vpc-cni": ["v1.20.1-eksbuild.1"]}))
+            lambda *a, **k: self._addons(self._three()))
         got = eks_upgrade._addon_defaults("1.34", "r")
         assert got == {"coredns": "v1.12.1-eksbuild.1",
                        "kube_proxy": "v1.34.0-eksbuild.1",
                        "vpc_cni": "v1.20.1-eksbuild.1"}
+
+    def test_current_compatible_is_kept(self, monkeypatch):
+        # 운영자가 기본값보다 높은 핀을 뒀는데 그 버전이 목표 k8s 호환이면
+        # 그대로 유지 — 불필요한 애드온 롤링을 안 한다.
+        monkeypatch.setattr(
+            eks_upgrade, "_aws_json",
+            lambda *a, **k: self._addons(
+                self._three(**{"vpc-cni": ["v1.20.1-eksbuild.1",
+                                           "v1.22.4-eksbuild.14"]})))
+        got = eks_upgrade._addon_defaults(
+            "1.34", "r", current={"vpc_cni": "v1.22.4-eksbuild.14"})
+        assert got["vpc_cni"] == "v1.22.4-eksbuild.14"
+
+    def test_higher_incompatible_current_refused(self, monkeypatch):
+        # 현재가 기본값보다 높은데 호환 목록에 없으면 다운그레이드를 자동
+        # 시도하지 않고 중단한다.
+        monkeypatch.setattr(
+            eks_upgrade, "_aws_json",
+            lambda *a, **k: self._addons(self._three()))
+        with pytest.raises(eks_upgrade.UpgradeError, match="vpc_cni"):
+            eks_upgrade._addon_defaults(
+                "1.34", "r", current={"vpc_cni": "v9.99.9-eksbuild.1"})
+
+    def test_lower_incompatible_current_uses_default(self, monkeypatch):
+        # 현재가 비호환이고 기본값이 더 새 버전이면 기본값으로 전진한다.
+        monkeypatch.setattr(
+            eks_upgrade, "_aws_json",
+            lambda *a, **k: self._addons(
+                self._three(**{"vpc-cni": ["v1.19.0-eksbuild.1",
+                                           "v1.20.1-eksbuild.1"]})))
+        got = eks_upgrade._addon_defaults(
+            "1.34", "r", current={"vpc_cni": "v1.18.3-eksbuild.1"})
+        assert got["vpc_cni"] == "v1.20.1-eksbuild.1"
 
     def test_missing_addon_fails_closed(self, monkeypatch):
         # 기본값을 못 찾은 채 tfvars 를 쓰면 variables.tf 낡은 핀이 적용돼
@@ -101,7 +138,37 @@ class TestAddonDefaults:
             eks_upgrade._addon_defaults("1.34", "r")
 
 
+class TestStripMapKey:
+    def test_multiline_block(self):
+        text = 'eks_addon_versions = { # c\n  a = "1"\n}\nkeep = "x"\n'
+        out = eks_upgrade._strip_map_key(text, "eks_addon_versions")
+        assert "eks_addon_versions" not in out and 'keep = "x"' in out
+
+    def test_single_line_map(self):
+        # 한 줄 맵 — 정규식 ^} 앵커로는 못 지우는 형태
+        text = 'eks_addon_versions = { a = "1" }\nkeep = "x"\n'
+        out = eks_upgrade._strip_map_key(text, "eks_addon_versions")
+        assert "eks_addon_versions" not in out and 'keep = "x"' in out
+
+    def test_nested_braces_and_following_block(self):
+        text = ('eks_addon_versions = { a = "1" }\n'
+                'tags = { env = "dev" }\n')
+        out = eks_upgrade._strip_map_key(text, "eks_addon_versions")
+        assert 'tags = { env = "dev" }' in out
+
+    def test_unclosed_raises(self):
+        with pytest.raises(eks_upgrade.UpgradeError):
+            eks_upgrade._strip_map_key('eks_addon_versions = { a = "1"\n',
+                                       "eks_addon_versions")
+
+
 class TestWriteVersionTfvars:
+    def test_missing_file_refused(self, tmp_path):
+        # tfvars 부재 상태로 버전 키만 쓰면 access_entries 등 사람 소유
+        # 값이 기본값으로 초기화된다 — 새 머신 함정 차단.
+        with pytest.raises(eks_upgrade.UpgradeError, match="terraform.tfvars"):
+            eks_upgrade._write_version_tfvars(tmp_path, "1.34", {})
+
     def test_rewrites_existing_keys(self, tmp_path):
         t = tmp_path / "terraform.tfvars"
         t.write_text('env = "dev"\n'
@@ -118,15 +185,24 @@ class TestWriteVersionTfvars:
         out = t.read_text()
         assert 'eks_cluster_version = "1.32"' in out
         assert '"1.31"' not in out
-        # 애드온 블록은 통째 교체 + 주석으로 출처 명시
         assert 'coredns = "v2"' in out
         assert "v1.11.3" not in out
         # 무관 키 보존
         assert 'env = "dev"' in out and 'aurora_engine_version = "16.6"' in out
-        # 블록이 한 번만 존재
         assert out.count("eks_addon_versions") == 1
+        # .bak 백업 생성
+        assert (tmp_path / "terraform.tfvars.bak").exists()
 
-    def test_appends_when_missing(self, tmp_path):
+    def test_no_trailing_newline_and_indented(self, tmp_path):
+        t = tmp_path / "terraform.tfvars"
+        t.write_text('  eks_cluster_version = "1.31"')  # 개행 없음·들여쓰기
+        eks_upgrade._write_version_tfvars(tmp_path, "1.34", {})
+        out = t.read_text()
+        # 중복 정의가 되면 안 된다 — 기존 할당이 지워지고 새 값만 남는다
+        assert out.count("eks_cluster_version") == 1
+        assert '"1.34"' in out
+
+    def test_appends_when_key_missing(self, tmp_path):
         t = tmp_path / "terraform.tfvars"
         t.write_text('env = "dev"\n')
         eks_upgrade._write_version_tfvars(
@@ -136,6 +212,79 @@ class TestWriteVersionTfvars:
         assert 'eks_cluster_version = "1.34"' in out
         assert "eks_addon_versions = {" in out
         assert 'env = "dev"' in out
+
+
+class TestInspectUpgradePlan:
+    def _show(self, changes):
+        return subprocess.CompletedProcess(
+            [], 0, json.dumps({"resource_changes": changes}), "")
+
+    def _rc(self, addr, actions, before_v="", after_v=""):
+        ch = {"actions": actions}
+        if "aws_eks_cluster" in addr:
+            ch["before"] = {"version": before_v}
+            ch["after"] = {"version": after_v}
+        return {"mode": "managed", "address": addr, "change": ch}
+
+    def test_out_of_scope_blocked(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(
+            eks_upgrade, "_run_quiet",
+            lambda *a, **k: self._show([
+                self._rc("module.eks.aws_eks_cluster.this[0]",
+                         ["update"], "1.34", "1.35"),
+                self._rc("module.vpc.aws_subnet.x", ["update"])]))
+        bad, changes, bump = eks_upgrade._inspect_upgrade_plan(
+            tmp_path, tmp_path / "p", "1.35")
+        assert any("밖" in b for b in bad) and bump
+
+    def test_delete_blocked(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(
+            eks_upgrade, "_run_quiet",
+            lambda *a, **k: self._show([
+                self._rc("module.eks.aws_eks_fargate_profile.x",
+                         ["delete", "create"])]))
+        bad, changes, _ = eks_upgrade._inspect_upgrade_plan(
+            tmp_path, tmp_path / "p", "1.35")
+        assert any("파괴" in b for b in bad)
+
+    def test_version_bump_detected(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(
+            eks_upgrade, "_run_quiet",
+            lambda *a, **k: self._show([
+                self._rc("module.eks.aws_eks_cluster.this[0]",
+                         ["update"], "1.34", "1.35"),
+                self._rc("module.eks.aws_eks_addon.a", ["update"])]))
+        bad, changes, bump = eks_upgrade._inspect_upgrade_plan(
+            tmp_path, tmp_path / "p", "1.35")
+        assert bump and not bad and len(changes) == 2
+
+    def test_noop_filtered(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(
+            eks_upgrade, "_run_quiet",
+            lambda *a, **k: self._show([
+                self._rc("module.eks.aws_eks_cluster.this[0]", ["no-op"])]))
+        bad, changes, bump = eks_upgrade._inspect_upgrade_plan(
+            tmp_path, tmp_path / "p", "1.35")
+        assert not (bad or changes or bump)
+
+
+class TestVerifyContext:
+    def test_mismatch_blocked(self, monkeypatch):
+        monkeypatch.setattr(eks_upgrade, "_kube_context_cluster",
+                            lambda c: "other-cluster")
+        with pytest.raises(eks_upgrade.UpgradeError, match="다른 클러스터"):
+            eks_upgrade._verify_context("ctx", "llm-gateway-dev")
+
+    def test_match_ok(self, monkeypatch):
+        monkeypatch.setattr(eks_upgrade, "_kube_context_cluster",
+                            lambda c: "llm-gateway-dev")
+        eks_upgrade._verify_context("", "llm-gateway-dev")  # 예외 없음
+
+    def test_unresolved_warns_not_blocks(self, monkeypatch, capsys):
+        monkeypatch.setattr(eks_upgrade, "_kube_context_cluster",
+                            lambda c: "")
+        eks_upgrade._verify_context("", "llm-gateway-dev")
+        assert "⚠" in capsys.readouterr().err
 
 
 class TestSchemaEksVersion:
