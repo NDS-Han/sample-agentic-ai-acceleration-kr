@@ -117,6 +117,7 @@ def _usage_lookup_stmt():
         UsageLog.input_tokens,
         UsageLog.output_tokens,
         UsageLog.cache_read_tokens,
+        UsageLog.cache_creation_tokens,
         UsageLog.reasoning_tokens,
         UsageLog.ttft_ms,
     ).outerjoin(User, User.id == UsageLog.user_id)
@@ -316,6 +317,8 @@ async def list_body_log_sessions(
                 UsageLog.cost_usd,
                 UsageLog.input_tokens,
                 UsageLog.output_tokens,
+                UsageLog.cache_read_tokens,
+                UsageLog.cache_creation_tokens,
                 func.row_number()
                 .over(
                     partition_by=partition,
@@ -352,6 +355,8 @@ async def list_body_log_sessions(
                     "cost_usd": float(c.cost_usd) if c.cost_usd is not None else None,
                     "input_tokens": c.input_tokens,
                     "output_tokens": c.output_tokens,
+                    "cache_read_tokens": c.cache_read_tokens,
+                    "cache_write_tokens": c.cache_creation_tokens,
                 }
             )
 
@@ -494,6 +499,8 @@ async def list_body_log_sessions(
                     "cost_usd": float(r.cost_usd) if r.cost_usd is not None else None,
                     "input_tokens": r.input_tokens,
                     "output_tokens": r.output_tokens,
+                    "cache_read_tokens": r.cache_read_tokens,
+                    "cache_write_tokens": r.cache_creation_tokens,
                 }
                 for r in g
             ],
@@ -611,6 +618,7 @@ async def get_body_logs_batch(
                 "input_tokens": r.input_tokens,
                 "output_tokens": r.output_tokens,
                 "cache_read_tokens": r.cache_read_tokens,
+                "cache_write_tokens": r.cache_creation_tokens,
                 "reasoning_tokens": r.reasoning_tokens,
             }
 
@@ -803,6 +811,7 @@ async def get_body_log(
             "input_tokens": row.input_tokens,
             "output_tokens": row.output_tokens,
             "cache_read_tokens": row.cache_read_tokens,
+            "cache_write_tokens": row.cache_creation_tokens,
             "reasoning_tokens": row.reasoning_tokens,
             "record": result.record,
         },

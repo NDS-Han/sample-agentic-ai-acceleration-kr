@@ -4,7 +4,7 @@
 
 import { useCallback, useEffect, useRef, useState, useTransition } from 'react';
 import { useTranslations } from 'next-intl';
-import { ChevronDown, ChevronRight, Link2, RefreshCw } from 'lucide-react';
+import { ChevronDown, ChevronRight, Info, Link2, RefreshCw } from 'lucide-react';
 
 import {
   fetchBodyLog,
@@ -20,17 +20,31 @@ import { EmailText } from '@/components/common/UnverifiedEmailBadge';
 import { isSyntheticEmail } from '@/lib/userLabel';
 import { useToast } from '@/components/common/ToastProvider';
 import { usePointInTime } from '@/components/common/usePointInTime';
-import { fmtTokensCompact } from '@/lib/utils/format';
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/common/Table';
 import { SkeletonTable } from '@/components/common/SkeletonTable';
 import { ErrorState } from '@/components/common/ErrorState';
 import { Button } from '@/components/common/Button';
-import { BodyRecordContent, statusTone } from './bodyLogRender';
 import { Usd } from '@/components/common/Usd';
+import { clientLabel } from '@/lib/constants/gateway';
+import {
+  BodyRecordContent,
+  cacheTokenParts,
+  clientDisplay,
+  fmtTokenFlow,
+  statusTone,
+} from './bodyLogRender';
 
 // 한 호출을 펼치면 그 호출만 단건 조회한다 — 클릭 한 번으로 50건 열람이 감사되는
 // 구조(eager batch)를 피하기 위해서다. 실제로 읽은 것만 감사된다.
 const LOAD_ALL_CHUNK = 50;
+
+/** 기본 조회 기간 — 1일이면 처음 들어왔을 때 비어 보이기 쉽다. */
+export const DEFAULT_SESSION_DAYS = 7;
+
+// 세션 trace 호출 행과 열 제목 행이 같이 쓰는 그리드 —
+// 펼침·#·시각·모델·상태·지연·비용·입력→출력·캐시 읽기/쓰기·배지.
+const CALL_GRID =
+  'grid grid-cols-[14px_2.5rem_9rem_minmax(6rem,1fr)_5.5rem_3.5rem_5rem_6rem_8rem_auto] items-center gap-2';
 
 /** 배치 아이템 → 단건 뷰가 기대하는 BodyLogResponse 형태. */
 function toBodyLogResponse(
@@ -57,8 +71,33 @@ function toBodyLogResponse(
     input_tokens: item.input_tokens,
     output_tokens: item.output_tokens,
     cache_read_tokens: item.cache_read_tokens,
+    cache_write_tokens: item.cache_write_tokens,
     reasoning_tokens: item.reasoning_tokens,
   };
+}
+
+/**
+ * '시간 묶음' 배지 — 뜻을 툴팁으로 설명한다. 배지만으론 툴팁이 있는지 알 수
+ * 없어 ⓘ 아이콘과 help 커서로 표시하고, 키보드 포커스·스크린리더에도 설명이 닿게 한다.
+ */
+function HeuristicBadge({ label, className = '' }: { label: string; className?: string }) {
+  const t = useTranslations('monitoring.bodyLogs');
+  const hint = t('heuristicSessionTitle');
+  return (
+    <span
+      className={`inline-flex cursor-help ${className}`}
+      title={hint}
+      tabIndex={0}
+      aria-label={`${label}: ${hint}`}
+    >
+      <Badge tone="neutral">
+        <span className="inline-flex items-center gap-1">
+          {label}
+          <Info size={10} aria-hidden="true" />
+        </span>
+      </Badge>
+    </span>
+  );
 }
 
 export interface SessionFilters {
@@ -97,7 +136,7 @@ export function BodyLogSessions({
   };
 
   const [filters, setFilters] = useState<SessionFilters>(
-    initialFilters ?? { days: 1, user: '', client: '', hasError: false },
+    initialFilters ?? { days: DEFAULT_SESSION_DAYS, user: '', client: '', hasError: false },
   );
   const [sessions, setSessions] = useState<BodyLogSession[] | null>(null);
   // 목록 조회 실패 — sessions=null(로딩)과 구분해야 실패 시 "불러오는 중…"이
@@ -127,7 +166,7 @@ export function BodyLogSessions({
   // "더 보기"는 적용 시점의 필터로 가져와야 한다 — 입력창의 미적용 값과
   // 섞이면 1페이지와 다른 조건으로 2페이지를 긁는다.
   const [appliedFilters, setAppliedFilters] = useState<SessionFilters>(
-    initialFilters ?? { days: 1, user: '', client: '', hasError: false },
+    initialFilters ?? { days: DEFAULT_SESSION_DAYS, user: '', client: '', hasError: false },
   );
 
   const applyResult = (
@@ -231,7 +270,7 @@ export function BodyLogSessions({
         return;
       }
       // 휴리스틱 key — codex/cowork 는 session_id 가 NULL 이라 전부 이 경로.
-      // 소유자(user, client)로 좁혀 재조회 — 기본 1일·20건 목록 밖이어도 찾는다.
+      // 소유자(user, client)로 좁혀 재조회 — 기본 기간·20건 목록 밖이어도 찾는다.
       const parts = initialSessionKey.split('|');
       if (parts.length !== 3) {
         toast({ type: 'info', message: t('sessionNotFound'), auto_dismiss_ms: 5000 });
@@ -423,13 +462,14 @@ export function BodyLogSessions({
       });
   };
 
-  const applyFilters = () => {
-    setAppliedFilters(filters);
-    onFiltersApplied?.(filters);
+  const applyFilters = (f: SessionFilters = filters) => {
+    setFilters(f);
+    setAppliedFilters(f);
+    onFiltersApplied?.(f);
     setSessions(null);
     setLoadFailed(false);
     setNextBefore(null);
-    load(filters);
+    load(f);
   };
 
   // trace 헤더의 에러 배지를 누르면 에러 호출만 — 500행을 스크롤하지 않고
@@ -444,20 +484,18 @@ export function BodyLogSessions({
     ).length;
     const callsCut = selected.call_count > selected.calls.length;
     // 원본 호출 번호(#n)를 유지한 채 필터한다 — 에러만 보여도 번호가 세션
-    // 타임라인 위치를 가리키게. 표시는 최신 호출이 위로 오게 뒤집는다 —
-    // 조사는 보통 최근 실패/응답부터 시작하기 때문(번호는 원본 위치 유지).
+    // 타임라인 위치를 가리키게. 표시는 대화 흐름대로 오래된 호출부터(#1→#n).
     const shownCalls = selected.calls
       .map((call, idx) => ({ call, idx }))
-      .filter(({ call }) => !errorsOnly || (call.status && call.status !== 'SUCCESS'))
-      .reverse();
+      .filter(({ call }) => !errorsOnly || (call.status && call.status !== 'SUCCESS'));
     // historyStart — 이전 호출의 요청 메시지가 이번 호출의 접두일 때만 그 길이를
     // 넘긴다(msgIndex 단위). Claude Code 의 사이드 호출(haiku 판정/서브에이전트)이
     // 끼면 바로 앞 호출과 접두가 어긋나므로, 접두가 맞는 가장 최근 호출을
     // 뒤로 찾는다. /compact 로 history 가 재작성되면 어느 호출과도 접두가 안
     // 맞아 0 — 그때 숨기면 새 대화가 가려지므로 안전한 기본값이다.
     // cache_control 은 호출마다 위치가 바뀔 수 있어 비교에서 제외한다.
-    // 표시는 최신순으로 뒤집지만 접두 검증은 시간 오름차순으로만 성립하므로
-    // 오름차순 선행 패스로 계산해 request_id 별로 저장한다.
+    // 접두 검증은 시간 오름차순으로만 성립하므로 오름차순 선행 패스로 계산해
+    // request_id 별로 저장한다.
     const historyStartByRid = new Map<string, number>();
     {
       const prevCallsMsgs: (unknown[] | null)[] = [];
@@ -535,13 +573,9 @@ export function BodyLogSessions({
             <span className="font-medium" title={selected.user_id ?? undefined}>
               <EmailText email={selected.user_email} fallback={selected.user_id ?? '-'} />
             </span>
-            {selected.client && <Badge tone="neutral">{selected.client}</Badge>}
-            {selected.session_id === null && (
-              <span title={t('heuristicSessionTitle')}>
-                <Badge tone="neutral">{t('heuristicSession')}</Badge>
-              </span>
-            )}
-            {/* 아래 호출 행 시각도 같은 브라우저 TZ — 이름은 여기 한 번 적는다. */}
+            {selected.client && <Badge tone="neutral">{clientDisplay(selected.client)}</Badge>}
+            {selected.session_id === null && <HeuristicBadge label={t('heuristicSession')} />}
+            {/* 세션 범위 — 아래 호출 목록과 같은 브라우저 TZ(Time 열 제목에도 이름). */}
             <span className="text-muted-foreground" title={pit.title}>
               {pit.dateTime(selected.started_at)} → {pit.dateTimeZ(selected.ended_at)}
             </span>
@@ -599,8 +633,28 @@ export function BodyLogSessions({
           )}
         </div>
 
-        {/* 호출 타임라인 */}
+        {/* 호출 타임라인 — 열 제목('96→80' 이 입력→출력 토큰인지 등)을 행과 같은 그리드로. */}
         <div className="space-y-2">
+          <div
+            className={`${CALL_GRID} px-4 text-[11px] font-medium text-muted-foreground`}
+            aria-hidden="true"
+          >
+            <span />
+            <span>{t('colNo')}</span>
+            {/* 행 시각은 브라우저 TZ — 열 제목에 이름('Time (GMT+9)'). */}
+            <span title={pit.title}>{pit.header(t('colTime'))}</span>
+            <span>{t('colModel')}</span>
+            <span>{t('colStatus')}</span>
+            <span className="text-right">{t('colLatency')}</span>
+            <span className="text-right">{t('colCost')}</span>
+            <span className="text-right" title={t('colTokensTitle')}>
+              {t('colTokens')}
+            </span>
+            <span className="text-right" title={t('colCacheTitle')}>
+              {t('colCache')}
+            </span>
+            <span />
+          </div>
           {shownCalls.map(({ call, idx: i }) => {
             const res = bodies[call.request_id];
             const isLoading = loadingIds.has(call.request_id);
@@ -614,7 +668,7 @@ export function BodyLogSessions({
                   type="button"
                   aria-expanded={isOpen}
                   onClick={() => toggleCall(call.request_id)}
-                  className="grid w-full grid-cols-[14px_2.5rem_9rem_minmax(6rem,1fr)_5.5rem_3.5rem_5rem_6rem_auto] items-center gap-2 px-4 py-3 text-left text-sm"
+                  className={`${CALL_GRID} w-full px-4 py-3 text-left text-sm`}
                 >
                   {isOpen ? (
                     <ChevronDown size={14} aria-hidden="true" />
@@ -641,10 +695,20 @@ export function BodyLogSessions({
                   <span className="num text-right text-xs text-muted-foreground">
                     {call.cost_usd != null ? <Usd value={call.cost_usd} /> : ''}
                   </span>
-                  <span className="num text-right text-xs text-muted-foreground">
-                    {call.input_tokens != null || call.output_tokens != null
-                      ? `${fmtTokensCompact(call.input_tokens)}→${fmtTokensCompact(call.output_tokens)}`
-                      : ''}
+                  <span
+                    className="num text-right text-xs text-muted-foreground"
+                    title={t('colTokensTitle')}
+                  >
+                    {fmtTokenFlow(call.input_tokens, call.output_tokens) ?? ''}
+                  </span>
+                  <span
+                    className="num text-right text-xs text-muted-foreground"
+                    title={t('colCacheTitle')}
+                  >
+                    {(() => {
+                      const c = cacheTokenParts(call.cache_read_tokens, call.cache_write_tokens);
+                      return c ? t('cacheShort', c) : '';
+                    })()}
                   </span>
                   <span className="flex justify-end gap-1">
                     {res?.data?.duplicates ? (
@@ -765,7 +829,7 @@ export function BodyLogSessions({
           <option value="">{t('filterClientAll')}</option>
           {['claude-code', 'cowork', 'codex'].map((c) => (
             <option key={c} value={c}>
-              {c}
+              {clientLabel(c)}
             </option>
           ))}
           <option value="other">{t('filterClientOther')}</option>
@@ -798,9 +862,23 @@ export function BodyLogSessions({
       ) : sessions.length === 0 ? (
         /* 필터가 결과를 좁힐 수 있다는 힌트까지 — "세션이 없습니다" 단독은
            로깅 장애처럼 보인다. */
-        <p className="text-sm text-muted-foreground">
-          {t('sessionsEmpty', { days: appliedFilters.days })}
-        </p>
+        <div className="flex flex-wrap items-center gap-3">
+          <p className="text-sm text-muted-foreground">
+            {t('sessionsEmpty', { days: appliedFilters.days })}
+          </p>
+          {/* 감사 로그와 같은 복구 동작 — 기간을 넓혀 바로 다시 조회한다. */}
+          {appliedFilters.days > 0 && appliedFilters.days < 30 && (
+            <Button
+              type="button"
+              size="sm"
+              variant="secondary"
+              disabled={loading}
+              onClick={() => applyFilters({ ...appliedFilters, days: 30 })}
+            >
+              {t('widenTo30d')}
+            </Button>
+          )}
+        </div>
       ) : (
         <>
           {/* 경고 표기는 뷰어와 같은 보더 박스 — plain 텍스트 나열은 무시되기 쉽다. */}
@@ -866,16 +944,26 @@ export function BodyLogSessions({
                     <EmailText email={s.user_email} fallback={s.user_id ?? '-'} />
                   </Td>
                   <Td className="text-sm">
-                    {s.client ?? '-'}
+                    {clientDisplay(s.client) ?? '-'}
                     {s.session_id === null && (
-                      <span title={t('heuristicSessionTitle')}>
-                        <Badge tone="neutral" className="ml-1">{t('heuristicShort')}</Badge>
-                      </span>
+                      <HeuristicBadge label={t('heuristicShort')} className="ml-1" />
                     )}
                   </Td>
                   <Td numeric className="text-sm">{s.call_count}</Td>
-                  <Td className="max-w-48 truncate text-sm" title={s.models.join(', ')}>
-                    {s.models.join(', ')}
+                  {/* 여러 모델은 '첫 모델 +N' — 쉼표 나열이 잘려 '…'만 보이던 것. 전체는 툴팁. */}
+                  <Td className="max-w-48 text-sm" title={s.models.join(', ')}>
+                    {s.models.length === 0 ? (
+                      '—'
+                    ) : (
+                      <span className="flex min-w-0 items-center gap-1">
+                        <span className="truncate">{s.models[0]}</span>
+                        {s.models.length > 1 && (
+                          <span className="shrink-0 text-xs text-muted-foreground">
+                            {t('modelsMore', { count: s.models.length - 1 })}
+                          </span>
+                        )}
+                      </span>
+                    )}
                   </Td>
                   <Td numeric className="text-sm">
                     {s.total_cost_usd != null ? <Usd value={s.total_cost_usd} /> : '—'}

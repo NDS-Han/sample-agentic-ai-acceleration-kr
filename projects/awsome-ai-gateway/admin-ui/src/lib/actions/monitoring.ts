@@ -51,6 +51,12 @@ export interface MonitoringEvent {
   event_type: string;
   ttft_ms?: number | null;
   latency_ms?: number;
+  client?: string | null;
+  cost_usd?: number | null;
+  input_tokens?: number | null;
+  output_tokens?: number | null;
+  cache_read_tokens?: number | null;
+  cache_write_tokens?: number | null;
   detail: string;
 }
 

@@ -33,6 +33,8 @@ export interface BodyLogUsageMeta {
   input_tokens?: number | null;
   output_tokens?: number | null;
   cache_read_tokens?: number | null;
+  /** usage cache_creation_tokens — 캐시 쓰기. 입력 토큰보다 비싸 비용을 좌우한다. */
+  cache_write_tokens?: number | null;
   reasoning_tokens?: number | null;
 }
 
@@ -103,6 +105,8 @@ export interface BodyLogSessionCall {
   cost_usd: number | null;
   input_tokens: number | null;
   output_tokens: number | null;
+  cache_read_tokens?: number | null;
+  cache_write_tokens?: number | null;
 }
 
 export interface BodyLogSession {

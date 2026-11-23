@@ -66,7 +66,8 @@ def _usage_row(requested_at: datetime | None = None) -> SimpleNamespace:
         is_streaming=True,
         input_tokens=100,
         output_tokens=50,
-        cache_read_tokens=0,
+        cache_read_tokens=30000,
+        cache_creation_tokens=1200,
         reasoning_tokens=0,
         ttft_ms=200,
     )
@@ -373,6 +374,7 @@ def _sess_row(
         input_tokens=10,
         output_tokens=5,
         cache_read_tokens=0,
+        cache_creation_tokens=0,
         reasoning_tokens=0,
         ttft_ms=50,
         cnt=cnt,
@@ -451,6 +453,8 @@ async def test_sessions_groups_by_gap():
     s_new, s_old = payload["sessions"]
     assert s_new["call_count"] == 3
     assert [c["request_id"] for c in s_new["calls"]] == ["a1", "a2", "a3"]  # 시간순(asc)
+    # 세션 호출에도 캐시 토큰이 실린다(요청 행의 토큰 표시용).
+    assert {"cache_read_tokens", "cache_write_tokens"} <= set(s_new["calls"][0])
     assert s_old["call_count"] == 1
 
 
@@ -873,6 +877,9 @@ async def test_single_response_includes_cost_token_meta(settings, audit, store_c
     assert payload["cost_usd"] == 0.012345
     assert payload["input_tokens"] == 100
     assert payload["output_tokens"] == 50
+    # 'Tokens 2→14 인데 $0.08' 오독 방지 — 캐시 토큰도 함께 내려간다.
+    assert payload["cache_read_tokens"] == 30000
+    assert payload["cache_write_tokens"] == 1200
     assert payload["ttft_ms"] == 200
     assert payload["client"] == "other"
     assert payload["latency_ms"] == 1200

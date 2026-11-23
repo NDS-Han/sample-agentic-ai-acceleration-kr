@@ -6,6 +6,13 @@ import {
   splitJsonFrames,
   extractSseParts,
   decodeUnicodeEscapes,
+  splitInjectedBlocks,
+  stripInjectedBlocks,
+  lastUserText,
+  conversationTurns,
+  cacheTokenParts,
+  fmtTokenFlow,
+  clientDisplay,
 } from '@/components/monitoring/bodyLogRender';
 
 describe('splitJsonFrames', () => {
@@ -78,5 +85,59 @@ describe('decodeUnicodeEscapes', () => {
     // 진짜 역슬래시+u 문자열(\\u)은 디코드하지 않는다 — \\u0041 은 유효한
     // 이스케이프처럼 보이지만 선행 역슬래시가 리터럴이므로 보존돼야 한다.
     expect(decodeUnicodeEscapes('\\\\u0041')).toBe('\\\\u0041');
+  });
+});
+
+describe('주입 블록 접기 — Claude Code user 메시지', () => {
+  const reminder = '<system-reminder>\n' + 'skill list\n'.repeat(500) + '</system-reminder>';
+  const text = `${reminder}\n<local-command-stdout>ok</local-command-stdout>\nhi`;
+
+  it('줄 맨 앞에서 시작해 같은 이름으로 닫히는 태그 블록을 분리한다', () => {
+    const segs = splitInjectedBlocks(text);
+    expect(segs.filter((s) => s.kind === 'block').map((s) => (s.kind === 'block' ? s.tag : ''))).toEqual([
+      'system-reminder',
+      'local-command-stdout',
+    ]);
+    // 원문 보존 — 세그먼트를 이으면 원래 텍스트다.
+    expect(segs.map((s) => s.text).join('')).toBe(text);
+  });
+
+  it('문장 중간의 태그나 닫히지 않은 태그는 건드리지 않는다', () => {
+    const plain = 'use <div> here\n<open-only>';
+    expect(splitInjectedBlocks(plain)).toEqual([{ kind: 'text', text: plain }]);
+  });
+
+  it('stripInjectedBlocks 는 실제 입력만 남긴다', () => {
+    expect(stripInjectedBlocks(text)).toBe('hi');
+  });
+
+  it('lastUserText — 툴 결과만 있는 턴은 건너뛰고 마지막 실제 입력을 찾는다', () => {
+    const turns = conversationTurns({
+      messages: [
+        { role: 'user', content: [{ type: 'text', text: reminder }, { type: 'text', text: 'hi' }] },
+        { role: 'assistant', content: [{ type: 'tool_use', name: 'Read', input: {} }] },
+        { role: 'user', content: [{ type: 'tool_result', content: 'file body' }] },
+      ],
+    });
+    expect(lastUserText(turns)).toBe('hi');
+  });
+});
+
+describe('토큰·캐시·앱 표기', () => {
+  it('입력→출력', () => {
+    expect(fmtTokenFlow(2, 14)).toBe('2→14');
+    expect(fmtTokenFlow(null, null)).toBeNull();
+  });
+
+  it('캐시 토큰이 있을 때만 읽기/쓰기를 낸다', () => {
+    expect(cacheTokenParts(30000, 12000)).toEqual({ read: '30K', write: '12K' });
+    expect(cacheTokenParts(0, 0)).toBeNull();
+    expect(cacheTokenParts(null, undefined)).toBeNull();
+  });
+
+  it("앱은 다른 화면과 같은 표시 라벨 — 'other' → 'Other'", () => {
+    expect(clientDisplay('other')).toBe('Other');
+    expect(clientDisplay('claude-code')).toBe('Claude Code');
+    expect(clientDisplay(null)).toBeNull();
   });
 });
