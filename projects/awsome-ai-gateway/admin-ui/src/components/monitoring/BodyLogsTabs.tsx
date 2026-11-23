@@ -7,7 +7,7 @@ import { usePathname, useSearchParams } from 'next/navigation';
 import { useTranslations } from 'next-intl';
 
 import { BodyLogsViewer } from './BodyLogsViewer';
-import { BodyLogSessions, type SessionFilters } from './BodyLogSessions';
+import { BodyLogSessions, DEFAULT_SESSION_DAYS, type SessionFilters } from './BodyLogSessions';
 
 type Mode = 'lookup' | 'sessions';
 
@@ -66,7 +66,7 @@ export function BodyLogsTabs() {
   const onFiltersApplied = useCallback(
     (f: SessionFilters) =>
       setParams({
-        days: f.days === 1 ? null : String(f.days),
+        days: f.days === DEFAULT_SESSION_DAYS ? null : String(f.days),
         user: f.user || null,
         client: f.client || null,
         err: f.hasError ? '1' : null,
@@ -75,7 +75,9 @@ export function BodyLogsTabs() {
   );
 
   const initialFilters: SessionFilters = {
-    days: [1, 7, 30, 90].includes(Number(sp.get('days'))) ? Number(sp.get('days')) : 1,
+    days: [1, 7, 30, 90].includes(Number(sp.get('days')))
+      ? Number(sp.get('days'))
+      : DEFAULT_SESSION_DAYS,
     user: sp.get('user') ?? '',
     client: sp.get('client') ?? '',
     hasError: sp.get('err') === '1',

@@ -19,10 +19,11 @@ import { EmailText } from '@/components/common/UnverifiedEmailBadge';
 import { isSyntheticEmail } from '@/lib/userLabel';
 import { useToast } from '@/components/common/ToastProvider';
 import { usePointInTime } from '@/components/common/usePointInTime';
+import { Usd } from '@/components/common/Usd';
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/common/Table';
 import { ErrorState } from '@/components/common/ErrorState';
 import { Button } from '@/components/common/Button';
-import { BodyRecordContent } from './bodyLogRender';
+import { BodyRecordContent, cacheTokenParts, clientDisplay, fmtTokenFlow } from './bodyLogRender';
 import { eventTone, eventTypeLabels, EVENT_TYPE_FILTERS } from './eventMeta';
 
 // request_body 방언: anthropic/openai chat = messages[], responses API = input.
@@ -287,6 +288,10 @@ export function BodyLogsViewer({
                 <Th>{t('colRequestId')}</Th>
                 <Th>{t('colUser')}</Th>
                 <Th>{t('colModel')}</Th>
+                <Th>{t('colClient')}</Th>
+                <Th numeric>{t('colCost')}</Th>
+                <Th numeric title={t('colTokensTitle')}>{t('colTokens')}</Th>
+                <Th numeric title={t('colCacheTitle')}>{t('colCache')}</Th>
                 <Th>{t('colType')}</Th>
                 <Th>{t('colAction')}</Th>
               </Tr>
@@ -313,6 +318,19 @@ export function BodyLogsViewer({
                     <EmailText email={ev.user_email} fallback={ev.user_id ?? '—'} />
                   </Td>
                   <Td className="text-sm">{ev.model_alias}</Td>
+                  <Td className="text-sm">{clientDisplay(ev.client) ?? '—'}</Td>
+                  <Td numeric className="text-sm">
+                    {ev.cost_usd != null ? <Usd value={ev.cost_usd} /> : '—'}
+                  </Td>
+                  <Td numeric className="text-xs text-muted-foreground">
+                    {fmtTokenFlow(ev.input_tokens, ev.output_tokens) ?? '—'}
+                  </Td>
+                  <Td numeric className="text-xs text-muted-foreground">
+                    {(() => {
+                      const c = cacheTokenParts(ev.cache_read_tokens, ev.cache_write_tokens);
+                      return c ? t('cacheShort', c) : '—';
+                    })()}
+                  </Td>
                   <Td>
                     {/* EventLog 와 같은 톤·번역 라벨 — 같은 이벤트가 화면마다
                         다른 색/문구로 보이지 않게 공유한다. */}
