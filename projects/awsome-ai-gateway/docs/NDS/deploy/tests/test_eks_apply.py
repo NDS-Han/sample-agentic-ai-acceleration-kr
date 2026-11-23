@@ -1881,3 +1881,25 @@ def test_warn_stale_backend_flags_cache_mismatch(tmp_path, capsys):
     eks_apply._warn_stale_backend(cfg, env_dir)
     err = capsys.readouterr().err
     assert "캐시 backend" in err and "stale-bucket" in err
+
+
+def test_dynamic_set_args_injects_brand_name():
+    """eks apply 도 adminUi.env.ADMIN_BRAND_NAME 을 주입한다 — compose/
+    ecs 와 같은 선언 계약이고, capture 의 역생성 경로이기도 하다.
+    콤마/백슬래시는 --set 구분자라 이스케이프돼야 한다."""
+    from deploy import schema
+    base = {"version": 1, "env": "dev",
+            "aws": {"region": "ap-south-1", "account_id": "123456789012"},
+            "deploy": {"target": "eks", "size_tier": "t3"},
+            "features": {"notifications": {"provider": "mock"}},
+            "images": {"tag": "v1",
+                       "registry": "x.dkr.ecr.ap-south-1.amazonaws.com"}}
+    cfg = schema.from_dict(base)
+    args = eks_apply.dynamic_set_args(cfg, {}, "ap-south-1")
+    i = args.index(
+        f"adminUi.env.ADMIN_BRAND_NAME={schema.DEFAULT_BRAND_NAME}")
+    assert args[i - 1] == "--set-string"
+
+    cfg2 = schema.from_dict(dict(base, branding={"name": "A,B\\C"}))
+    args2 = eks_apply.dynamic_set_args(cfg2, {}, "ap-south-1")
+    assert r"adminUi.env.ADMIN_BRAND_NAME=A\,B\\C" in args2

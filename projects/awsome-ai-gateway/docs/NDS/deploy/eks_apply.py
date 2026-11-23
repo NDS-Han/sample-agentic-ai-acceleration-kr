@@ -418,6 +418,15 @@ def dynamic_set_args(cfg: GatewayConfig, outs: dict, region: str) -> list[str]:
                      # 본문 뷰어 — 읽기는 admin-api 가 수행하므로 버킷 이름을 같이 준다
                      "--set",
                      f"adminApi.env.BODY_LOG_S3_BUCKET={outs['body_log_bucket']}"]
+
+    # admin-ui 브랜드명 — compose(environment)/ecs(taskdef env)와 같은 선언
+    # 계약: effective_name(선언 또는 기본값)을 항상 명시 주입해 helm values 에
+    # 남긴다 — capture 가 adminUi.env 에서 역생성할 수 있게 하는 경로이기도
+    # 하다. --set 은 콤마를 값 구분자로 쓰고 브랜드명은 콤마가 유효 문자라
+    # \→\\, ,→\, 로 이스케이프한다 ($는 schema 가 입력 단계에서 차단).
+    brand = (cfg.branding.effective_name
+             .replace("\\", "\\\\").replace(",", "\\,"))
+    args += ["--set-string", f"adminUi.env.ADMIN_BRAND_NAME={brand}"]
     return args
 
 
