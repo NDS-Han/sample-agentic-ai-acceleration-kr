@@ -2,6 +2,9 @@
 
 import { getTranslations } from 'next-intl/server';
 import { AppPolicyPanel } from '@/components/apps/AppPolicyPanel';
+import { pageTitle } from '@/lib/pageMetadata';
+
+export const generateMetadata = pageTitle('nav', 'apps');
 
 export default async function AppsPage() {
   const t = await getTranslations('apps');

@@ -4,8 +4,11 @@ import { getTranslations } from 'next-intl/server';
 import { adminAPI } from '@/lib/api-client';
 import type { ServiceAccountListResponse } from '@/types/entities';
 import { ServiceAccountsPanel } from '@/components/service-accounts/ServiceAccountsPanel';
+import { pageTitle } from '@/lib/pageMetadata';
 
 export const dynamic = 'force-dynamic';
+
+export const generateMetadata = pageTitle('nav', 'serviceAccounts');
 
 export default async function ServiceAccountsPage() {
   const t = await getTranslations('serviceAccounts');

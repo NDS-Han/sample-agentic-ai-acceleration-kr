@@ -13,6 +13,7 @@ import { BudgetSummaryTable } from '@/components/budgets/BudgetSummaryTable';
 import { TeamAllocationView } from '@/components/budgets/TeamAllocationView';
 import { ErrorState } from '@/components/common/ErrorState';
 import { RegisterScreenContext } from '@/components/chat/RegisterScreenContext';
+import { pageTitle } from '@/lib/pageMetadata';
 
 interface BudgetsPageProps {
   // /users 패널의 "예산에서 편집" 딥링크 — ?team= 은 팀 행 펼침·스크롤,
@@ -22,6 +23,8 @@ interface BudgetsPageProps {
 }
 
 const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
+export const generateMetadata = pageTitle('nav', 'budgets');
 
 export default async function BudgetsPage(props: BudgetsPageProps) {
   const searchParams = await props.searchParams;

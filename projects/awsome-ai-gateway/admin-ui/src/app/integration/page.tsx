@@ -3,6 +3,7 @@
 import { SdkSamples } from '@/components/integration/SdkSamples';
 import { highlightCode } from '@/lib/highlight';
 import { getTranslations } from 'next-intl/server';
+import { pageTitle } from '@/lib/pageMetadata';
 
 function gatewayUrl(): string {
   return ((process.env['GATEWAY_INGRESS_URL'] ?? '').trim()) || "https://'<gateway-host>'";
@@ -63,12 +64,9 @@ async function buildAppSamples() {
       `)`,
     ].join('\n'),
   };
+  // LangChain 은 SDK 래퍼라 curl 샘플이 없다 — 예전엔 주석만 든 빈 코드 박스를
+  // 보여 줬다. 안내는 본문 문장(sdk.langchain.note)으로, Python 은 전체 폭으로.
   const langchain = {
-    curl: [
-      `# LangChain wraps the SDKs — no direct HTTP call needed.`,
-      `# OpenAI-family alias: ChatOpenAI + /v1/chat/completions`,
-      `# Claude-family alias:  ChatAnthropic + /v1/messages`,
-    ].join('\n'),
     python: [
       `import os`,
       `from langchain_openai import ChatOpenAI`,
@@ -106,11 +104,12 @@ async function buildAppSamples() {
       python: await block(openai.python, 'python', 'app.py'),
     },
     langchain: {
-      curl: await block(langchain.curl, 'bash', 'note.sh'),
       python: await block(langchain.python, 'python', 'agent.py'),
     },
   };
 }
+
+export const generateMetadata = pageTitle('nav', 'integration');
 
 export default async function IntegrationPage() {
   const t = await getTranslations('integration');
@@ -126,7 +125,9 @@ export default async function IntegrationPage() {
       </header>
 
       {/* 외부 앱 연동 — 서비스 VK 로 gateway 호출하는 샘플 */}
-      <section className="glass glass-hover rounded-apple p-6 space-y-3">
+      {/* glass-hover 는 빼 둔다 — 탭을 누르려고 마우스를 올리면 섹션 전체에
+          primary 테두리·글로우가 떠서 포커스 테두리처럼 보였다. 정적 컨테이너다. */}
+      <section className="glass rounded-apple p-6 space-y-3">
         <h2 className="text-base font-semibold">{t('appIntegTitle')}</h2>
         <p className="text-sm text-muted-foreground">{t('appIntegDesc')}</p>
         <SdkSamples samples={await buildAppSamples()} />

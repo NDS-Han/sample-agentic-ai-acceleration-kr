@@ -5,6 +5,9 @@ import { cookies } from 'next/headers';
 import { getTranslations } from 'next-intl/server';
 import { parseJWT, isSessionExpired, roleFromCookie, ADMIN_ROLE_COOKIE } from '@/lib/auth';
 import { UserRole } from '@/types/enums';
+import { pageTitle } from '@/lib/pageMetadata';
+
+export const generateMetadata = pageTitle('forbidden', 'title');
 
 export default async function ForbiddenPage() {
   const t = await getTranslations('forbidden');

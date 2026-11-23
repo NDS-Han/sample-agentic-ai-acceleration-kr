@@ -7,6 +7,9 @@ import { ModelsTable } from '@/components/models/ModelsTable';
 import { CreateModelButton } from '@/components/models/CreateModelButton';
 import { PriceSyncButton } from '@/components/models/PriceSyncButton';
 import { ErrorState } from '@/components/common/ErrorState';
+import { pageTitle } from '@/lib/pageMetadata';
+
+export const generateMetadata = pageTitle('nav', 'models');
 
 // 모델 카탈로그 관리 전용 페이지. 팀/유저별 모델 접근 정책은 /users 조직 트리의
 // 팀 패널이 소유하고, 앱별 웹서치 토글은 /apps AppPolicyPanel이 소유한다.

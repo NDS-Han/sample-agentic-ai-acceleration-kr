@@ -17,6 +17,7 @@ import { UserTopTable } from '@/components/monitoring/UserTopTable';
 import { EventLog } from '@/components/monitoring/EventLog';
 import { ErrorState } from '@/components/common/ErrorState';
 import { RegisterScreenContext } from '@/components/chat/RegisterScreenContext';
+import { pageTitle } from '@/lib/pageMetadata';
 
 // 각 섹션 fetch 가 throw 하면 Suspense 경계가 페이지 전체 error.tsx 로 새는 대신
 // 그 섹션만 실패 카드로 저하시킨다 — 나머지 섹션은 정상 렌더.
@@ -69,6 +70,8 @@ async function BodyLoggingSection() {
   const provisioned = result.success ? result.data.provisioned !== false : true;
   return <BodyLoggingToggle initialEnabled={enabled} provisioned={provisioned} />;
 }
+
+export const generateMetadata = pageTitle('nav', 'monitoring');
 
 export default async function MonitoringPage() {
   const t = await getTranslations('monitoring');

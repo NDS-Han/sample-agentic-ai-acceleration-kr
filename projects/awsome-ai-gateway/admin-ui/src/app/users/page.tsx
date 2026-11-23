@@ -7,6 +7,7 @@ import { OrgTreeView } from '@/components/users/OrgTreeView';
 import { CognitoSyncButton } from '@/components/users/CognitoSyncButton';
 import { ErrorState } from '@/components/common/ErrorState';
 import { RegisterScreenContext } from '@/components/chat/RegisterScreenContext';
+import { pageTitle } from '@/lib/pageMetadata';
 
 /** 트리를 순회해 노드 타입별 개수만 집계. email/이름 등 PII 는 일절 미수집. */
 function countOrgNodes(node: OrgTreeNode | null): Record<string, number> {
@@ -23,6 +24,8 @@ interface UsersPageProps {
   // Next 15 — searchParams 는 Promise(아래에서 await).
   searchParams: Promise<{ from?: string; node?: string }>;
 }
+
+export const generateMetadata = pageTitle('nav', 'users');
 
 export default async function UsersPage(props: UsersPageProps) {
   const searchParams = await props.searchParams;

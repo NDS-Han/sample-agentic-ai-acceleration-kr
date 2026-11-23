@@ -9,6 +9,7 @@ import { EffectivePolicyCard } from '@/components/users/EffectivePolicyCard';
 import { PeriodSelector } from '@/components/dashboard/PeriodSelector';
 import { ErrorState } from '@/components/common/ErrorState';
 import { currentCalendarMonth, isMonth } from '@/lib/utils/period';
+import { pageTitle } from '@/lib/pageMetadata';
 
 async function UsageSection({ period }: { period?: string }) {
   // 예산과 사용량을 병렬로 fetch — 직렬이면 사용량이 끝난 뒤에야 예산 요청이
@@ -36,6 +37,8 @@ async function PolicySection() {
 interface MyPageProps {
   searchParams: Promise<{ period?: string }>;
 }
+
+export const generateMetadata = pageTitle('nav', 'my');
 
 export default async function MyPage(props: MyPageProps) {
   const searchParams = await props.searchParams;

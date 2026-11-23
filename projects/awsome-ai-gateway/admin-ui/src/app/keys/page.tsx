@@ -8,6 +8,7 @@ import { ErrorState } from '@/components/common/ErrorState';
 import { SegmentedLinks } from '@/components/common/Segmented';
 import type { KeyListResponse } from '@/lib/actions/keys';
 import { KeyStatus } from '@/types/enums';
+import { pageTitle } from '@/lib/pageMetadata';
 
 
 const PAGE_LIMIT = 50;
@@ -15,6 +16,8 @@ const PAGE_LIMIT = 50;
 interface KeysPageProps {
   searchParams?: Promise<{ email?: string; status?: string }>;
 }
+
+export const generateMetadata = pageTitle('nav', 'keys');
 
 export default async function KeysPage(props: KeysPageProps) {
   const searchParams = await props.searchParams;

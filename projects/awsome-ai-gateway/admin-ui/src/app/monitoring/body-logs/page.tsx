@@ -5,6 +5,9 @@ import Link from 'next/link';
 
 import { getBodyLoggingAction } from '@/lib/actions/settings';
 import { BodyLogsTabs } from '@/components/monitoring/BodyLogsTabs';
+import { pageTitle } from '@/lib/pageMetadata';
+
+export const generateMetadata = pageTitle('monitoring.bodyLogs', 'pageTitle');
 
 /**
  * 본문 로그 뷰어 — 요청/응답 본문을 request_id 로 조회한다.

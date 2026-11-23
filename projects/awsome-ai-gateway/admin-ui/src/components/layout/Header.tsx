@@ -12,6 +12,13 @@ import { setLocale } from '@/lib/actions/locale';
 import { RoleBadge } from '@/components/common/Badge';
 import { EmailText } from '@/components/common/UnverifiedEmailBadge';
 
+// 언어 이름·전환 안내는 자기 언어(endonym)로 고정한다 — 현재 언어를 못 읽는 사람도
+// 버튼을 찾을 수 있어야 하므로 next-intl 메시지(현재 로케일)로 번역하지 않는다.
+const LOCALE_UI: Record<string, { current: string; switchTo: string }> = {
+  ko: { current: '한국어', switchTo: 'View in English' },
+  en: { current: 'English', switchTo: '한국어로 보기' },
+};
+
 interface HeaderProps {
   session: AdminSession | null;
 }
@@ -21,6 +28,7 @@ export function Header({ session }: HeaderProps) {
   const locale = useLocale();
   const router = useRouter();
   const [isPending, startTransition] = useTransition();
+  const localeUi = LOCALE_UI[locale] ?? LOCALE_UI.en;
 
   function toggleLocale() {
     const next = locale === 'ko' ? 'en' : 'ko';
@@ -37,11 +45,13 @@ export function Header({ session }: HeaderProps) {
         <button
           onClick={toggleLocale}
           disabled={isPending}
+          title={localeUi.switchTo}
           className="inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-sm font-medium text-muted-foreground hover:bg-accent hover:text-accent-foreground transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50"
-          aria-label="Switch language"
+          aria-label={`${localeUi.current} — ${localeUi.switchTo}`}
         >
+          {/* 현재 언어를 표시한다 — 예전엔 전환될 언어(EN 화면에 'KO')를 보여 헷갈렸다. */}
           <Globe size={15} aria-hidden="true" />
-          <span>{locale === 'ko' ? 'EN' : 'KO'}</span>
+          <span>{localeUi.current}</span>
         </button>
         {session ? (
           <>

@@ -8,6 +8,7 @@ import { highlightCode } from '@/lib/highlight';
 import { ErrorState } from '@/components/common/ErrorState';
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/common/Table';
 import { getTranslations } from 'next-intl/server';
+import { pageTitle } from '@/lib/pageMetadata';
 
 /**
  * 사전 준비 env 블록 — Helm 이 내려준 배포값으로 채우고, 없으면(로컬 dev·방식 A
@@ -37,6 +38,8 @@ function buildEnvText(): string {
     `export GATEWAY_ADMIN_URL="${adminApi}"`,
   ].join('\n');
 }
+
+export const generateMetadata = pageTitle('nav', 'cli');
 
 export default async function CLIPage() {
   const t = await getTranslations('integration');

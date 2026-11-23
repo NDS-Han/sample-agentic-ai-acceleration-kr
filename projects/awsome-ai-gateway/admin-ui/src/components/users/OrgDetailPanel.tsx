@@ -1427,14 +1427,31 @@ function TeamPanel({
         />
       )}
 
-      <SpinnerButton
-        type="button"
-        variant="danger"
-        onClick={() => setConfirmOpen(true)}
-        disabled={memberCount === 0}
+      {/* 위험 작업 영역 — 정책 섹션이 기본 접힘이라 맨 끝에 두기만 하면 큰 빨간 버튼이
+          예산 링크 바로 아래(화면 상단)에 붙어 보였다. 구분선·제목으로 분리하고, 진입 버튼은
+          outline(행 진입용 dangerOutline), solid 빨강은 확인 다이얼로그에만 쓴다. */}
+      <section
+        aria-labelledby={`danger-zone-${node.id}`}
+        className="mt-8 border-t pt-4"
       >
-        {t('forceReauth.button')}
-      </SpinnerButton>
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-apple-md border border-destructive/30 px-3 py-3">
+          <div className="min-w-0">
+            <h3 id={`danger-zone-${node.id}`} className="text-sm font-semibold text-destructive">
+              {t('forceReauth.dangerZoneTitle')}
+            </h3>
+            <p className="mt-0.5 text-xs text-muted-foreground">{t('forceReauth.dangerZoneDesc')}</p>
+          </div>
+          <SpinnerButton
+            type="button"
+            variant="dangerOutline"
+            size="sm"
+            onClick={() => setConfirmOpen(true)}
+            disabled={memberCount === 0}
+          >
+            {t('forceReauth.button')}
+          </SpinnerButton>
+        </div>
+      </section>
 
       <AppDialog
         isOpen={confirmOpen}

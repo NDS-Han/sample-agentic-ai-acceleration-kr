@@ -395,6 +395,8 @@
     "configFetchFailed": "Failed to fetch current enforcement settings — policy and thresholds will be preserved as-is unless changed.",
     "zeroBudgetBadge": "Blocked",
     "zeroBudgetHint": "Budget $0 — all requests are rejected",
+    "teamBudgetUnsetBadge": "Budget not set",
+    "teamBudgetUnsetHint": "New teams start with a $0 budget and hard block, so all requests are rejected until a budget is set.",
     "teamLimitFirst": "Team limit applies first",
     "teamLimitFirstHint": "This user's limit is higher than the team limit ({team}). The gateway checks both, so requests are blocked once the team limit is reached.",
     "teamRemainingCaption": "Team remaining"
@@ -701,6 +703,8 @@
     "saveSuccess": "App access, budgets, and allowed models saved (up to ~5 min to reach the gateway — VK cache TTL)",
     "forceReauth": {
       "button": "Force re-authentication for team",
+      "dangerZoneTitle": "Danger zone",
+      "dangerZoneDesc": "Revokes every active API key in this team at once. Members must restart Claude Code to get a new key.",
       "warning": "will have all active API keys ({count} members) revoked immediately.",
       "note": "Users will receive 401 on their next call and must restart Claude Code to get a new key. Notify them separately if needed.",
       "proceed": "Proceed",
@@ -718,7 +722,7 @@
       "noChanges": "Sync complete (no changes)"
     },
     "search": {
-      "placeholder": "Search email · name · team",
+      "placeholder": "Email, name or team",
       "ariaLabel": "Search organization",
       "clear": "Clear search",
       "minLength": "Enter at least 2 characters",
@@ -1117,6 +1121,7 @@
   },
   "monitoring": {
     "lastHourSummary": "Last 1 Hour Summary",
+    "asOf": "As of {time} ({tz})",
     "totalRequests": "Total Requests",
     "errors": "Errors",
     "avgLatency": "Avg Latency",
@@ -1233,7 +1238,7 @@
       "tabSessions": "Sessions",
       "tabLookup": "By request",
       "sessionsTitle": "Sessions",
-      "sessionsEmpty": "No sessions in the last {days} days — try widening the period.",
+      "sessionsEmpty": "No sessions in the last {days, plural, one {# day} other {# days}} — try widening the period.",
       "sessionsTruncated": "Scan limit hit — some sessions may be missing",
       "colEnded": "Last call",
       "colClient": "Client",
@@ -1433,7 +1438,7 @@
     "autoProvRole": "Role: matching <code>ADMIN_EMAILS</code> or <code>ADMIN_GROUPS</code> grants ADMIN, otherwise DEVELOPER.",
     "legacySts": "<strong>STS-based auth (legacy)</strong>: the pre-Cognito path that issued Virtual Keys directly from AWS SSO credentials is kept for compatibility. New users should use <code>gateway-cli login</code> (OIDC).",
     "binaryTitle": "Binary Downloads",
-    "emptyDownloads": "No downloadable packages. An administrator must build with <code>gateway-cli/package.sh</code> and mount it into admin-api's <code>CLI_DIST_DIR</code>. Until then, use the source install steps above.",
+    "emptyDownloads": "No downloadable packages. An administrator must build with <code>gateway-cli/package.sh</code> and mount it into admin-api's <code>CLI_DIST_DIR</code>. Until then, ask your administrator for the package.",
     "installCli": "Install via CLI",
     "copy": "Copy",
     "copied": "Copied",
@@ -1441,7 +1446,7 @@
     "copyFailed": "Copy failed — select the text and copy it manually.",
     "windowsInstallHint": "Download and extract the archive, then run install.bat or gateway-cli.exe from the extracted folder.",
     "appIntegTitle": "External app integration (agent VK)",
-    "appIntegDesc": "Server-side apps call the gateway with a long-lived VK issued from the API Keys page, as a Bearer token.",
+    "appIntegDesc": "Server-side apps call the gateway with a long-lived VK issued from the Agents page, as a Bearer token. (The API Keys page only lists and revokes keys.)",
     "sdk": {
       "claude": {
         "name": "Claude",
@@ -1459,7 +1464,8 @@
         "name": "LangChain",
         "desc": "Call both families via ChatOpenAI / ChatAnthropic wrappers",
         "endpoint": "/v1/chat/completions or /v1/messages depending on the wrapper",
-        "lib": "langchain-openai·langchain-anthropic"
+        "lib": "langchain-openai·langchain-anthropic",
+        "note": "LangChain wraps the SDKs, so there is no direct HTTP call. Use ChatOpenAI (/v1/chat/completions) for OpenAI-family aliases and ChatAnthropic (/v1/messages) for Claude-family aliases."
       }
     },
     "appIntegNoteVk": "Store the VK in Secrets Manager and read it at app startup — never hardcode it in code or env files",
@@ -1480,8 +1486,8 @@
     "saRepair": "Repair auth",
     "saRepairDone": "Repaired {count} key auth mappings",
     "saRepairFailed": "Repair failed",
-    "saUnmark": "Unflag",
-    "saUnmarkFailed": "Failed to unflag",
+    "saUnmark": "Remove agent flag",
+    "saUnmarkFailed": "Failed to remove agent flag",
     "saIssueTitle": "Issue long-lived VK",
     "saReadyBudget": "Team budget configured",
     "saReadyClients": "No client (app) policy rows",
@@ -1496,12 +1502,13 @@
     "saCopy": "Copy",
     "saClose": "Close",
     "saRepairHint": "Re-registers the key's auth mapping lost from cache. Use when the app gets 401 while the key is still valid.",
-    "saUnmarkTitle": "Unflag agent",
+    "saRepairNoKey": "No active key to repair.",
+    "saUnmarkTitle": "Remove agent flag",
     "saUnmarkMessage": "Remove the agent flag from {email}.",
-    "saUnmarkRevokesKey": "The active key {prefix} will be revoked with the unflag.",
-    "saUnmarkHint": "The account returns to a normal user after unflagging.",
-    "saUnmarkConfirm": "Unflag",
-    "saUnmarkDone": "Agent unflagged",
+    "saUnmarkRevokesKey": "The active key {prefix} will be revoked when the flag is removed.",
+    "saUnmarkHint": "The account returns to a normal user after the flag is removed.",
+    "saUnmarkConfirm": "Remove agent flag",
+    "saUnmarkDone": "Agent flag removed",
     "saIssueButton": "Issue long-lived key",
     "saDisabledHint": "Long-lived key issuance is disabled in this deployment — enable it via the features.service_keys deploy setting.",
     "saGuide1": "Issue a long-lived Virtual Key (VK) for an agent account. External apps call models through the gateway with it.",
@@ -1605,6 +1612,7 @@
     "actorServiceToken": "Service token",
     "actorDev": "Dev login",
     "empty": "No audit entries match the filters.",
+    "widenTo30d": "Widen to 30 days",
     "loadMore": "Load more",
     "loading": "Loading…",
     "loadMoreFailed": "Failed to load more entries",
@@ -1703,5 +1711,5 @@
     "rangeFilterLabel": "Range"
   },
   "windowsInstallHint": "Follow the Windows steps in the install guide above.",
-  "emptyDownloads": "No downloadable packages. An administrator must build with <code>gateway-cli/package.sh</code> and mount it into admin-api's <code>CLI_DIST_DIR</code>. Until then, use the manual steps in the install guide below."
+  "emptyDownloads": "No downloadable packages. An administrator must build with <code>gateway-cli/package.sh</code> and mount it into admin-api's <code>CLI_DIST_DIR</code>. Until then, ask your administrator for the package."
 }

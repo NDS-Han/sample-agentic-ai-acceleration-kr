@@ -14,6 +14,7 @@ import type {
   AuditActionCatalogResponse,
   AuditLogListResponse,
 } from '@/types/entities';
+import { pageTitle } from '@/lib/pageMetadata';
 
 export const dynamic = 'force-dynamic';
 
@@ -30,6 +31,8 @@ interface AuditPageProps {
     resource_id?: string;
   }>;
 }
+
+export const generateMetadata = pageTitle('nav', 'audit');
 
 export default async function AuditPage(props: AuditPageProps) {
   const searchParams = await props.searchParams;
@@ -240,6 +243,8 @@ export default async function AuditPage(props: AuditPageProps) {
           }}
           limit={PAGE_LIMIT}
           knownActions={knownActions}
+          // 기본 7일은 처음엔 비어 보이기 쉽다 — 빈 결과면 같은 필터로 30일 링크를 준다.
+          widenHref={range === '30d' ? undefined : buildQuery({ range: '30d' })}
         />
       )}
     </div>

@@ -22,6 +22,7 @@ import { ModelCostDetail } from '@/components/analytics/ModelCostDetail';
 import { fetchAvailablePeriods } from '@/lib/actions/dashboard';
 import { fetchModelCostAnalytics } from '@/lib/actions/analytics-models';
 import { isMonth, resolveMonth } from '@/lib/utils/period';
+import { pageTitle } from '@/lib/pageMetadata';
 
 // Next 15: searchParams 는 Promise — 페이지에서 await 한 뒤 resolve 된 값을 쓴다.
 interface AnalyticsSearchParams {
@@ -152,6 +153,8 @@ async function ModelCostSection({
   // 튄다.
   return data ? <ModelCostDetail data={data} /> : <ErrorState compact />;
 }
+
+export const generateMetadata = pageTitle('nav', 'analytics');
 
 export default async function AnalyticsPage(props: AnalyticsPageProps) {
   const searchParams = await props.searchParams;

@@ -27,8 +27,10 @@ export function MonitoringOverview({ data }: { data: MonitoringOverviewResponse 
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <h2 className="text-base font-semibold">{t('lastHourSummary')}</h2>
-        <span className="text-xs text-muted-foreground">
-          {fmtDateTime(data.timestamp, locale, tz)}
+        {/* 시각은 브라우저 TZ 가 아니라 리포팅 TZ(REPORTING_TIMEZONE)로 그린다 — TZ 이름을
+            같이 적지 않으면 KST 로 오독된다(예: dev 가 Asia/Kolkata 면 15:17 KST 가 11:47). */}
+        <span className="text-xs text-muted-foreground" title={data.timestamp}>
+          {t('asOf', { time: fmtDateTime(data.timestamp, locale, tz), tz })}
         </span>
       </div>
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4">

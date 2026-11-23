@@ -40,6 +40,7 @@ import { reportingNowParts } from '@/lib/utils/period';
 import { fmtUsd, fmtTokensCompact } from '@/lib/utils/format';
 import { teamDisplayName } from '@/lib/utils/trendSeries';
 import { userLabel } from '@/lib/userLabel';
+import { pageTitle } from '@/lib/pageMetadata';
 
 
 
@@ -383,6 +384,8 @@ async function ClientDistribution({ period }: { period: string }) {
 }
 
 const ALLOWED_CLIENTS = ['all', 'claude-code', 'cowork', 'codex', 'other'];
+
+export const generateMetadata = pageTitle('nav', 'dashboard');
 
 export default async function DashboardPage(
   props: {

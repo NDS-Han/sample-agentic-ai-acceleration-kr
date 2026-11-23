@@ -238,6 +238,8 @@ export function ServiceAccountsPanel({ accounts, maxTtlDays, serviceKeysEnabled 
                 </Td>
                 <Td numeric>
                   <div className="flex items-center justify-end gap-2">
+                    {/* 비활성 버튼은 브라우저에 따라 title 툴팁이 안 뜬다 — 래퍼 span 에 이유를 단다. */}
+                    <span title={a.active_key_prefix ? t('saRepairHint') : t('saRepairNoKey')}>
                     <button
                       onClick={() =>
                         run(`repair-${a.user_id}`, async () => {
@@ -252,15 +254,18 @@ export function ServiceAccountsPanel({ accounts, maxTtlDays, serviceKeysEnabled 
                         })
                       }
                       disabled={busy !== null || !a.active_key_prefix}
-                      title={t('saRepairHint')}
-                      className="rounded-md border border-border px-3 py-1.5 text-xs hover:bg-accent disabled:opacity-40"
+                      aria-label={a.active_key_prefix ? undefined : `${t('saRepair')} — ${t('saRepairNoKey')}`}
+                      className="rounded-md border border-border px-3 py-1.5 text-xs hover:bg-accent disabled:opacity-40 disabled:pointer-events-none"
                     >
                       {t('saRepair')}
                     </button>
+                    </span>
+                    {/* 해제는 확인 다이얼로그를 거치는 되돌릴 수 있는 작업이라 행 버튼은 중립(outline).
+                        키 폐기 경고와 위험 색은 다이얼로그에서만 쓴다. */}
                     <button
                       onClick={() => setUnmarkTarget(a)}
                       disabled={busy !== null}
-                      className="rounded-md border border-destructive/50 px-3 py-1.5 text-xs text-destructive disabled:opacity-40"
+                      className="rounded-md border border-border px-3 py-1.5 text-xs hover:bg-accent disabled:opacity-40"
                     >
                       {t('saUnmark')}
                     </button>

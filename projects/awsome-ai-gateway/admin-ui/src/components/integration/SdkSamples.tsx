@@ -10,9 +10,16 @@ import { SdkIcon, type SdkIconId } from '@/components/integration/SdkIcons';
 export type SdkId = 'claude' | 'openai' | 'langchain';
 
 /** 서버가 shiki 로 하이라이팅해 넘기는 샘플 — html 은 표시용, text 는 복사용. */
+// curl 이 없는 SDK(LangChain 등 래퍼)는 Python 만 전체 폭으로 보여 준다.
+interface SampleBlock {
+  html: string;
+  text: string;
+  filename: string;
+}
+
 export interface SdkSample {
-  curl: { html: string; text: string; filename: string };
-  python: { html: string; text: string; filename: string };
+  curl?: SampleBlock;
+  python: SampleBlock;
 }
 
 interface SdkSamplesProps {
@@ -33,6 +40,7 @@ const SDKS: { id: SdkId; icon: SdkIconId }[] = [
 export function SdkSamples({ samples }: SdkSamplesProps) {
   const t = useTranslations('integration');
   const [sdk, setSdk] = useState<SdkId>('claude');
+  const curl = samples[sdk].curl;
 
   return (
     <div className="space-y-4">
@@ -43,7 +51,8 @@ export function SdkSamples({ samples }: SdkSamplesProps) {
             type="button"
             onClick={() => setSdk(id)}
             aria-pressed={sdk === id}
-            className={`rounded-lg border p-3 text-left transition-colors ${
+            // 포커스 링은 키보드 포커스(focus-visible)일 때 이 버튼에만 그린다.
+            className={`rounded-lg border p-3 text-left transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background ${
               sdk === id
                 ? 'border-primary bg-primary/5'
                 : 'border-border hover:border-primary/50 hover:bg-accent/40'
@@ -60,17 +69,19 @@ export function SdkSamples({ samples }: SdkSamplesProps) {
         ))}
       </div>
 
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-        <div className="space-y-2">
-          <p className="text-xs font-semibold text-muted-foreground">
-            curl — {t(`sdk.${sdk}.endpoint`)}
-          </p>
-          <CodeBlock
-            html={samples[sdk].curl.html}
-            text={samples[sdk].curl.text}
-            filename={samples[sdk].curl.filename}
-          />
-        </div>
+      {t.has(`sdk.${sdk}.note`) && (
+        <p className="text-sm text-muted-foreground">{t(`sdk.${sdk}.note`)}</p>
+      )}
+
+      <div className={`grid grid-cols-1 gap-4 ${curl ? 'lg:grid-cols-2' : ''}`}>
+        {curl && (
+          <div className="space-y-2">
+            <p className="text-xs font-semibold text-muted-foreground">
+              curl — {t(`sdk.${sdk}.endpoint`)}
+            </p>
+            <CodeBlock html={curl.html} text={curl.text} filename={curl.filename} />
+          </div>
+        )}
         <div className="space-y-2">
           <p className="text-xs font-semibold text-muted-foreground">
             Python — {t(`sdk.${sdk}.lib`)}

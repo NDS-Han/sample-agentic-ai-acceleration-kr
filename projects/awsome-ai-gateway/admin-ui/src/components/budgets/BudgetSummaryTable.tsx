@@ -433,9 +433,23 @@ export function BudgetSummaryTable({ items, isAdmin, models, modelsLoadFailed, c
                           </div>
                         </Td>
                         <Td>
+                          {/* 팀 $0 은 신규 팀 자동 생성의 의도된 초기값($0 + HARD_BLOCK)이다 —
+                              빨간 '차단됨' 대신 중립 '예산 미설정' + 설정 진입 링크.
+                              (사용자 행의 $0 은 관리자가 일부러 막은 것이라 위험 배지 유지) */}
                           {team.limit === 0 ? (
-                            <span className="badge badge-danger" title={t('zeroBudgetHint')}>
-                              {t('zeroBudgetBadge')}
+                            <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                              <span className="badge badge-neutral whitespace-nowrap" title={t('teamBudgetUnsetHint')}>
+                                {t('teamBudgetUnsetBadge')}
+                              </span>
+                              {isAdmin && (
+                                <button
+                                  type="button"
+                                  onClick={() => handleOpenDialog(team)}
+                                  className="text-xs text-primary hover:underline underline-offset-2 whitespace-nowrap focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring rounded-sm"
+                                >
+                                  {t('setBudget')}
+                                </button>
+                              )}
                             </span>
                           ) : (
                             <AlertBadge level={team.alert_level} labels={alertLabels} />

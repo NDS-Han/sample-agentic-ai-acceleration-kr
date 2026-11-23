@@ -9,6 +9,7 @@ import { EmailText } from '@/components/common/UnverifiedEmailBadge';
 import { userLabel } from '@/lib/userLabel';
 import type { ServiceAccountUsageResponse } from '@/types/entities';
 import { ServiceAccountDetail } from '@/components/service-accounts/ServiceAccountDetail';
+import { pageTitle } from '@/lib/pageMetadata';
 
 export const dynamic = 'force-dynamic';
 
@@ -23,6 +24,8 @@ const isValidPeriod = (p: string | undefined): p is string => {
   const month = Number(p.slice(5));
   return month >= 1 && month <= 12;
 };
+
+export const generateMetadata = pageTitle('nav', 'serviceAccounts');
 
 export default async function ServiceAccountDetailPage({
   params,

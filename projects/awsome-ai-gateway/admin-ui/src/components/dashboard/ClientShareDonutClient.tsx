@@ -55,14 +55,15 @@ const Donut = memo(function Donut({
 export function ClientShareDonutClient({ data }: Props) {
   const t = useTranslations('dashboard');
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
+  const otherLabel = t('clientOther');
   const pieData = useMemo(
     () =>
       data.clients.map((c, i) => ({
-        name: labelFor(c.client),
+        name: labelFor(c.client, otherLabel),
         value: c.cost_usd,
         fill: COLORS[i % COLORS.length],
       })),
-    [data],
+    [data, otherLabel],
   );
   // 각자 toFixed(1) 하면 99.95% + 0.05% 가 100.0% + 0.1% = 100.1% 로 보인다 —
   // 최대 나머지 방식으로 합을 100.0 에 맞추고, 0 으로 내려간 비0 항목은 '<0.1%'.
@@ -103,7 +104,7 @@ export function ClientShareDonutClient({ data }: Props) {
                 {centerItem ? `${centerItem.share_pct.toFixed(0)}%` : '—'}
               </p>
               <p className="mt-1 max-w-full truncate text-xs font-medium text-foreground">
-                {centerItem ? labelFor(centerItem.client) : ''}
+                {centerItem ? labelFor(centerItem.client, otherLabel) : ''}
               </p>
               <p className="mt-0.5 text-[10px] text-muted-foreground tabular-nums">
                 {hoverIndex != null && centerItem
@@ -128,10 +129,10 @@ export function ClientShareDonutClient({ data }: Props) {
                 style={{ backgroundColor: COLORS[i % COLORS.length] }}
               />
               {/* ModelShareDonut 과 동일 — 하이픈 토큰 중간 줄바꿈 방지(L5). */}
-              <span className="font-medium break-words leading-snug" title={labelFor(c.client)}>
-                {labelFor(c.client).split(' ').map((tok, ti) => (
+              <span className="font-medium break-words leading-snug" title={labelFor(c.client, otherLabel)}>
+                {labelFor(c.client, otherLabel).split(' ').map((tok, ti) => (
                   <span key={ti} className={tok.includes('-') ? 'whitespace-nowrap' : undefined}>
-                    {tok}{ti < labelFor(c.client).split(' ').length - 1 ? ' ' : ''}
+                    {tok}{ti < labelFor(c.client, otherLabel).split(' ').length - 1 ? ' ' : ''}
                   </span>
                 ))}
               </span>

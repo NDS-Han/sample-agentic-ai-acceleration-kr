@@ -35,6 +35,8 @@ interface Props {
   limit: number;
   /** i18n 라벨 해소 대상 — 카탈로그에 있는 액션만 t() 한다. */
   knownActions: string[];
+  /** 빈 결과일 때 보여 줄 '30일로 넓히기' 링크. 이미 최대 구간이면 생략. */
+  widenHref?: string;
 }
 
 /** 액션 표시 색 — 파괴 계열(danger)과 민감 열람·확인됨(amber)을 시각적으로 구분. */
@@ -73,6 +75,7 @@ export function AuditLogListView({
   filters,
   limit,
   knownActions,
+  widenHref,
 }: Props) {
   const t = useTranslations('audit');
   const tAuth = useTranslations('auth');
@@ -84,6 +87,11 @@ export function AuditLogListView({
   const [hasMore, setHasMore] = useState(initialHasMore);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [isPending, startTransition] = useTransition();
+
+  // 결과 열은 실패 행이 있을 때만 — 성공이 기본값이라 전부 '—' 인 열은 공간만 차지한다.
+  // 더 보기로 실패 행이 들어오면 그때 열이 나타난다.
+  const showResult = items.some((it) => it.result !== 'SUCCESS');
+  const colCount = showResult ? 6 : 5;
 
   const known = new Set(knownActions);
   // 라벨은 정규화된 이름으로 찾는다 — *_CONFIRMED 행은 원본 라벨 + 확인됨 배지.
@@ -183,7 +191,7 @@ export function AuditLogListView({
             <Th>{t('colActor')}</Th>
             <Th>{t('colAction')}</Th>
             <Th>{t('colTarget')}</Th>
-            <Th>{t('colResult')}</Th>
+            {showResult && <Th>{t('colResult')}</Th>}
           </Tr>
         </THead>
         <TBody>
@@ -256,27 +264,41 @@ export function AuditLogListView({
                     </span>
                   </Link>
                 </Td>
-                <Td>
-                  {/* 성공은 감사의 기본값 — 매 행 배지를 달면 실패가 안 보인다. */}
-                  {it.result === 'SUCCESS' ? (
-                    <span className="text-muted-foreground">—</span>
-                  ) : (
-                    <span title={it.result}>
-                      <Badge tone="danger">{t('resultFailure')}</Badge>
-                    </span>
-                  )}
-                </Td>
+                {showResult && (
+                  <Td>
+                    {/* 성공은 감사의 기본값 — 매 행 배지를 달면 실패가 안 보인다. */}
+                    {it.result === 'SUCCESS' ? (
+                      <span className="text-muted-foreground">—</span>
+                    ) : (
+                      <span title={it.result}>
+                        <Badge tone="danger">{t('resultFailure')}</Badge>
+                      </span>
+                    )}
+                  </Td>
+                )}
               </Tr>
               {expanded.has(it.id) && (
                 <Tr>
-                  <Td colSpan={6} className="bg-muted/30">
+                  <Td colSpan={colCount} className="bg-muted/30">
                     <ChangesPanel item={it} />
                   </Td>
                 </Tr>
               )}
             </Fragment>
           ))}
-          {items.length === 0 && <TEmpty colSpan={6}>{t('empty')}</TEmpty>}
+          {items.length === 0 && (
+            <TEmpty colSpan={colCount}>
+              <p>{t('empty')}</p>
+              {widenHref && (
+                <Link
+                  href={widenHref}
+                  className="mt-3 inline-flex items-center rounded-md border border-border bg-background px-3 py-1.5 text-sm font-medium text-foreground hover:bg-accent transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                >
+                  {t('widenTo30d')}
+                </Link>
+              )}
+            </TEmpty>
+          )}
         </TBody>
       </Table>
 
