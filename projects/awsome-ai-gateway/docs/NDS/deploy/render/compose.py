@@ -97,6 +97,12 @@ def transform_services(base: dict, cfg: GatewayConfig) -> dict:
         if name in APP_SERVICES or name in ("postgres", "redis"):
             svc.pop("ports", None)
 
+        # ⑤-a admin-ui 브랜드명 — 항상 명시값(gateway.yaml 이 단일 출처). '$' 는
+        #     schema 가 거부하므로 compose 치환 escape 가 필요 없다.
+        if name == "admin-ui":
+            svc.setdefault("environment", {})["ADMIN_BRAND_NAME"] = \
+                cfg.branding.effective_name
+
         # ⑤-b admin-ui 는 env_file 을 안 읽으므로 OIDC/외부 URL 을 environment 에 직접 주입
         if name == "admin-ui" and cfg.oidc.enabled:
             svc.setdefault("environment", {}).update({

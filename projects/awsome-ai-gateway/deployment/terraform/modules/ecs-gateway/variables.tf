@@ -318,6 +318,12 @@ variable "service_keys_enabled" {
   default     = false
 }
 
+variable "admin_brand_name" {
+  description = "admin-ui 사이드바·탭 제목의 서비스 이름 (ADMIN_BRAND_NAME). 비우면 admin-ui 기본값"
+  type        = string
+  default     = ""
+}
+
 variable "dev_login_enabled" {
   description = "OIDC 없을 때 admin-api/admin-ui 의 dev login 허용 — oidc.enabled 면 반드시 false"
   type        = bool

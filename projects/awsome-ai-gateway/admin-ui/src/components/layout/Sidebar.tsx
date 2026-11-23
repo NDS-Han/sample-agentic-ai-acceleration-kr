@@ -26,12 +26,16 @@ import type { UserRole } from '@/types/enums';
 import { UserRole as UserRoleConst } from '@/types/enums';
 import { ThemeToggle } from '@/components/common/ThemeToggle';
 import { BrandLogo } from '@/components/brand/BrandLogo';
+import { DEFAULT_BRAND_NAME } from '@/lib/branding';
 
 interface SidebarProps {
   role?: UserRole;
   // BI Insight(admin-chat-agent) 배포 여부 — 미배포면 chat 항목을 숨긴다.
   // layout.tsx 가 CHAT_ENABLED env 를 읽어 넘긴다. 미전달 시 숨김(fail-close).
   chatEnabled?: boolean;
+  // 브랜드명 — layout.tsx 가 ADMIN_BRAND_NAME env 를 읽어(lib/branding) 넘긴다.
+  // 클라이언트 컴포넌트라 env 를 직접 읽으면 안 된다.
+  brandName?: string;
 }
 
 interface NavItemDef {
@@ -154,7 +158,11 @@ const BOTTOM_NAV_ITEMS: NavItemDef[] = [
   },
 ];
 
-export function Sidebar({ role, chatEnabled = false }: SidebarProps) {
+export function Sidebar({
+  role,
+  chatEnabled = false,
+  brandName = DEFAULT_BRAND_NAME,
+}: SidebarProps) {
   const pathname = usePathname();
   const t = useTranslations('nav');
 
@@ -173,10 +181,15 @@ export function Sidebar({ role, chatEnabled = false }: SidebarProps) {
       {/* Logo / Brand — 고스트 그라데이션 마크(BrandLogo 단일 출처). ink 타일 위에
           teal 그라데이션 고스트가 두 테마 모두에서 선명. */}
       <div className="flex h-16 items-center gap-2 border-b border-sidebar-border px-6">
-        <div className="flex h-8 w-8 items-center justify-center rounded-apple-sm bg-[#1b2430]">
+        <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-apple-sm bg-[#1b2430]">
           <BrandLogo size={21} idSuffix="sidebar" />
         </div>
-        <span className="text-sm font-semibold text-sidebar-foreground">AWSome AI Gateway</span>
+        <span
+          className="min-w-0 truncate text-sm font-semibold text-sidebar-foreground"
+          title={brandName}
+        >
+          {brandName}
+        </span>
       </div>
 
       {/* Navigation */}
@@ -230,7 +243,9 @@ export function Sidebar({ role, chatEnabled = false }: SidebarProps) {
           </Link>
         ))}
         <ThemeToggle />
-        <p className="px-2 text-xs text-muted-foreground">AWSome AI Gateway Admin</p>
+        <p className="truncate px-2 text-xs text-muted-foreground" title={`${brandName} Admin`}>
+          {brandName} Admin
+        </p>
       </div>
     </aside>
   );

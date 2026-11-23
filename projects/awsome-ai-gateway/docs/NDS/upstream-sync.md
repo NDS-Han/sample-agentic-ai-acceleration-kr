@@ -83,7 +83,7 @@ git merge origin/pr/nds-delta
 | 방향 | 기준 | 현재 목록 (2026-10 기준) |
 |---|---|---|
 | **theirs** | upstream과 동일하게 유지해 향후 머지를 쉽게 — 재제출본의 리뷰 반영·신규 기능·운영 문서 | `thinking_normalizer.py`, `gateway-proxy/tests/**`, `docs/us-llm-gateway/**`, US-19 신규 파일, `db` 스키마/마이그레이션 |
-| **ours** | NDS 고유 기능 — upstream에 없고 올리면 안 되는 것 | `roleFromCookie`/`ADMIN_ROLE_COOKIE` (layout.tsx), `revoke_keys_for_users` (key_service.py), budget `cap_source`·팀 기본 cap·다운그레이드 배지, `tracked` 플래그, `UsageTrendChart` ReportingTZ, `CHAT_ENABLED` 게이트, `NDS/` 문서·`deploy` 스크립트, `provider: mock` 기본값 |
+| **ours** | NDS 고유 기능 — upstream에 없고 올리면 안 되는 것 | `roleFromCookie`/`ADMIN_ROLE_COOKIE` (layout.tsx), `revoke_keys_for_users` (key_service.py), budget `cap_source`·팀 기본 cap·다운그레이드 배지, `tracked` 플래그, `UsageTrendChart` ReportingTZ, `CHAT_ENABLED` 게이트, `ADMIN_BRAND_NAME` 브랜드명(`lib/branding.ts`), `NDS/` 문서·`deploy` 스크립트, `provider: mock` 기본값 |
 | **혼합** | 양쪽에 다른 수정이 공존 | `messages.py` — NDS 과금/에러 스키마는 ours + PR 정규화 주석/필드는 theirs |
 
 판단 기준: "이 hunk가 upstream에도 존재하는 코드인가?" — 그러면 theirs가

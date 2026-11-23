@@ -5,7 +5,7 @@ import { ChatLayout } from '@/components/chat/ChatLayout';
 import { Sparkles } from 'lucide-react';
 
 export const metadata = {
-  title: 'BI Insight — AWSome AI Gateway Admin',
+  title: 'BI Insight', // 루트 layout 의 title.template 이 브랜드를 붙인다
 };
 
 export default async function ChatPage() {

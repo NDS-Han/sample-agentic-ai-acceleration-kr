@@ -266,6 +266,11 @@ def desired_values(cfg: GatewayConfig) -> dict:
     v.setdefault("adminApi", {}).setdefault("env", {})[
         "SERVICE_KEYS_ENABLED"] = "true" if cfg.features.service_keys else "false"
 
+    # branding.name — admin-ui 런타임 env. 항상 명시값을 내려 env overlay 의
+    # 이전 값이 남지 않게 한다(미선언이면 기본 브랜드명).
+    v.setdefault("adminUi", {}).setdefault("env", {})[
+        "ADMIN_BRAND_NAME"] = cfg.branding.effective_name
+
     # VK TTL — adminApi.env:OIDC_VK_TTL_HOURS 로 넣으면 oidcEnv 뒤에 같은 이름의
     # env 가 2개 생기는 함정이 있다(ops 8-Z) — 정식 키 adminApi.oidc.vkTtlHours.
     if cfg.oidc.vk_ttl_hours:

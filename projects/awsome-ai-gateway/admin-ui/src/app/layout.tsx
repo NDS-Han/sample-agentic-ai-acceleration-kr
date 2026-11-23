@@ -25,12 +25,19 @@ import { ThemeProvider } from '@/components/common/ThemeProvider';
 import { ChatShell } from '@/components/chat/ChatShell';
 import { ReportingTimezoneProvider } from '@/components/common/ReportingTimezoneProvider';
 import { reportingTimezone } from '@/lib/utils/period';
+import { brandName } from '@/lib/branding';
 import type { AdminSession } from '@/types/entities';
 
-export const metadata: Metadata = {
-  title: 'AWSome AI Gateway Admin',
-  description: 'AWSome AI Gateway 관리자 대시보드 — API 키, 예산, 모델, 사용량 분석 통합 관리',
-};
+// 탭 제목·설명은 런타임 브랜드명(ADMIN_BRAND_NAME)을 따른다. 레이아웃이 cookies()
+// 로 동적 렌더이므로 요청 시점 env 가 반영된다. 하위 페이지는 title 만 주면
+// template 으로 "<페이지> — <브랜드> Admin" 이 된다.
+export async function generateMetadata(): Promise<Metadata> {
+  const brand = brandName();
+  return {
+    title: { default: `${brand} Admin`, template: `%s — ${brand} Admin` },
+    description: `${brand} 관리자 대시보드 — API 키, 예산, 모델, 사용량 분석 통합 관리`,
+  };
+}
 
 export default async function RootLayout({
   children,
@@ -87,7 +94,7 @@ export default async function RootLayout({
             <ReportingTimezoneProvider tz={reportingTimezone()}>
             <ToastProvider>
               <div className="flex h-screen bg-background">
-                <Sidebar role={session?.role} chatEnabled={chatDeployed} />
+                <Sidebar role={session?.role} chatEnabled={chatDeployed} brandName={brandName()} />
                 {/* ChatShell: 본문과 퀵챗 패널을 flex 형제로 배치(분할뷰). 채팅
                     열리면 본문이 자동으로 좁아짐(overlay 아님). enabled=ADMIN +
                     BI Insight 배포된 환경에서만 채팅 UI 노출 — Provider 는 항상

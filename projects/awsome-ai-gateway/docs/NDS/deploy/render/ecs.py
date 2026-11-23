@@ -166,6 +166,8 @@ def desired_tfvars(cfg: GatewayConfig, extra_vars: dict | None = None) -> dict:
     vars_["enable_body_logging"] = bool(cfg.features.body_logging)
     # false 면 admin-api 가 서비스 계정 표지·장기키 발급을 전부 403 거부
     vars_["service_keys_enabled"] = cfg.features.service_keys
+    # admin-ui 브랜드명 — 실제 tfvars 라 기본값도 명시한다
+    vars_["admin_brand_name"] = cfg.branding.effective_name
     # alerting — eks 의 overlay 양산 방식과 달리 ecs 는 실제 tfvars 라 false 를
     # 명시한다. emails 는 enabled 게이트(schema 검증) 안에서만 발산.
     vars_["enable_alerting"] = cfg.features.alerting.enabled

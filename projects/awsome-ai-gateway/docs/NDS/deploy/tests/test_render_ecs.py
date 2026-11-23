@@ -471,3 +471,10 @@ def test_effective_extra_vars_prunes_declared_off_keys(tmp_path):
                         "zone_id": "Z1"})
     v2 = ecs_apply.effective_extra_vars(cfg2, tmp_path)
     assert "admin_ui_nextauth_url" not in v2
+
+
+def test_admin_brand_name_tfvars():
+    # 실제 tfvars 라 미선언이어도 기본 브랜드명을 명시한다
+    assert ecs_render.desired_tfvars(_cfg())["admin_brand_name"] == schema.DEFAULT_BRAND_NAME
+    assert ecs_render.desired_tfvars(
+        _cfg(branding={"name": "농심 AI Gateway"}))["admin_brand_name"] == "농심 AI Gateway"

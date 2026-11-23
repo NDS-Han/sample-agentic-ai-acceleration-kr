@@ -19,6 +19,11 @@ DOMAIN_MODES = ("none", "cloudfront-temp", "selfsigned-temp", "route53-acm")
 NOTIFICATION_PROVIDERS = ("mock", "smtp", "ses", "internal_api")
 MODEL_PROFILES = ("global", "regional")
 
+# admin-ui 브랜드명 — admin-ui/src/lib/branding.ts 의 DEFAULT_BRAND_NAME /
+# MAX_BRAND_NAME_LENGTH 와 같은 값이어야 한다.
+DEFAULT_BRAND_NAME = "AWSome AI Gateway"
+MAX_BRAND_NAME_LENGTH = 40
+
 _ENV_RE = re.compile(r"^[a-z][a-z0-9-]{1,30}$")
 _EMAIL_RE = re.compile(r"^[^@\s,]+@[^@\s,]+\.[^@\s,]+$")
 
@@ -190,6 +195,17 @@ class ClientsConfig:
 
 
 @dataclass
+class BrandingConfig:
+    # admin-ui 사이드바·탭 제목의 서비스 이름. 비우면 DEFAULT_BRAND_NAME.
+    # compose/ecs/eks 모두 admin-ui 런타임 env ADMIN_BRAND_NAME 으로 내려간다.
+    name: str = ""
+
+    @property
+    def effective_name(self) -> str:
+        return self.name or DEFAULT_BRAND_NAME
+
+
+@dataclass
 class InfraDbConfig:
     """ecs 경로 DB 세부 override — 빈 값이면 size_tier 프리셋을 쓴다.
     mode 전환(serverless↔provisioned)은 리소스 재생성급 변경이다."""
@@ -274,6 +290,7 @@ class GatewayConfig:
     features: FeaturesConfig = field(default_factory=FeaturesConfig)
     images: ImagesConfig = field(default_factory=ImagesConfig)
     clients: ClientsConfig = field(default_factory=ClientsConfig)
+    branding: BrandingConfig = field(default_factory=BrandingConfig)
     oidc: OidcConfig = field(default_factory=OidcConfig)
     infra: InfraConfig = field(default_factory=InfraConfig)
 
@@ -836,6 +853,14 @@ class GatewayConfig:
                      f"가능합니다: {sfx!r}")
         if self.clients.models_profile not in MODEL_PROFILES:
             e.append(f"clients.models_profile 은 {MODEL_PROFILES} 중 하나여야 합니다.")
+        bn = self.branding.name
+        if len(bn) > MAX_BRAND_NAME_LENGTH:
+            e.append(f"branding.name 은 {MAX_BRAND_NAME_LENGTH}자 이하여야 합니다 "
+                     f"(현재 {len(bn)}자) — 사이드바 폭을 넘깁니다.")
+        # '$' 는 compose 의 ${VAR} 치환·HCL 의 ${...} 보간으로 해석돼 렌더 결과가
+        # 조용히 바뀐다. 제어문자(개행 등)는 env 한 줄 값을 깨뜨린다.
+        if "$" in bn or re.search(r"[\x00-\x1f\x7f]", bn):
+            e.append(f"branding.name 에 '$' 나 제어문자(개행 등)는 쓸 수 없습니다: {bn!r}")
         if self.oidc.enabled:
             if not self.oidc.client_id:
                 e.append("oidc.issuer_url 을 채웠으면 admin-ui SSO 용 oidc.client_id 도 필요합니다.")
@@ -1022,7 +1047,7 @@ def _image_tags(v: Any, errors: list[str]) -> dict[str, str]:
 
 _TOP_LEVEL_KEYS = frozenset((
     "version", "env", "aws", "deploy", "network", "domain",
-    "features", "images", "clients", "oidc", "infra",
+    "features", "images", "clients", "oidc", "infra", "branding",
 ))
 _AWS_KEYS = frozenset(("region", "account_id", "allowed_roles"))
 _DEPLOY_KEYS = frozenset(("target", "size_tier", "sizing", "capacity_tier",
@@ -1041,6 +1066,7 @@ _NOTIF_KEYS = frozenset(("provider", "smtp_host", "smtp_port", "smtp_from",
                          "smtp_credentials_secret"))
 _IMAGE_KEYS = frozenset(("registry", "tag", "tags"))
 _CLIENT_KEYS = frozenset(("models_profile",))
+_BRANDING_KEYS = frozenset(("name",))
 _OIDC_KEYS = frozenset(("issuer_url", "audience", "client_id", "client_secret",
                         "authorize_url", "token_url", "provider_name", "required_group",
                         "vk_ttl_hours", "groups_claim", "group_prefix",
@@ -1069,6 +1095,7 @@ def from_dict(raw: dict) -> GatewayConfig:
     alerting = _require_mapping(features.get("alerting"), "features.alerting", errors)
     images = _require_mapping(raw.get("images"), "images", errors)
     clients = _require_mapping(raw.get("clients"), "clients", errors)
+    branding = _require_mapping(raw.get("branding"), "branding", errors)
     oidc = _require_mapping(raw.get("oidc"), "oidc", errors)
     infra = _require_mapping(raw.get("infra"), "infra", errors)
 
@@ -1092,6 +1119,10 @@ def from_dict(raw: dict) -> GatewayConfig:
     _check_unknown(alerting, _ALERTING_KEYS, "features.alerting", errors)
     _check_unknown(images, _IMAGE_KEYS, "images", errors)
     _check_unknown(clients, _CLIENT_KEYS, "clients", errors)
+    _check_unknown(branding, _BRANDING_KEYS, "branding", errors)
+    _brand_raw = branding.get("name")
+    if _brand_raw is not None and not isinstance(_brand_raw, str):
+        errors.append(f"branding.name 은 문자열이어야 합니다: {_brand_raw!r}")
     _check_unknown(oidc, _OIDC_KEYS, "oidc", errors)
     _check_unknown(infra, _INFRA_KEYS, "infra", errors)
     _infra_db = infra.get("db") if isinstance(infra.get("db"), dict) else {}
@@ -1195,6 +1226,10 @@ def from_dict(raw: dict) -> GatewayConfig:
         ),
         clients=ClientsConfig(
             models_profile=_opt_str(clients.get("models_profile"), "global"),
+        ),
+        # 앞뒤 공백만 정리한다 — 길이·문자 검증은 validate() 에서 오류로 알린다.
+        branding=BrandingConfig(
+            name=(_brand_raw.strip() if isinstance(_brand_raw, str) else ""),
         ),
         infra=InfraConfig(
             azs=_str_items(infra.get("azs"), "infra.azs", errors),

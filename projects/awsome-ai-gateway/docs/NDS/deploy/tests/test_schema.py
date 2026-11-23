@@ -870,3 +870,42 @@ def test_allowed_roles_rejects_comma():
     cfg = schema.from_dict(minimal(aws={"allowed_roles": ["TeamDevRole",
                                                         "arn:aws:iam::1:role/X"]}))
     assert len(cfg.aws.allowed_roles) == 2
+
+
+# ==============================================================================
+# branding.name — admin-ui 브랜드명
+# ==============================================================================
+
+def test_branding_default_name():
+    cfg = schema.from_dict(minimal())
+    assert cfg.branding.name == ""
+    assert cfg.branding.effective_name == schema.DEFAULT_BRAND_NAME
+
+
+def test_branding_name_trimmed():
+    cfg = schema.from_dict(minimal(branding={"name": "  농심 AI Gateway  "}))
+    assert cfg.branding.effective_name == "농심 AI Gateway"
+
+
+def test_branding_blank_name_falls_back_to_default():
+    cfg = schema.from_dict(minimal(branding={"name": "   "}))
+    assert cfg.branding.effective_name == schema.DEFAULT_BRAND_NAME
+
+
+def test_branding_rejects_too_long():
+    with pytest.raises(schema.SchemaError, match="branding.name"):
+        schema.from_dict(minimal(
+            branding={"name": "가" * (schema.MAX_BRAND_NAME_LENGTH + 1)}))
+
+
+@pytest.mark.parametrize("bad", ["Cost $ Gateway", "a${X}b", "line\nbreak"])
+def test_branding_rejects_dollar_and_control_chars(bad):
+    with pytest.raises(schema.SchemaError, match="branding.name"):
+        schema.from_dict(minimal(branding={"name": bad}))
+
+
+def test_branding_rejects_non_string_and_unknown_key():
+    with pytest.raises(schema.SchemaError, match="branding.name"):
+        schema.from_dict(minimal(branding={"name": 123}))
+    with pytest.raises(schema.SchemaError, match="branding"):
+        schema.from_dict(minimal(branding={"logo": "x.png"}))

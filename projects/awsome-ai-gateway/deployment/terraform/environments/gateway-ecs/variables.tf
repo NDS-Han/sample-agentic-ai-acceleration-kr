@@ -238,6 +238,13 @@ variable "service_keys_enabled" {
   default = false
 }
 
+# admin-ui 사이드바·탭 제목의 서비스 이름 (gateway.yaml branding.name).
+# 비우면 admin-ui 기본값("AWSome AI Gateway").
+variable "admin_brand_name" {
+  type    = string
+  default = ""
+}
+
 # ADMIN 부트스트랩 — admin-api/admin-ui 양쪽에 주입된다.
 # admin_groups 비우면 cognito_groups(기본 ["ClaudeAdmin"])가 ADMIN 이 된다.
 variable "admin_groups" {

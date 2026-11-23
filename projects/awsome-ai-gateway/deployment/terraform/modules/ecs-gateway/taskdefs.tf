@@ -168,6 +168,7 @@ locals {
       NEXT_TELEMETRY_DISABLED = "1"
       DEV_LOGIN_ENABLED       = tostring(var.dev_login_enabled && !local.oidc_enabled)
       CLI_DIST_DIR            = "/app/cli-dist"
+      ADMIN_BRAND_NAME        = var.admin_brand_name
       # /cli 페이지의 사용자 측 주소 + 쿠키 정책 — helm admin-ui 와 같은 계약
       SECURE_COOKIES        = tostring(local.https_ready)
       GATEWAY_INGRESS_URL   = local.gateway_external_url

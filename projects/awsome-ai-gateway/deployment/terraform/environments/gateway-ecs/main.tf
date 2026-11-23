@@ -185,6 +185,7 @@ module "gateway" {
   oidc_required_group   = var.oidc_required_group
   oidc_vk_ttl_hours     = var.oidc_vk_ttl_hours
   service_keys_enabled  = var.service_keys_enabled
+  admin_brand_name      = var.admin_brand_name
   dev_login_enabled     = false # OIDC 를 쓰는 배포에서 dev login 은 항상 끈다
   cognito_user_pool_arn = module.cognito.user_pool_arn
   cognito_user_pool_id  = module.cognito.user_pool_id

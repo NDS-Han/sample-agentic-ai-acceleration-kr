@@ -30,13 +30,8 @@ export function Header({ session }: HeaderProps) {
   }
 
   return (
-    <header className="flex h-16 flex-shrink-0 items-center justify-between border-b border-border bg-background px-6">
-      {/* Left — page context (breadcrumb placeholder) */}
-      <div className="flex items-center gap-2">
-        <span className="text-sm text-muted-foreground">AWSome AI Gateway</span>
-      </div>
-
-      {/* Right — locale toggle + user info + logout */}
+    <header className="flex h-16 flex-shrink-0 items-center justify-end border-b border-border bg-background px-6">
+      {/* locale toggle + user info + logout — 브랜드명은 사이드바에만 둔다(중복 제거) */}
       <div className="flex items-center gap-4">
         <button
           onClick={toggleLocale}

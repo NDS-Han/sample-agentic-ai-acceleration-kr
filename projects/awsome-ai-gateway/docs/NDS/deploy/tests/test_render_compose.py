@@ -401,3 +401,14 @@ def test_port_conflict_domain_mode_checks_http_https():
         assert any(f"http={port}" in x for x in got)
     finally:
         s.close()
+
+
+def test_admin_brand_name_default(tmp_path):
+    _, out = render_to(tmp_path, cfg())
+    ui_env = out["services"]["admin-ui"]["environment"]
+    assert ui_env["ADMIN_BRAND_NAME"] == schema.DEFAULT_BRAND_NAME
+
+
+def test_admin_brand_name_from_branding(tmp_path):
+    _, out = render_to(tmp_path, cfg(branding={"name": "농심 AI Gateway"}))
+    assert out["services"]["admin-ui"]["environment"]["ADMIN_BRAND_NAME"] == "농심 AI Gateway"

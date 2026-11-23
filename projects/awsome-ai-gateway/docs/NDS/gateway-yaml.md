@@ -89,6 +89,9 @@ images:
   #   adminApi: "1.0.71-us19"       #            notificationWorker costRecorderWorker migration
   #   migration: "1.0.54-us19"      # migration 은 단일 tag 로는 안 바뀜 — 여기서만 핀
 
+branding:
+  name: "농심 AI Gateway"     # admin-ui 사이드바·탭 제목 (생략 시 AWSome AI Gateway)
+
 clients:
   models_profile: global      # global (권장) | regional
 
@@ -375,6 +378,18 @@ compose=env):
 - **ecs/compose 에서만 적용** — ecs는 IRSA 허용 ARN 매핑에, compose는 시드 안내에
   반영됩니다. eks는 env tfvars(`bedrock_allowed_model_arns`)와 차트 env values
   (`modelsProfile`)가 소유하므로 이 키는 무시됩니다(validate 경고)
+
+### `branding.name`
+
+- admin-ui 의 서비스 이름 — 사이드바 로고 옆, 사이드바 하단(`<이름> Admin`),
+  브라우저 탭 제목(`<이름> Admin`)에 표시됩니다
+- 생략하거나 비우면 `AWSome AI Gateway`. 앞뒤 공백은 정리되고, **40자 이하**,
+  `$`·개행 같은 제어문자는 오류입니다(compose `${}` 치환·HCL 보간 방지)
+- compose·ecs·eks 모두 admin-ui 런타임 env `ADMIN_BRAND_NAME` 으로 내려갑니다
+  (compose: `docker-compose.yml` environment, ecs: tfvars `admin_brand_name` →
+  task definition, eks: `adminUi.env`). **이미지 재빌드 없이** `./deploy apply`
+  재배포만으로 바뀝니다
+- Cognito 로그인 화면의 브랜딩은 이 키와 별개입니다
 
 ## 변경 후 절차 — `./deploy apply` 가 표준 경로
 

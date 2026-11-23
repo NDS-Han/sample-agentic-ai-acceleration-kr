@@ -493,3 +493,17 @@ def test_env_tfvars_texts_includes_json_channels(tmp_path):
     assert _tfvars_list(tmp_path, "cognito_groups") == ["B", "C"]
     assert _tfvars_list(tmp_path, "cognito_callback_urls") == ["https://cb"]
     assert _env_vpc_cidr(tmp_path) == "10.9.0.0/16"
+
+
+def test_admin_brand_name_default(tmp_path):
+    """branding 미선언이어도 기본 브랜드명을 명시해 env overlay 의 이전 값을 덮는다."""
+    _, out, _ = _render(tmp_path)
+    v = yaml.safe_load((out / "values.yaml").read_text())
+    assert v["adminUi"]["env"]["ADMIN_BRAND_NAME"] == schema.DEFAULT_BRAND_NAME
+
+
+def test_admin_brand_name_from_branding(tmp_path):
+    doc = dict(BASE, branding={"name": "농심 AI Gateway"})
+    _, out, _ = _render(tmp_path, doc)
+    v = yaml.safe_load((out / "values.yaml").read_text())
+    assert v["adminUi"]["env"]["ADMIN_BRAND_NAME"] == "농심 AI Gateway"
