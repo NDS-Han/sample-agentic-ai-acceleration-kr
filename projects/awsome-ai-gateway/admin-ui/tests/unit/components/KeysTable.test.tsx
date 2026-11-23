@@ -4,6 +4,7 @@ import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { KeysListView } from '@/components/keys/KeysListView';
+import { KeysTable } from '@/components/keys/KeysTable';
 import { revokeKeyAction } from '@/lib/actions/keys';
 import type { VirtualKeyListItem } from '@/types/entities';
 import { KeyStatus } from '@/types/enums';
@@ -76,5 +77,42 @@ describe('KeysListView revoke', () => {
       expect(revokeKeyAction).toHaveBeenCalledWith('k-1');
     });
     expect(screen.getByText('sk-abc')).toBeInTheDocument();
+  });
+});
+
+describe('KeysTable status / revoke 노출', () => {
+  const base = { user_email: 'a@b.c', created_at: '2026-01-01T00:00:00Z' };
+  const future = new Date(Date.now() + 365 * 24 * 3600 * 1000).toISOString();
+  const past = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
+
+  it('EXPIRED + 만료일 미래 → 교체됨 배지 + 툴팁, Revoke 없음', () => {
+    const key = { ...base, key_id: 'k-s', key_prefix: 'sk-sup', status: KeyStatus.EXPIRED, expires_at: future } as VirtualKeyListItem;
+    render(<KeysTable keys={[key]} />);
+    expect(screen.getAllByText('keyStatus.SUPERSEDED').length).toBeGreaterThan(0);
+    expect(screen.queryByText('keyStatus.EXPIRED')).not.toBeInTheDocument();
+    expect(screen.getByRole('tooltip')).toHaveTextContent('supersededHint');
+    expect(screen.queryByRole('button', { name: 'revoke' })).not.toBeInTheDocument();
+    expect(screen.getByText('—')).toBeInTheDocument();
+  });
+
+  it('EXPIRED + 만료일 과거 → 만료됨 그대로, Revoke 없음', () => {
+    const key = { ...base, key_id: 'k-e', key_prefix: 'sk-exp', status: KeyStatus.EXPIRED, expires_at: past } as VirtualKeyListItem;
+    render(<KeysTable keys={[key]} />);
+    expect(screen.getByText('keyStatus.EXPIRED')).toBeInTheDocument();
+    expect(screen.queryByText('keyStatus.SUPERSEDED')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'revoke' })).not.toBeInTheDocument();
+  });
+
+  it('REVOKED 는 만료일이 미래여도 폐기됨, Revoke 없음', () => {
+    const key = { ...base, key_id: 'k-r', key_prefix: 'sk-rev', status: KeyStatus.REVOKED, expires_at: future } as VirtualKeyListItem;
+    render(<KeysTable keys={[key]} />);
+    expect(screen.getByText('keyStatus.REVOKED')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'revoke' })).not.toBeInTheDocument();
+    expect(screen.getByText('—')).toBeInTheDocument();
+  });
+
+  it('ACTIVE 는 Revoke 버튼이 활성 상태로 보인다', () => {
+    render(<KeysTable keys={[ACTIVE_KEY]} />);
+    expect(screen.getByRole('button', { name: 'revoke' })).toBeEnabled();
   });
 });

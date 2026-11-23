@@ -192,8 +192,10 @@
     "keyStatus": {
       "ACTIVE": "Active",
       "EXPIRED": "Expired",
-      "REVOKED": "Revoked"
+      "REVOKED": "Revoked",
+      "SUPERSEDED": "Replaced"
     },
+    "supersededHint": "Deactivated because a new key was issued",
     "pageTitle": "API Keys",
     "pageDescription": "VKs are issued only via gateway-cli after Cognito login. This page allows viewing and revoking only.",
     "searchPlaceholder": "Search by user email (partial match)",

@@ -192,8 +192,10 @@
     "keyStatus": {
       "ACTIVE": "활성",
       "EXPIRED": "만료됨",
-      "REVOKED": "폐기됨"
+      "REVOKED": "폐기됨",
+      "SUPERSEDED": "교체됨"
     },
+    "supersededHint": "새 키가 발급돼 비활성화됨",
     "pageTitle": "API Keys",
     "pageDescription": "가상키는 Cognito 로그인 후 gateway-cli 로만 발급됩니다. 이 페이지에서는 조회 / 폐기만 가능합니다.",
     "searchPlaceholder": "사용자 이메일로 검색 (부분 일치)",
