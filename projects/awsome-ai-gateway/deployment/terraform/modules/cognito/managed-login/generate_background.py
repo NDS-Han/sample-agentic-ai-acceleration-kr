@@ -162,8 +162,9 @@ NARROW_PX = 1024
 
 LAYOUT_STYLE = (
     f".panel{{width:calc(100% - {FORM_COLUMN_PX}px)}}"
+    ".copy-narrow{display:none}"
     f"@media (max-width:{NARROW_PX - 1}px){{.panel{{width:100%}}"
-    ".copy{display:none}}"
+    ".copy{display:none}.copy-narrow{display:inline}}"
 )
 MOTION_STYLE = (
     ".ring{transform-box:fill-box;transform-origin:center;"
@@ -208,6 +209,15 @@ def build() -> str:
         'preserveAspectRatio="xMinYMax meet">'
         f'<text x="56" y="752" fill="#a1a1a1" font-family="{FONT}" '
         f'font-size="12">{FOOTER}</text></svg>'
+        # 좁은 화면 — 가운데 문구는 폼 카드에 가려지므로 숨기고, 폼 위쪽 여백
+        # (Cognito main-layout 위 162px)에 한 줄로 둔다. 데스크톱 창을 줄인
+        # 경우 기준(휴대폰 가로 모드 같은 낮은 높이는 고려하지 않음).
+        '<g class="copy-narrow">'
+        f'<text x="40" y="72" fill="#ffffff" font-family="{FONT}" '
+        f'font-size="24" font-weight="700" letter-spacing="-0.4">'
+        f'{HEADING[0]} {HEADING[1]}</text>'
+        f'<text x="40" y="100" fill="#b4b4b4" font-family="{FONT}" '
+        f'font-size="14">{SUBTITLE}</text></g>'
         '</svg>\n'
     )
 
