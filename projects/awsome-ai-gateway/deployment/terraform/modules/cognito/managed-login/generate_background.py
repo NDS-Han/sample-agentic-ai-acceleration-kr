@@ -19,6 +19,9 @@
   여백(81px)인 FORM_COLUMN_PX 폭으로 두고 나머지를 패널로 채운다 —
   CSS width: calc() (SVG2 기하 속성). CSS 를 무시하는 렌더러에서는 width
   속성(50%)으로 떨어진다.
+* 그래프 — 시드 고정 무작위 배치(N_NODES 개, 최소 간격 MIN_GAP)의 성좌 메시 +
+  게이트웨이 허브. 허브로 들어오는 엣지(N_CLIENTS)·나가는 엣지(N_MODELS)에
+  트래픽 점이 흐른다. 문구 영역(COPY_ZONE)에는 노드를 두지 않는다.
 * 움직임 — SMIL(animate/animateMotion)은 검증에서 거부되므로 <style> 의 CSS
   @keyframes 로만 만든다: 트래픽 점은 엣지를 따라 translate, 허브 링은
   퍼지며 사라지고, 일부 노드는 깜빡인다. 각 요소의 정지 위치(cx/cy)는
@@ -39,35 +42,69 @@ FOOTER = "Internal use only"
 PANEL = "#171717"
 FONT = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif"
 
-NODES = {
-    "c1": (80, 120), "c2": (210, 70), "c3": (330, 175),
-    "c4": (110, 610), "c5": (250, 705), "c6": (385, 625),
-    "hub": (470, 420),
-    "m1": (590, 205), "m2": (605, 420), "m3": (585, 640),
-    "p1": (515, 75), "p2": (530, 760),
-}
-MESH = [("c1", "c2"), ("c2", "c3"), ("c4", "c5"), ("c5", "c6"), ("m1", "p1"),
-        ("m3", "p2"), ("c3", "p1"), ("c6", "p2"), ("m1", "m2"), ("m2", "m3")]
-CLIENTS = ["c1", "c2", "c3", "c4", "c5", "c6"]
-MODELS = ["m1", "m2", "m3"]
-TWINKLE = {"c2", "c5", "m2", "p1"}
+# ── 그래프 ─────────────────────────────────────────────────────────────────
+# 패널 비율이 넓어(폼 칼럼을 뺀 나머지 전부) 가로로 긴 좌표계를 쓴다 — slice 로
+# 채우므로 넓은 화면에선 위아래가, 좁은 화면에선 좌우가 잘린다.
+GRAPH_W, GRAPH_H = 1000, 800
+HUB = (690, 400)            # 게이트웨이 — 문구(왼쪽 가운데)와 겹치지 않게 오른쪽
+SEED = 7                    # 고정 시드 — 재생성해도 같은 그림(커밋 diff 안정)
+N_NODES = 64                # 배경 성좌 노드 수
+MIN_GAP = 62                # 노드 간 최소 거리
+N_CLIENTS = 12              # 허브로 들어오는 엣지(트래픽 점이 흐름)
+N_MODELS = 6                # 허브에서 나가는 엣지
+# 문구가 놓이는 영역(그래프 좌표 근사) — 노드를 두지 않아 글자가 묻히지 않게
+COPY_ZONE = (0, 300, 470, 500)
 
 
-def _line(a, b, stroke, width):
-    (x1, y1), (x2, y2) = NODES[a], NODES[b]
-    return (f'<line x1="{x1}" y1="{y1}" x2="{x2}" y2="{y2}" '
+def _layout():
+    """시드 고정 포아송 디스크 근사 — 고르게 흩어진 노드 + 근접 이웃 엣지."""
+    import math
+    import random
+    rnd = random.Random(SEED)
+    pts = []
+    tries = 0
+    while len(pts) < N_NODES and tries < 20000:
+        tries += 1
+        x, y = rnd.uniform(24, GRAPH_W - 24), rnd.uniform(24, GRAPH_H - 24)
+        zx0, zy0, zx1, zy1 = COPY_ZONE
+        if zx0 <= x <= zx1 and zy0 <= y <= zy1:
+            continue
+        if math.dist((x, y), HUB) < 90:
+            continue
+        if all(math.dist((x, y), q) >= MIN_GAP for q in pts):
+            pts.append((round(x), round(y)))
+    # 근접 이웃 2개씩 — 성좌 메시
+    mesh = set()
+    for i, p in enumerate(pts):
+        near = sorted(range(len(pts)), key=lambda j: math.dist(p, pts[j]))[1:3]
+        for j in near:
+            mesh.add((min(i, j), max(i, j)))
+    left = sorted((i for i, p in enumerate(pts) if p[0] < HUB[0] - 120),
+                  key=lambda i: math.dist(pts[i], HUB))
+    right = sorted((i for i, p in enumerate(pts) if p[0] > HUB[0] + 80),
+                   key=lambda i: math.dist(pts[i], HUB))
+    # 허브에 가까운 왼쪽 노드들 — 트래픽 점이 엇갈리도록 각도 순 정렬
+    clients = sorted(left[:N_CLIENTS],
+                     key=lambda i: math.atan2(pts[i][1] - HUB[1], pts[i][0] - HUB[0]))
+    models = right[:N_MODELS]
+    twinkle = set(rnd.sample(range(len(pts)), 10))
+    return pts, sorted(mesh), clients, models, twinkle
+
+
+def _line(p, q, stroke, width):
+    return (f'<line x1="{p[0]}" y1="{p[1]}" x2="{q[0]}" y2="{q[1]}" '
             f'stroke="{stroke}" stroke-width="{width}"/>')
 
 
 PACKET_KEYFRAMES: list[str] = []
 
 
-def _packet(a, b, color, t, dur):
-    """엣지 위 t(0~1) 지점의 트래픽 점 — 정지 위치가 곧 애니메이션의 한 프레임.
+def _packet(p, q, color, t, dur):
+    """엣지 p→q 위 t(0~1) 지점의 트래픽 점 — 정지 위치가 곧 애니메이션의 한 프레임.
 
     CSS 로 시작 노드(-t)에서 끝 노드(1-t)까지 translate 한다. 음수 delay 로
     로드 순간부터 t 지점을 지나는 중인 것처럼 보이게 해 점들이 엇갈린다."""
-    (x1, y1), (x2, y2) = NODES[a], NODES[b]
+    (x1, y1), (x2, y2) = p, q
     dx, dy = x2 - x1, y2 - y1
     n = len(PACKET_KEYFRAMES)
     PACKET_KEYFRAMES.append(
@@ -77,32 +114,36 @@ def _packet(a, b, color, t, dur):
         f"100%{{transform:translate({dx * (1 - t):.1f}px,{dy * (1 - t):.1f}px);opacity:0}}}}"
         f".pk{n}{{animation:pk{n} {dur:.1f}s linear {-dur * t:.2f}s infinite}}")
     return (f'<circle class="pk{n}" cx="{x1 + dx * t:.1f}" cy="{y1 + dy * t:.1f}" '
-            f'r="2.8" fill="{color}"/>')
+            f'r="2.6" fill="{color}"/>')
 
 
 def graph() -> str:
-    el = [_line(a, b, "#262626", 1) for a, b in MESH]
-    el += [_line(c, "hub", "#2b3332", 1.2) for c in CLIENTS]
-    el += [_line("hub", m, "#24504b", 1.2) for m in MODELS]
-    # client→hub·hub→model 방향으로 엇갈린 위치의 정지 트래픽 점들
+    pts, mesh, clients, models, twinkle = _layout()
     PACKET_KEYFRAMES.clear()
-    el += [_packet(c, "hub", "#5eead4", 0.2 + 0.25 * (i % 3), 3.2 + 0.4 * (i % 3))
-           for i, c in enumerate(CLIENTS)]
-    el += [_packet("hub", m, "#2dd4bf", 0.35 + 0.3 * i, 2.2 + 0.3 * i)
-           for i, m in enumerate(MODELS)]
-    for k, (x, y) in NODES.items():
-        if k == "hub":
-            continue
-        stroke = "#2f6e67" if k.startswith("m") else "#3a3a3a"
-        # twinkle 노드는 살짝 밝은 채움으로 구분
-        fill = "#2a4a44" if k in TWINKLE else "#1c1c1c"
-        cls = ' class="tw"' if k in TWINKLE else ""
-        el.append(f'<circle{cls} cx="{x}" cy="{y}" r="4" fill="{fill}" '
-                  f'stroke="{stroke}" stroke-width="1.4"/>')
-    hx, hy = NODES["hub"]
-    el.append(f'<circle class="ring" cx="{hx}" cy="{hy}" r="22" fill="none" '
+    el = [_line(pts[i], pts[j], "#252525", 1) for i, j in mesh]
+    el += [_line(pts[c], HUB, "#2b3735", 1.1) for c in clients]
+    el += [_line(HUB, pts[m], "#24504b", 1.2) for m in models]
+    for k, c in enumerate(clients):
+        el.append(_packet(pts[c], HUB, "#5eead4", (0.15 + 0.29 * k) % 1,
+                          2.8 + 0.35 * (k % 4)))
+    for k, m in enumerate(models):
+        el.append(_packet(HUB, pts[m], "#2dd4bf", (0.3 + 0.37 * k) % 1,
+                          2.0 + 0.3 * (k % 3)))
+    hub_linked = set(clients) | set(models)
+    for i, (x, y) in enumerate(pts):
+        if i in models:
+            stroke, fill, r = "#2f6e67", "#1c2624", 4.5
+        elif i in hub_linked:
+            stroke, fill, r = "#3d4a48", "#1c1c1c", 4
+        else:
+            stroke, fill, r = "#333333", "#1a1a1a", 3
+        cls = ' class="tw"' if i in twinkle else ""
+        el.append(f'<circle{cls} cx="{x}" cy="{y}" r="{r}" fill="{fill}" '
+                  f'stroke="{stroke}" stroke-width="1.3"/>')
+    hx, hy = HUB
+    el.append(f'<circle class="ring" cx="{hx}" cy="{hy}" r="26" fill="none" '
               f'stroke="#2dd4bf" stroke-width="1" opacity="0.18"/>')
-    el.append(f'<circle cx="{hx}" cy="{hy}" r="8" fill="#0f766e" '
+    el.append(f'<circle cx="{hx}" cy="{hy}" r="9" fill="#0f766e" '
               f'stroke="#5eead4" stroke-width="1.6"/>')
     return "".join(el)
 
@@ -140,7 +181,8 @@ def build() -> str:
         '<rect width="100%" height="100%" fill="#ffffff"/>'
         f'<rect class="panel" width="50%" height="100%" fill="{PANEL}"/>'
         # 그래프 — 패널을 꽉 채우고 넘치는 부분은 잘라낸다
-        '<svg class="panel" x="0" y="0" width="50%" height="100%" viewBox="0 0 640 800" '
+        '<svg class="panel" x="0" y="0" width="50%" height="100%" '
+        f'viewBox="0 0 {GRAPH_W} {GRAPH_H}" '
         f'preserveAspectRatio="xMidYMid slice">{g}</svg>'
         # 문구 — 잘리지 않게 왼쪽 가운데 앵커
         '<svg class="panel copy" x="0" y="0" width="50%" height="100%" viewBox="0 0 640 800" '
