@@ -105,7 +105,9 @@ export default async function RootLayout({
                 <ChatShell enabled={session?.role === 'ADMIN' && chatDeployed}>
                   <div className="flex flex-col flex-1 overflow-hidden">
                     <Header session={session} />
-                    <main className="aurora-bg flex-1 overflow-auto p-6">
+                    {/* 우하단 채팅 FAB(56px, bottom-6)가 마지막 행을 가리지 않게 FAB 가
+                        떠 있을 때만 하단 여백을 늘린다 — ChatShell 루트의 data-chat-fab. */}
+                    <main className="aurora-bg flex-1 overflow-auto p-6 group-data-[chat-fab]/shell:pb-24">
                       {children}
                     </main>
                   </div>

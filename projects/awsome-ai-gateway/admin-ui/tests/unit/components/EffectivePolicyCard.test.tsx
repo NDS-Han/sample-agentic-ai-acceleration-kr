@@ -94,3 +94,35 @@ describe('EffectivePolicyCard — 체인 ↔ 매트릭스 교차 표시', () => 
     expect(screen.queryByRole('note')).not.toBeInTheDocument();
   });
 });
+
+describe('EffectivePolicyCard — 모델 라벨 (P2-8)', () => {
+  const models = [
+    { alias: 'opus', output_price_per_1k: 0.075, display_name: 'Opus 5.5' },
+    { alias: 'sonnet', output_price_per_1k: 0.015, display_name: 'Sonnet 5' },
+    { alias: 'haiku', output_price_per_1k: 0.005, display_name: null },
+  ];
+
+  it('매트릭스 행은 display_name 우선 + alias 보조 줄, 표시명이 없으면 alias 한 줄', () => {
+    render(<EffectivePolicyCard policy={policy()} models={models} />);
+    const row = screen.getByRole('row', { name: /Sonnet 5/ });
+    expect(row).toHaveTextContent('Sonnet 5');
+    expect(row).toHaveTextContent('sonnet');
+    const haikuRow = screen.getAllByRole('row').find((r) => r.textContent?.startsWith('haiku'));
+    expect(haikuRow).toBeDefined();
+  });
+
+  it('다운그레이드 노드·경고 문구도 표시명을 쓰고 alias 는 title 로 남긴다', () => {
+    render(<EffectivePolicyCard policy={policy()} models={models} />);
+    const node = screen
+      .getAllByText('Opus 5.5')
+      .find((el) => el.className.includes('line-through'))!;
+    expect(node).toBeDefined();
+    expect(node.parentElement!.getAttribute('title')).toBe('opus — chainUnavailableTeam');
+    expect(screen.getByRole('note').textContent).toContain('"models":"Opus 5.5"');
+  });
+
+  it('models 가 없으면(비-ADMIN /my) 응답 내장 display_name 또는 alias 로 폴백한다', () => {
+    render(<EffectivePolicyCard policy={policy()} />);
+    expect(screen.getByRole('note').textContent).toContain('"models":"opus"');
+  });
+});

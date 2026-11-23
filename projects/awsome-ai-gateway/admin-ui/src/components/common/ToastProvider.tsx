@@ -71,11 +71,14 @@ interface ToastStackProps {
 function ToastStack({ toasts, onDismiss }: ToastStackProps) {
   if (toasts.length === 0) return null;
 
+  // 채팅 FAB(bottom-6 right-6, 56px)가 떠 있으면 같은 코너라 토스트가 FAB 를
+  // 덮는다 — 그때만 FAB 위(bottom-24)로 올린다. FAB 표시 여부는 ChatShell 의
+  // data-chat-fab 속성이다(토스트 스택은 셸 바깥이라 :root:has() 로 읽는다).
   return (
     <div
       aria-live="polite"
       aria-atomic="false"
-      className="fixed bottom-4 right-4 z-50 flex flex-col gap-2 w-80"
+      className="fixed bottom-4 right-4 z-50 flex flex-col gap-2 w-80 [:root:has([data-chat-fab])_&]:bottom-24"
     >
       {toasts.map((item) => (
         <ToastItem key={item.id} item={item} onDismiss={onDismiss} />

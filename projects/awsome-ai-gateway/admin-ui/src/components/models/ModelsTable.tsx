@@ -23,8 +23,10 @@ import { useToast } from '@/components/common/ToastProvider';
 import { Badge } from '@/components/common/Badge';
 import { Button } from '@/components/common/Button';
 import { Table, THead, TBody, Tr, Th, Td, TEmpty } from '@/components/common/Table';
+import { InfoTooltip } from '@/components/common/InfoTooltip';
 import { fmtPricePerM } from '@/lib/utils/pricing';
 import { fmtDate, fmtTokensCompact } from '@/lib/utils/format';
+import { modelDisplay } from '@/lib/utils/modelLabel';
 import { useReportingTz } from '@/components/common/ReportingTimezoneProvider';
 import { CreateModelDialog } from './CreateModelDialog';
 import { DeactivateModelDialog } from './DeactivateModelDialog';
@@ -35,12 +37,16 @@ interface ModelsTableProps {
 }
 
 /** 프로바이더는 상태가 아니라 속성 — 상태 팔레트(amber/pink)를 빌리지 않고
-    전부 neutral. enum 원문(BEDROCK_RUNTIME_OPENAI) 대신 사람이 읽는 라벨을 표시. */
+    전부 neutral. enum 원문(BEDROCK_RUNTIME_OPENAI) 대신 사람이 읽는 라벨을 표시.
+    키는 model.provider enum(PROVIDERS, lib/constants/gateway.ts)의 소문자.
+    Mantle 계열은 'Bedrock Mantle' 접두로 통일 — 'Mantle · OpenAI' 처럼 접두가
+    빠지면 다른 플레인처럼 읽힌다. 와이어 포맷 접미는 ' · OpenAI' 로 runtime 과 맞춘다. */
 const PROVIDER_LABELS: Record<string, string> = {
   bedrock: 'Bedrock',
   'on-prem': 'On-prem',
-  bedrock_mantle: 'Bedrock Mantle',          // Cowork → Mantle Opus (Tokyo)
-  bedrock_mantle_openai: 'Mantle · OpenAI',  // Codex → Mantle GPT-5.5 (Ohio)
+  openmodel: 'OpenModel',
+  bedrock_mantle: 'Bedrock Mantle',                   // Cowork → Mantle Opus (Tokyo)
+  bedrock_mantle_openai: 'Bedrock Mantle · OpenAI',   // Codex → Mantle GPT-5.5 (Ohio)
   bedrock_runtime_openai: 'Bedrock · OpenAI',
 };
 
@@ -175,7 +181,16 @@ export function ModelsTable({ models }: ModelsTableProps) {
               sorted.map((model) => {
                 const isOpen = expanded[model.alias] ?? false;
                 const detailId = `model-detail-${model.alias}`;
-                const displayName = model.display_name ?? model.alias;
+                const displayName = modelDisplay(model.alias, model.display_name);
+                // upstream ID 를 그대로 alias 로 등록한 행 — 보통 짧은 alias 가 이미 있는
+                // 모델의 중복 등록이다(Integration 안내상 full upstream ID 호출은 404).
+                // 같은 model_id 를 쓰는 다른 alias 가 있으면 툴팁에 함께 적는다.
+                const upstreamAlias = model.alias === model.model_id;
+                const sameUpstream = upstreamAlias
+                  ? sorted
+                      .filter((o) => o.alias !== model.alias && o.model_id === model.model_id)
+                      .map((o) => o.alias)
+                  : [];
                 return (
                   <Fragment key={model.alias}>
                     <Tr>
@@ -213,16 +228,44 @@ export function ModelsTable({ models }: ModelsTableProps) {
                                   →{maskAccountId(model.account_role_arn)}
                                 </span>
                               )}
-                              {model.long_context_threshold_tokens != null && (
-                                <span
-                                  className="shrink-0 rounded border border-border px-1 py-0.5 text-[10px] font-medium text-muted-foreground"
-                                  title={t('longContextBadgeTitle', {
-                                    threshold: model.long_context_threshold_tokens.toLocaleString('en-US'),
-                                  })}
-                                >
-                                  &gt;{fmtTokensCompact(model.long_context_threshold_tokens)}
-                                </span>
-                              )}
+                              {model.long_context_threshold_tokens != null && (() => {
+                                // title 은 표시가 늦고 키보드로 안 열려 의미가 안 읽혔다 —
+                                // hover/focus 팝오버(InfoTooltip)로. 경계값은 과금 기준이라
+                                // compact 반올림 없이 전체 자릿수로 적는다.
+                                const badge = `>${fmtTokensCompact(model.long_context_threshold_tokens)}`;
+                                const hint = t('longContextBadgeTitle', {
+                                  threshold: model.long_context_threshold_tokens.toLocaleString('en-US'),
+                                });
+                                return (
+                                  <span className="shrink-0">
+                                    <InfoTooltip
+                                      label={`${badge}: ${hint}`}
+                                      trigger={
+                                        <span className="rounded border border-border px-1 py-0.5 text-[10px] font-medium text-muted-foreground">
+                                          {badge}
+                                        </span>
+                                      }
+                                    >
+                                      {hint}
+                                    </InfoTooltip>
+                                  </span>
+                                );
+                              })()}
+                              {upstreamAlias && (() => {
+                                const hint = sameUpstream.length > 0
+                                  ? `${t('upstreamAliasHint')} ${t('upstreamAliasSame', { aliases: sameUpstream.join(', ') })}`
+                                  : t('upstreamAliasHint');
+                                return (
+                                  <span className="shrink-0">
+                                    <InfoTooltip
+                                      label={`${t('upstreamAliasBadge')}: ${hint}`}
+                                      trigger={<Badge tone="amber">{t('upstreamAliasBadge')}</Badge>}
+                                    >
+                                      {hint}
+                                    </InfoTooltip>
+                                  </span>
+                                );
+                              })()}
                             </div>
                             {/* 라우팅 키(alias)와 실제 호출되는 model_id 는 역할이 다른
                                 식별자라 같은 줄에 두면 구분이 안 된다 — 두 줄로 분리.

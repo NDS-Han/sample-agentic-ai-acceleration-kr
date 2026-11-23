@@ -14,6 +14,7 @@ export function InfoTooltip({
   children,
   align = 'left',
   side = 'bottom',
+  trigger,
 }: {
   label: string;
   children: React.ReactNode;
@@ -22,6 +23,8 @@ export function InfoTooltip({
   /** 아이콘 바로 아래에 폼 컨트롤이 오면 팝오버가 그 위를 덮어 읽히지 않는다 —
       그런 배치에서는 'top' 으로 위쪽에 연다. */
   side?: 'top' | 'bottom';
+  /** ⓘ 아이콘 대신 보일 트리거(배지 등). 넘기면 그 요소 자체가 hover/focus 대상이 된다. */
+  trigger?: React.ReactNode;
 }) {
   const vertical =
     side === 'top' ? 'bottom-full mb-1.5' : 'top-full mt-1.5';
@@ -32,9 +35,11 @@ export function InfoTooltip({
       <button
         type="button"
         aria-label={label}
-        className="text-muted-foreground/70 hover:text-muted-foreground rounded-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+        className={`${
+          trigger ? 'inline-flex cursor-help' : 'text-muted-foreground/70 hover:text-muted-foreground'
+        } rounded-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring`}
       >
-        <Info size={12} aria-hidden="true" />
+        {trigger ?? <Info size={12} aria-hidden="true" />}
       </button>
       <span
         role="tooltip"

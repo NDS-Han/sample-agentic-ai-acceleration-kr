@@ -8,6 +8,7 @@ import { useTranslations } from 'next-intl';
 import { getEffectivePolicyAction, getTeamEffectivePolicyAction } from '@/lib/actions/users';
 import { DowngradeDiagram } from '@/components/common/DowngradeDiagram';
 import { CLIENTS as GATEWAY_CLIENTS } from '@/lib/constants/gateway';
+import { modelDisplay } from '@/lib/utils/modelLabel';
 import type { EffectivePolicy, EffectivePolicyCell, PolicyModelRef } from '@/types/entities';
 
 interface Props {
@@ -78,7 +79,15 @@ export function EffectivePolicyCard({ userId, teamId, policy: policyProp, loadFa
       alias: m.alias,
       output_price_per_1k:
         m.output_price_per_1k == null ? null : parseFloat(m.output_price_per_1k),
+      display_name: m.display_name ?? null,
     }));
+
+  // 모델 라벨 — display_name 우선, alias 보조(modelDisplay). 표시명 소스는 props
+  // models(ADMIN: /admin/models 카탈로그) → 응답 내장 models 순. 둘 다 없으면 alias.
+  const displayNames = new Map<string, string | null | undefined>();
+  for (const m of policy.models ?? []) displayNames.set(m.alias, m.display_name);
+  for (const m of models ?? []) if (m.display_name) displayNames.set(m.alias, m.display_name);
+  const labelOf = (alias: string) => modelDisplay(alias, displayNames.get(alias));
 
   // 다운그레이드 체인 ↔ 허용 매트릭스 교차 검증 — 두 정책은 따로 저장되고 서로
   // 검증하지 않는다(admin-api 는 강등 대상(to)만 팀 allowed-models 로 검사, from 과
@@ -118,6 +127,7 @@ export function EffectivePolicyCard({ userId, teamId, policy: policyProp, loadFa
             edgeTag={(r) => (r.scope === 'TEAM' ? t('scopeTeam') : t('scopeUser'))}
             unavailable={unavailable}
             unavailableLabel={unavailableLabel}
+            labelOf={labelOf}
           />
         ) : (
           <p className="text-xs text-muted-foreground rounded-md border border-dashed border-border px-3 py-2">
@@ -126,7 +136,7 @@ export function EffectivePolicyCard({ userId, teamId, policy: policyProp, loadFa
         )}
         {unavailable.size > 0 && (
           <p role="note" className="mt-1.5 text-xs text-amber-600 dark:text-amber-400">
-            ⚠ {t('chainUnavailableHint', { models: [...unavailable].join(', ') })}
+            ⚠ {t('chainUnavailableHint', { models: [...unavailable].map(labelOf).join(', ') })}
           </p>
         )}
       </div>
@@ -151,7 +161,13 @@ export function EffectivePolicyCard({ userId, teamId, policy: policyProp, loadFa
           <tbody>
             {modelAliases.map((m) => (
               <tr key={m} className="border-b last:border-0">
-                <td className="py-1.5 pr-2 font-medium whitespace-nowrap">{m}</td>
+                <td className="py-1.5 pr-2 whitespace-nowrap">
+                  {/* 표시명 우선 + alias(라우팅 키) 보조 줄 — 같으면 한 줄만. */}
+                  <div className="font-medium">{labelOf(m)}</div>
+                  {labelOf(m) !== m && (
+                    <div className="font-mono mono-id text-[10px] text-muted-foreground">{m}</div>
+                  )}
+                </td>
                 {clients.map((client) => {
                   const cell = cellAt(client, m);
                   if (!cell) return <td key={client} className="text-center">-</td>;
@@ -249,7 +265,7 @@ export function EffectivePolicyCard({ userId, teamId, policy: policyProp, loadFa
               {policy.rate_limits.map((r, i) => (
                 <li key={i}>
                   {r.scope}
-                  {r.model_alias ? ` · ${r.model_alias}` : ''} —{' '}
+                  {r.model_alias ? ` · ${labelOf(r.model_alias)}` : ''} —{' '}
                   {[
                     r.rpm_limit != null && `RPM ${r.rpm_limit}`,
                     r.tpm_limit != null && `TPM ${r.tpm_limit}`,

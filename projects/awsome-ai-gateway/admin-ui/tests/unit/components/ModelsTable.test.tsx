@@ -121,3 +121,56 @@ describe('ModelsTable — LiteLLM 스타일 확장 행', () => {
     expect(screen.queryByText('610156625835')).not.toBeInTheDocument();
   });
 });
+
+describe('ModelsTable — 모델 표기 (P2-8)', () => {
+  it('공급자 배지: OPENMODEL → OpenModel, Mantle 계열은 Bedrock Mantle 접두로 통일', () => {
+    render(
+      <ModelsTable
+        models={[
+          makeModel({ alias: 'a', provider: 'OPENMODEL' }),
+          makeModel({ alias: 'b', provider: 'BEDROCK_MANTLE' }),
+          makeModel({ alias: 'c', provider: 'BEDROCK_MANTLE_OPENAI' }),
+          makeModel({ alias: 'd', provider: 'BEDROCK_RUNTIME_OPENAI' }),
+        ]}
+      />,
+    );
+    // 접힌 행에만 배지가 있다(상세 행은 닫힘).
+    expect(screen.getByText('OpenModel')).toBeInTheDocument();
+    expect(screen.queryByText('OPENMODEL')).not.toBeInTheDocument();
+    expect(screen.getByText('Bedrock Mantle')).toBeInTheDocument();
+    expect(screen.getByText('Bedrock Mantle · OpenAI')).toBeInTheDocument();
+    expect(screen.queryByText('Mantle · OpenAI')).not.toBeInTheDocument();
+    expect(screen.getByText('Bedrock · OpenAI')).toBeInTheDocument();
+  });
+
+  it('장문 구간 배지는 hover/focus 툴팁으로 의미를 설명한다', () => {
+    render(<ModelsTable models={[makeModel({ long_context_threshold_tokens: 272000 })]} />);
+    const trigger = screen.getByRole('button', { name: />272K: longContextBadgeTitle/ });
+    expect(trigger).toHaveTextContent('>272K');
+    expect(screen.getByRole('tooltip', { hidden: true })).toHaveTextContent('longContextBadgeTitle');
+  });
+
+  it('alias === model_id 행에 경고 배지 — 같은 upstream ID 의 다른 alias 를 안내한다', () => {
+    render(
+      <ModelsTable
+        models={[
+          makeModel({ alias: 'claude-opus-4-8', model_id: 'global.anthropic.claude-opus-4-8' }),
+          makeModel({
+            alias: 'global.anthropic.claude-opus-4-8',
+            model_id: 'global.anthropic.claude-opus-4-8',
+          }),
+        ]}
+      />,
+    );
+    const badges = screen.getAllByText('upstreamAliasBadge');
+    expect(badges).toHaveLength(1);
+    expect(screen.getByRole('tooltip', { hidden: true })).toHaveTextContent(
+      'upstreamAliasHint upstreamAliasSame',
+    );
+  });
+
+  it('alias !== model_id 이면 경고 배지가 없다', () => {
+    render(<ModelsTable models={[makeModel({})]} />);
+    expect(screen.queryByText('upstreamAliasBadge')).not.toBeInTheDocument();
+  });
+});

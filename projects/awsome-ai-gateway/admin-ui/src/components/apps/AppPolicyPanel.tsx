@@ -8,6 +8,8 @@ import { useTranslations } from 'next-intl';
 import { getAppPolicyAction, setAppDefaultModelAction, toggleAppModelAction } from '@/lib/actions/apps';
 import { setClientWebSearchAction, setClientRoutingAction } from '@/lib/actions/routing';
 import type { AppPolicy, AppModelRef } from '@/lib/actions/apps';
+import { listActiveModelsAction } from '@/lib/actions/models';
+import { modelDisplay } from '@/lib/utils/modelLabel';
 import { ConfirmDialog } from '@/components/common/ConfirmDialog';
 import { InfoTooltip } from '@/components/common/InfoTooltip';
 import { EmailText } from '@/components/common/UnverifiedEmailBadge';
@@ -33,6 +35,10 @@ const CLIENTS = GATEWAY_CLIENTS.map((value) => ({
 }));
 
 const APP_PARAM = 'app';
+
+// 허용 사용자 표의 첫 화면 행 수 — 표는 페이지 스크롤로 흐르므로(내부 스크롤 없음)
+// 인원이 많아지면 나머지는 '전체 보기'로 펼친다.
+const USERS_INITIAL_ROWS = 50;
 
 export function AppPolicyPanel() {
   const t = useTranslations('apps');
@@ -117,6 +123,24 @@ export function AppPolicyPanel() {
     { alias: string; allowed: boolean; kind: 'all' | 'last'; client: string } | null
   >(null);
   const [, startWsTransition] = useTransition();
+  // 모델 표시명(alias → display_name) — 앱 정책 응답에는 별칭만 있어 카탈로그에서
+  // 한 번 받아 붙인다. 실패하거나 미등록(비활성 등)이면 alias 그대로(modelDisplay 폴백).
+  const [modelNames, setModelNames] = useState<Record<string, string | null>>({});
+  useEffect(() => {
+    let cancelled = false;
+    listActiveModelsAction()
+      .then((r) => {
+        if (cancelled || !r.success) return;
+        setModelNames(Object.fromEntries(r.data.map((m) => [m.alias, m.display_name])));
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  const labelOf = (alias: string) => modelDisplay(alias, modelNames[alias]);
+  // '전체 보기'를 누른 앱 — 탭을 바꾸면 다시 접힌 상태로 시작한다.
+  const [usersExpandedFor, setUsersExpandedFor] = useState<string | null>(null);
 
   // 선택 변경 → URL 갱신. policy fetch 는 아래 useEffect 가 selectedClient 를 보고 수행한다
   // (클릭 경로뿐 아니라 리마운트 복구 경로에서도 같은 코드를 타게 하기 위함).
@@ -461,9 +485,15 @@ export function AppPolicyPanel() {
                 className="flex-1 rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50"
               >
                 <option value="">{t('selectPlaceholder')}</option>
-                {shown.allowed_models.map((alias) => (
-                  <option key={alias} value={alias}>{alias}</option>
-                ))}
+                {/* 표시명 우선, alias(라우팅 키)는 괄호 보조 — option 은 스타일을 못 줘서 텍스트로. */}
+                {shown.allowed_models.map((alias) => {
+                  const label = labelOf(alias);
+                  return (
+                    <option key={alias} value={alias}>
+                      {label === alias ? alias : `${label} (${alias})`}
+                    </option>
+                  );
+                })}
               </select>
               <SpinnerButton
                 type="button"
@@ -615,13 +645,16 @@ export function AppPolicyPanel() {
               <h2 className="text-sm font-semibold">{t('modelManagement')}</h2>
               <p className="text-xs text-muted-foreground">{t('chipLegend')}</p>
             </div>
-            <div className="glass rounded-apple overflow-hidden">
-              {/* 모델 수만큼 길어지는 표 — max-h + overflow-y 로 스크롤시키고
-                  헤더는 sticky 로 고정(bg-card 로 아래 행을 가림). */}
-              <Table wrapperClassName="max-h-96 overflow-y-auto">
+            {/* 내부 스크롤(max-h + overflow-y) 없이 페이지 스크롤로 흐른다 — 표 위에서
+                휠이 표 안에 갇히던 이중 스크롤 제거. 헤더 sticky 가 <main> 스크롤에
+                붙으려면 사이의 조상이 스크롤 컨테이너가 아니어야 한다: 카드는
+                overflow-hidden 대신 overflow-clip(모서리만 자르고 스크롤 컨테이너를
+                만들지 않음), Table 래퍼는 기본 overflow-x-auto 를 overflow-visible 로. */}
+            <div className="glass rounded-apple overflow-clip">
+              <Table wrapperClassName="overflow-visible">
                 <THead className="[&_th]:sticky [&_th]:top-0 [&_th]:z-10 [&_th]:bg-card">
                   <Tr>
-                    <Th>{t('colAlias')}</Th>
+                    <Th>{t('colModel')}</Th>
                     <Th>{t('colAllowAll')}</Th>
                     <Th>{t('colAllowThisApp')}</Th>
                   </Tr>
@@ -632,7 +665,15 @@ export function AppPolicyPanel() {
                   ) : (
                     shown.all_models.map((m) => (
                       <Tr key={m.alias}>
-                        <Td emphasis className="font-mono mono-id text-xs">{m.alias}</Td>
+                        <Td emphasis>
+                          {/* 표시명 우선 + alias(라우팅 키) 보조 줄 — 같으면 한 줄만. */}
+                          <div className="font-medium break-words">{labelOf(m.alias)}</div>
+                          {labelOf(m.alias) !== m.alias && (
+                            <div className="mt-0.5 font-mono mono-id text-xs text-muted-foreground break-all">
+                              {m.alias}
+                            </div>
+                          )}
+                        </Td>
                         <Td>
                           {/* 앱 상태 = 앱별 고정 칩 3개 — 켜짐(teal)/꺼짐(dim)으로 커버리지를
                               한눈에 읽게 한다. 예전 표시(전체 배지/전면 거부 배지/— 대시)는
@@ -682,7 +723,7 @@ export function AppPolicyPanel() {
                           <input
                             type="checkbox"
                             className="h-4 w-4"
-                            aria-label={m.alias}
+                            aria-label={labelOf(m.alias)}
                             checked={isAllowed(m)}
                             disabled={isSaving}
                             onChange={(e) => handleToggleClick(m, e.target.checked)}
@@ -698,9 +739,10 @@ export function AppPolicyPanel() {
 
           <div className="space-y-3">
             <h2 className="text-sm font-semibold">{t('allowedUsers')}</h2>
-            <div className="glass rounded-apple overflow-hidden">
-              {/* 유저 수만큼 길어진다 — 모델 표와 같은 스크롤+sticky 헤더. */}
-              <Table wrapperClassName="max-h-96 overflow-y-auto">
+            <div className="glass rounded-apple overflow-clip">
+              {/* 유저 수만큼 길어진다 — 모델 표와 같은 페이지 스크롤+sticky 헤더.
+                  USERS_INITIAL_ROWS 를 넘으면 아래 '전체 보기'로 펼친다. */}
+              <Table wrapperClassName="overflow-visible">
                 <THead className="[&_th]:sticky [&_th]:top-0 [&_th]:z-10 [&_th]:bg-card">
                   <Tr><Th>{t('colUser')}</Th><Th>{t('colAccess')}</Th><Th>ID</Th></Tr>
                 </THead>
@@ -708,7 +750,10 @@ export function AppPolicyPanel() {
                   {shown.allowed_users.length === 0 ? (
                     <TEmpty colSpan={3}>{t('noAllowedUsers')}</TEmpty>
                   ) : (
-                    shown.allowed_users.map((u) => (
+                    (usersExpandedFor === selectedClient
+                      ? shown.allowed_users
+                      : shown.allowed_users.slice(0, USERS_INITIAL_ROWS)
+                    ).map((u) => (
                       <Tr key={u.user_id}>
                         <Td emphasis>
                           {/* 유저 정책 편집으로 이어지는 딥링크 — OrgTreeView 가
@@ -735,12 +780,24 @@ export function AppPolicyPanel() {
                             {u.explicit ? t('accessExplicit') : t('accessUnrestricted')}
                           </span>
                         </Td>
-                        <Td className="font-mono mono-id text-xs text-muted-foreground">{u.user_id}</Td>
+                        <Td className="font-mono mono-id text-xs text-muted-foreground break-all">{u.user_id}</Td>
                       </Tr>
                     ))
                   )}
                 </TBody>
               </Table>
+              {usersExpandedFor !== selectedClient &&
+                shown.allowed_users.length > USERS_INITIAL_ROWS && (
+                  <div className="border-t border-border/60 px-4 py-2 text-center">
+                    <button
+                      type="button"
+                      onClick={() => setUsersExpandedFor(selectedClient)}
+                      className="text-xs text-primary hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring rounded"
+                    >
+                      {t('showAllUsers', { count: shown.allowed_users.length })}
+                    </button>
+                  </div>
+                )}
             </div>
           </div>
         </div>

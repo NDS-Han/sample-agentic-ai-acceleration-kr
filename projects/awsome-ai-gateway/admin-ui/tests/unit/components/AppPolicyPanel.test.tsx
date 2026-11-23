@@ -27,6 +27,11 @@ vi.mock('@/lib/actions/apps', () => ({
 vi.mock('@/lib/actions/routing', () => ({
   setClientWebSearchAction: (...a: unknown[]) => setClientWebSearchAction(...a),
 }));
+// 모델 표시명 카탈로그 — 기본은 빈 목록(라벨 = alias). 라벨 테스트만 값을 넣는다.
+const listActiveModelsAction = vi.fn();
+vi.mock('@/lib/actions/models', () => ({
+  listActiveModelsAction: (...a: unknown[]) => listActiveModelsAction(...a),
+}));
 
 // ?app= 쿼리가 정본 — 테스트가 바꿀 수 있는 mutable 값으로 돌려준다.
 let appParam = 'claude-code';
@@ -78,6 +83,7 @@ describe('AppPolicyPanel — 탭 전환 중 도착한 저장 응답', () => {
   beforeEach(() => {
     appParam = 'claude-code';
     vi.clearAllMocks();
+    listActiveModelsAction.mockResolvedValue({ success: true, data: [] });
     getAppPolicyAction.mockImplementation(async (client: string) => ({
       success: true,
       data: policyFor(client),
@@ -246,5 +252,75 @@ describe('AppPolicyPanel — web search 미배포 표시 (P1-5)', () => {
     expect(sw).toBeChecked();
     expect(screen.getByText('webSearchOn')).toBeInTheDocument();
     expect(screen.queryByText('webSearchUnavailable')).not.toBeInTheDocument();
+  });
+});
+
+describe('AppPolicyPanel — 모델 표기·표 스크롤 (P2-7, P2-8)', () => {
+  beforeEach(() => {
+    appParam = 'claude-code';
+    vi.clearAllMocks();
+  });
+
+  it('기본 모델 드롭다운·Model access 표는 display_name 우선, alias 는 보조로 표시한다', async () => {
+    listActiveModelsAction.mockResolvedValue({
+      success: true,
+      data: [{ alias: 'claude-haiku-4-5-20251001', display_name: 'Haiku 4.5' }],
+    });
+    getAppPolicyAction.mockResolvedValue({
+      success: true,
+      data: {
+        ...policyFor('claude-code', ['claude-haiku-4-5-20251001', 'plain']),
+        all_models: [
+          { alias: 'claude-haiku-4-5-20251001', allowed_clients: null },
+          { alias: 'plain', allowed_clients: null },
+        ],
+      },
+    });
+    render(<AppPolicyPanel />);
+
+    expect(
+      await screen.findByRole('option', { name: 'Haiku 4.5 (claude-haiku-4-5-20251001)' }),
+    ).toBeInTheDocument();
+    // 표시명이 없으면 alias 하나만(괄호 중복 없음).
+    expect(screen.getByRole('option', { name: 'plain' })).toBeInTheDocument();
+    // 표: 표시명 줄 + alias 보조 줄, 체크박스 라벨도 표시명.
+    expect(screen.getByText('Haiku 4.5')).toBeInTheDocument();
+    expect(screen.getByText('claude-haiku-4-5-20251001')).toBeInTheDocument();
+    expect(screen.getByRole('checkbox', { name: 'Haiku 4.5' })).toBeInTheDocument();
+  });
+
+  it('표에 내부 스크롤(max-h/overflow-y-auto)이 없고 헤더는 sticky 다', async () => {
+    listActiveModelsAction.mockResolvedValue({ success: true, data: [] });
+    getAppPolicyAction.mockResolvedValue({ success: true, data: policyFor('claude-code') });
+    const { container } = render(<AppPolicyPanel />);
+    await screen.findByText('colModel');
+
+    expect(container.querySelector('.max-h-96')).toBeNull();
+    expect(container.querySelector('.overflow-y-auto')).toBeNull();
+    // sticky 가 <main> 스크롤에 붙으려면 카드가 스크롤 컨테이너(overflow-hidden)면 안 된다.
+    const table = screen.getByText('colModel').closest('table')!;
+    expect(table.closest('.overflow-hidden')).toBeNull();
+    expect(table.querySelector('thead')!.className).toContain('[&_th]:sticky');
+  });
+
+  it('허용 사용자가 50명을 넘으면 처음 50명만 보이고 전체 보기로 펼친다', async () => {
+    listActiveModelsAction.mockResolvedValue({ success: true, data: [] });
+    const users = Array.from({ length: 60 }, (_, i) => ({
+      user_id: `u-${i}`,
+      email: `u${i}@example.com`,
+      explicit: true,
+    }));
+    getAppPolicyAction.mockResolvedValue({
+      success: true,
+      data: { ...policyFor('claude-code'), allowed_users: users },
+    });
+    render(<AppPolicyPanel />);
+
+    await screen.findByText('u-0');
+    expect(screen.getByText('u-49')).toBeInTheDocument();
+    expect(screen.queryByText('u-50')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'showAllUsers' }));
+    expect(screen.getByText('u-59')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'showAllUsers' })).toBeNull();
   });
 });

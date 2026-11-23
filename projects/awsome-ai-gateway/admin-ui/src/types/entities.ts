@@ -367,6 +367,8 @@ export interface EffectiveDowngradeRule {
 export interface EffectivePolicyModel {
   alias: string;
   output_price_per_1k: string | null;
+  /** 카탈로그 표시명 — 현재 admin-api 응답에는 없다(있으면 라벨에 쓴다). */
+  display_name?: string | null;
 }
 
 /** 다이어그램/정책 카드가 요구하는 최소 모델 정보 — ModelListItem 이 이를
@@ -374,6 +376,8 @@ export interface EffectivePolicyModel {
 export interface PolicyModelRef {
   alias: string;
   output_price_per_1k: number | null;
+  /** 표시명 — modelDisplay(alias, display_name) 재료. 없으면 alias 로 표기. */
+  display_name?: string | null;
 }
 
 export interface EffectivePolicy {

@@ -152,6 +152,10 @@ function ShellInner({ children, enabled }: { children: React.ReactNode; enabled:
   if (open) mountedRef.current = true;
 
   const panelOpen = chatEnabled && open;
+  // FAB 가 실제로 떠 있는지 — ChatToggleButton 의 표시 조건(chatEnabled && !open)과 같다.
+  // 셸 루트의 data-chat-fab 로 노출해 layout 의 <main> 하단 여백(pb-24)과 토스트 위치가
+  // FAB 가 있을 때만 비켜 가게 한다(/chat·CHAT_ENABLED=false·패널 열림이면 여백 없음).
+  const fabVisible = chatEnabled && !open;
   // 넓은 화면: flex 형제 분할뷰(본문 자동 축소). 좁은 화면: 본문 위 overlay 드로어(modal).
   const splitView = panelOpen && isWide;
   const overlay = panelOpen && !isWide;
@@ -167,7 +171,10 @@ function ShellInner({ children, enabled }: { children: React.ReactNode; enabled:
   }, [overlay, setOpen]);
 
   return (
-    <div className="flex flex-1 overflow-hidden">
+    <div
+      className="group/shell flex flex-1 overflow-hidden"
+      data-chat-fab={fabVisible ? '' : undefined}
+    >
       {/* 본문 — 분할뷰일 때만 flex-1 이 패널 폭만큼 좁아짐. overlay 모드면 전체 폭 유지 */}
       <div className="flex flex-1 flex-col overflow-hidden min-w-0">{children}</div>
 

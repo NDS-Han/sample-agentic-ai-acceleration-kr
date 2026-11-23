@@ -38,6 +38,7 @@ export function DowngradeDiagram({
   terminalLabel,
   unavailable,
   unavailableLabel,
+  labelOf,
 }: {
   rules: DowngradeDiagramRule[];
   models: PolicyModelRef[];
@@ -53,6 +54,9 @@ export function DowngradeDiagram({
   /** 사용할 수 없는 모델 별칭 — 회색·취소선 노드로 표시. */
   unavailable?: ReadonlySet<string>;
   unavailableLabel?: string;
+  /** 노드 라벨(alias → 표시명). 넘기면 표시명을 보이고 alias 는 title 로 보조 표기.
+   *  생략하면 기존처럼 alias 그대로. */
+  labelOf?: (_alias: string) => string;
 }) {
   // from/to 가 비어 있는 규칙(작성 중인 새 행)은 레이아웃·렌더 모두에서 제외한다 —
   // 포함하면 빈 alias 가 유령 노드 열을 만들고 엣지가 화면 밖으로 길게 뻗는다.
@@ -205,10 +209,16 @@ export function DowngradeDiagram({
               const isLanding = sim?.landing.has(alias) ?? false;
               const dimmed = sim != null && !sim.inPath.has(alias);
               const blocked = unavailable?.has(alias) ?? false;
+              const label = labelOf ? labelOf(alias) : alias;
+              const isAlias = label === alias;
+              // 표시명을 보일 때는 alias(라우팅 키)를 title 로 남긴다.
+              const tip = [isAlias ? null : alias, blocked ? unavailableLabel : null]
+                .filter(Boolean)
+                .join(' — ');
               return (
                 <div
                   key={alias}
-                  title={blocked && unavailableLabel ? `${alias} — ${unavailableLabel}` : undefined}
+                  title={tip ? (isAlias ? `${alias} — ${tip}` : tip) : undefined}
                   className={`mx-auto w-[86%] rounded-lg border px-2 py-1 text-center shadow-sm transition-opacity ${
                     blocked
                       ? 'bg-muted/40 border-dashed border-border text-muted-foreground'
@@ -216,9 +226,9 @@ export function DowngradeDiagram({
                   } ${isLanding ? 'ring-2 ring-primary' : ''} ${dimmed ? 'opacity-40' : ''}`}
                 >
                   <div
-                    className={`truncate font-mono text-[11px] font-medium ${blocked ? 'line-through' : ''}`}
+                    className={`truncate text-[11px] font-medium ${isAlias ? 'font-mono' : ''} ${blocked ? 'line-through' : ''}`}
                   >
-                    {alias}
+                    {label}
                   </div>
                   {blocked && unavailableLabel ? (
                     <div className="truncate text-[9px] font-medium text-amber-600 dark:text-amber-400">
