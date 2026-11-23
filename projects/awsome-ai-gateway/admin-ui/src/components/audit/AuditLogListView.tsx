@@ -222,7 +222,10 @@ export function AuditLogListView({
                     )}
                   </button>
                 </Td>
-                <Td className="num whitespace-nowrap text-muted-foreground" title={it.timestamp}>
+                <Td
+                  className="num whitespace-nowrap text-muted-foreground"
+                  title={[it.timestamp, pit.cellTitle(it.timestamp)].filter(Boolean).join('\n')}
+                >
                   {pit.dateTime(it.timestamp, locale === 'ko' ? 'ko-KR' : 'en-US')}
                 </Td>
                 <Td>

@@ -75,6 +75,7 @@
     "unverifiedEmailHint": "This user's email is not verified in Cognito, so it is stored as an identifier. Set email_verified=true in Cognito, then click Sync Cognito.",
     "withZone": "{label} ({zone})",
     "viewerTzHint": "Shown in your browser time zone ({tz})",
+    "viewerTzCellHint": "{zone}, your browser time zone ({tz})",
     "browserTzCaption": "Times in {zone} (your browser)",
     "reportingTz": {
       "dates": "Dates in {zone}",

@@ -223,13 +223,13 @@ export function ServiceAccountsPanel({ accounts, maxTtlDays, serviceKeysEnabled 
                   )}
                   {!a.is_active && <Badge tone="neutral">{t('saInactive')}</Badge>}
                 </Td>
-                <Td className="text-muted-foreground" title={pit.title}>
+                <Td className="text-muted-foreground" title={pit.cellTitle(a.active_key_issued_at) ?? pit.title}>
                   {a.active_key_issued_at ? pit.stamp(a.active_key_issued_at) : '—'}
                 </Td>
                 <Td className="text-muted-foreground">
                   {a.active_key_expires_at ? fmtDate(a.active_key_expires_at, tz) : '—'}
                 </Td>
-                <Td className="text-muted-foreground" title={pit.title}>
+                <Td className="text-muted-foreground" title={pit.cellTitle(a.last_request_at) ?? pit.title}>
                   {a.last_request_at ? pit.stamp(a.last_request_at) : '—'}
                 </Td>
                 <Td numeric className="text-muted-foreground">

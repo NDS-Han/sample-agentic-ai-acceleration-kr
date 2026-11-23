@@ -569,7 +569,11 @@ export function BodyLogSessions({
             {selected.session_id === null && <HeuristicBadge label={t('heuristicSession')} />}
             {/* 세션 범위 — 아래 호출 목록과 같은 브라우저 TZ(Time 열 제목에도 이름). */}
             <span className="text-muted-foreground" title={pit.title}>
-              {pit.dateTime(selected.started_at)} → {pit.dateTimeZ(selected.ended_at)}
+              {/* 범위가 DST 전환을 넘으면 시작에도 그 시점의 약어를 붙인다. */}
+              {pit.zoneAt(selected.started_at) === pit.zoneAt(selected.ended_at)
+                ? pit.dateTime(selected.started_at)
+                : pit.dateTimeZ(selected.started_at)}{' '}
+              → {pit.dateTimeZ(selected.ended_at)}
             </span>
             <span className="text-muted-foreground">
               {t('callsCount', { count: selected.call_count })}
@@ -668,7 +672,7 @@ export function BodyLogSessions({
                     <ChevronRight size={14} aria-hidden="true" />
                   )}
                   <span className="text-xs text-muted-foreground">#{i + 1}</span>
-                  <span className="whitespace-nowrap" title={pit.title}>
+                  <span className="whitespace-nowrap" title={pit.cellTitle(call.requested_at)}>
                     {pit.dateTime(call.requested_at)}
                   </span>
                   <span className="truncate">{call.model_alias ?? '-'}</span>
@@ -918,8 +922,10 @@ export function BodyLogSessions({
                       <ChevronRight size={14} aria-hidden="true" />
                     </button>
                   </Td>
-                  <Td className="whitespace-nowrap">{pit.dateTime(s.ended_at)}</Td>
-                  <Td className="whitespace-nowrap text-muted-foreground">
+                  <Td className="whitespace-nowrap" title={pit.cellTitle(s.ended_at)}>
+                    {pit.dateTime(s.ended_at)}
+                  </Td>
+                  <Td className="whitespace-nowrap text-muted-foreground" title={pit.cellTitle(s.started_at)}>
                     {pit.dateTime(s.started_at)}
                   </Td>
                   <Td

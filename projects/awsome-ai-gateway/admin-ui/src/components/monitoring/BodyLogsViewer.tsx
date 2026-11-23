@@ -299,7 +299,9 @@ export function BodyLogsViewer({
             <TBody>
               {shown.map((ev: MonitoringEvent) => (
                 <Tr key={ev.request_id}>
-                  <Td className="whitespace-nowrap">{pit.dateTime(ev.timestamp)}</Td>
+                  <Td className="whitespace-nowrap" title={pit.cellTitle(ev.timestamp)}>
+                    {pit.dateTime(ev.timestamp)}
+                  </Td>
                   <Td>
                     <button
                       type="button"

@@ -75,6 +75,7 @@
     "unverifiedEmailHint": "Cognito에서 이메일이 인증되지 않아 식별자로 저장된 사용자입니다. Cognito에서 email_verified=true 처리 후 Sync Cognito를 누르세요.",
     "withZone": "{label} ({zone})",
     "viewerTzHint": "브라우저 시간대({tz}) 기준",
+    "viewerTzCellHint": "{zone}, 브라우저 시간대({tz}) 기준",
     "browserTzCaption": "시각 기준: {zone} (브라우저)",
     "reportingTz": {
       "dates": "날짜 기준: {zone}",

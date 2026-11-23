@@ -65,7 +65,7 @@ export function UserTopTable({ data }: { data: MonitoringUsersResponse }) {
               <Td numeric className={errorColor(u.error_rate_pct)}>
                 {u.error_rate_pct}%
               </Td>
-              <Td numeric className="text-muted-foreground">
+              <Td numeric className="text-muted-foreground" title={pit.cellTitle(u.last_request_at)}>
                 {u.last_request_at
                   ? pit.time(u.last_request_at)
                   : '-'}

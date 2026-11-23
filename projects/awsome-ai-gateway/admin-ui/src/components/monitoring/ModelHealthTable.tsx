@@ -80,7 +80,7 @@ export function ModelHealthTable({ data }: { data: MonitoringModelsResponse }) {
                   )}
                 </span>
               </Td>
-              <Td numeric className="text-muted-foreground">
+              <Td numeric className="text-muted-foreground" title={pit.cellTitle(m.last_request_at)}>
                 {m.last_request_at
                   ? pit.time(m.last_request_at)
                   : '-'}
