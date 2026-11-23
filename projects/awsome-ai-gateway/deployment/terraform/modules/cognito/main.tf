@@ -144,18 +144,20 @@ resource "awscc_cognito_managed_login_branding" "this" {
   client_id    = aws_cognito_user_pool_client.cli.id
   settings     = jsonencode(jsondecode(file("${path.module}/managed-login/settings.json")))
 
+  # AWS 가 에셋을 카테고리 알파벳순으로 저장한다 — 그 순서로 선언하지 않으면
+  # 매 plan 마다 순서 diff(영구 drift)가 생긴다.
   assets = [
-    {
-      category   = "PAGE_BACKGROUND"
-      color_mode = "LIGHT"
-      extension  = "SVG"
-      bytes      = filebase64("${path.module}/managed-login/background.svg")
-    },
     {
       category   = "FAVICON_SVG"
       color_mode = "DYNAMIC"
       extension  = "SVG"
       bytes      = filebase64("${path.module}/managed-login/favicon.svg")
+    },
+    {
+      category   = "PAGE_BACKGROUND"
+      color_mode = "LIGHT"
+      extension  = "SVG"
+      bytes      = filebase64("${path.module}/managed-login/background.svg")
     },
   ]
 

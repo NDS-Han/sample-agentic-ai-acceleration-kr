@@ -9,9 +9,9 @@
   background 에서 영역 전체를 채우므로 어떤 화면 비율에서도 왼쪽 패널이
   정확히 50% 가 된다. 그래프는 패널 안의 중첩 svg(slice)로, 문구는
   잘리지 않게 meet 로 따로 앵커한다.
-* 애니메이션은 SMIL(animateMotion/animate) — Cognito 브랜딩 SVG 허용
-  목록에 있고 script 는 쓰지 않는다. prefers-reduced-motion 이면 움직이는
-  점을 숨겨 정지 그래프만 남긴다.
+* Cognito Managed Login 에셋 검증은 SVG 의 animate/animateMotion 요소를
+  거부한다 — 트래픽 점을 엣지 위에 정적으로 배치해 흐름만 남긴다
+  (style/script 모두 사용하지 않는다).
 * 문구는 이미지에 구워지므로 언어 전환을 따르지 않는다 → 영어만 쓴다.
 
 재생성: python3 generate_background.py  (background.svg 를 덮어쓴다)
@@ -45,38 +45,33 @@ def _line(a, b, stroke, width):
             f'stroke="{stroke}" stroke-width="{width}"/>')
 
 
-def _pulse(a, b, color, dur, begin):
+def _packet(a, b, color, t):
+    """엣지 위 t(0~1) 지점의 정지 트래픽 점 — 애니메이션의 한 프레임."""
     (x1, y1), (x2, y2) = NODES[a], NODES[b]
-    return (f'<circle class="pulse" r="2.8" fill="{color}" opacity="0">'
-            f'<animateMotion path="M{x1} {y1} L{x2} {y2}" dur="{dur}s" '
-            f'begin="{begin}s" repeatCount="indefinite"/>'
-            f'<animate attributeName="opacity" values="0;1;1;0" '
-            f'keyTimes="0;0.12;0.85;1" dur="{dur}s" begin="{begin}s" '
-            f'repeatCount="indefinite"/></circle>')
+    return (f'<circle cx="{x1 + (x2 - x1) * t:.1f}" cy="{y1 + (y2 - y1) * t:.1f}" '
+            f'r="2.8" fill="{color}"/>')
 
 
 def graph() -> str:
     el = [_line(a, b, "#262626", 1) for a, b in MESH]
     el += [_line(c, "hub", "#2b3332", 1.2) for c in CLIENTS]
     el += [_line("hub", m, "#24504b", 1.2) for m in MODELS]
-    el += [_pulse(c, "hub", "#5eead4", round(3.2 + 0.4 * (i % 3), 1), round(i * 0.7, 1))
+    # client→hub·hub→model 방향으로 엇갈린 위치의 정지 트래픽 점들
+    el += [_packet(c, "hub", "#5eead4", 0.2 + 0.25 * (i % 3))
            for i, c in enumerate(CLIENTS)]
-    el += [_pulse("hub", m, "#2dd4bf", round(2.2 + 0.3 * i, 1), round(0.9 + i * 1.1, 1))
+    el += [_packet("hub", m, "#2dd4bf", 0.35 + 0.3 * i)
            for i, m in enumerate(MODELS)]
     for k, (x, y) in NODES.items():
         if k == "hub":
             continue
         stroke = "#2f6e67" if k.startswith("m") else "#3a3a3a"
-        tw = (f'<animate class="twinkle" attributeName="opacity" values="1;0.45;1" '
-              f'dur="{4 + len(k)}s" repeatCount="indefinite"/>') if k in TWINKLE else ""
-        el.append(f'<circle cx="{x}" cy="{y}" r="4" fill="#1c1c1c" '
-                  f'stroke="{stroke}" stroke-width="1.4">{tw}</circle>')
+        # twinkle 노드는 살짝 밝은 채움으로 구분
+        fill = "#2a4a44" if k in TWINKLE else "#1c1c1c"
+        el.append(f'<circle cx="{x}" cy="{y}" r="4" fill="{fill}" '
+                  f'stroke="{stroke}" stroke-width="1.4"/>')
     hx, hy = NODES["hub"]
-    el.append(f'<circle class="pulse" cx="{hx}" cy="{hy}" r="10" fill="none" '
-              f'stroke="#2dd4bf" stroke-width="1" opacity="0">'
-              f'<animate attributeName="r" values="9;36" dur="2.8s" repeatCount="indefinite"/>'
-              f'<animate attributeName="opacity" values="0.55;0" dur="2.8s" '
-              f'repeatCount="indefinite"/></circle>')
+    el.append(f'<circle cx="{hx}" cy="{hy}" r="22" fill="none" '
+              f'stroke="#2dd4bf" stroke-width="1" opacity="0.18"/>')
     el.append(f'<circle cx="{hx}" cy="{hy}" r="8" fill="#0f766e" '
               f'stroke="#5eead4" stroke-width="1.6"/>')
     return "".join(el)
@@ -85,7 +80,6 @@ def graph() -> str:
 def build() -> str:
     return (
         '<svg xmlns="http://www.w3.org/2000/svg" width="100%" height="100%">'
-        '<style>@media (prefers-reduced-motion: reduce){.pulse{display:none}}</style>'
         '<rect width="100%" height="100%" fill="#ffffff"/>'
         f'<rect width="50%" height="100%" fill="{PANEL}"/>'
         # 그래프 — 패널을 꽉 채우고 넘치는 부분은 잘라낸다
