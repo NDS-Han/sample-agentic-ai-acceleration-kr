@@ -850,9 +850,13 @@ def check_eks(cfg: GatewayConfig, gen_dir: Path, repo_root: Path,
         if r.returncode == 0:
             rep.add("OK", "tf-drift", "terraform plan no-op")
         elif r.returncode == 2:
-            changed = [ln for ln in r.stdout.splitlines()
-                       if ln.startswith(("  # ", "Plan:"))][-5:]
-            rep.add("WARN", "tf-drift", "인프라 드리프트 — " + " / ".join(changed)[:200])
+            changed = [ln.strip() for ln in r.stdout.splitlines()
+                       if ln.startswith(("  # ", "  + ", "  ~ ", "Plan:"))
+                       or ln in ("Changes to Outputs:",)][-8:]
+            rep.add("WARN", "tf-drift",
+                    "인프라 드리프트 — " + " / ".join(changed)[:240]
+                    if changed else
+                    "인프라 드리프트 — terraform plan 직접 확인 필요")
         else:
             rep.add("WARN", "tf-drift", "terraform plan 불가(init/state 없음?) — 인프라는 별도 확인")
 
