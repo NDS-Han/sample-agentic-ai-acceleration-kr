@@ -1540,3 +1540,21 @@ def test_compose_roundtrip_ports(tmp_path):
 def test_compose_roundtrip_default_ports_omitted(tmp_path):
     cap, _ = _roundtrip(tmp_path, BASE)
     assert "ports" not in cap["network"]
+
+
+def test_compose_roundtrip_branding(tmp_path):
+    """커스텀 브랜드명은 캡처에 남고, 기본값이면 branding 블록을 생략한다 —
+    채택 yaml 로 apply 해도 브랜드명이 기본값으로 되돌아가지 않게."""
+    cap, _ = _roundtrip(tmp_path / "custom", dict(BASE, branding={"name": "농심 AI Gateway"}))
+    assert cap["branding"] == {"name": "농심 AI Gateway"}
+    schema.from_dict(cap)  # 캡처 결과가 그대로 유효한 yaml
+
+    cap, _ = _roundtrip(tmp_path / "default", dict(BASE))
+    assert "branding" not in cap
+
+
+def test_branding_helper_ignores_default_and_blank():
+    assert capture._branding(None) is None
+    assert capture._branding("  ") is None
+    assert capture._branding(schema.DEFAULT_BRAND_NAME) is None
+    assert capture._branding(" X ") == {"name": "X"}

@@ -22,7 +22,7 @@ import yaml
 
 from .render.common import parse_env_file, tfvars_clean as _tfvars_clean
 from .render.compose import OBSERVABILITY, WEB_PORTS
-from .schema import _ENV_RE, _HOSTNAME_RE
+from .schema import _ENV_RE, _HOSTNAME_RE, DEFAULT_BRAND_NAME
 
 
 class CaptureError(Exception):
@@ -36,6 +36,17 @@ def _strip(s: str, prefix: str) -> str:
 def _is_true_env(v) -> bool:
     """env/values 의 명시적 on 판정 — 대소문자·yaml boolean·숫자 모두 흡수."""
     return str(v if v is not None else "").strip().lower() in ("true", "1", "yes", "on")
+
+
+def _branding(raw) -> dict | None:
+    """배포된 ADMIN_BRAND_NAME → gateway.yaml branding 블록.
+
+    기본값·부재면 None (블록 생략) — 채택 yaml 이 apply 때 브랜드명을 기본값으로
+    되돌리지 않게, 커스텀 이름만 기록한다."""
+    name = str(raw).strip() if raw is not None else ""
+    if not name or name == DEFAULT_BRAND_NAME:
+        return None
+    return {"name": name}
 
 
 def _is_false_env(v) -> bool:
@@ -260,6 +271,8 @@ def capture_compose(out_dir: Path, unknown: set[str] | None = None
         doc["images"] = {"registry": registry, "tag": tag}
     if oidc:
         doc["oidc"] = oidc
+    if (_b := _branding(ui_env.get("ADMIN_BRAND_NAME"))):
+        doc["branding"] = _b
     return doc, notes
 
 
@@ -740,6 +753,8 @@ def capture_ecs(env_dir: Path, region: str,
         doc["infra"] = infra_doc
     if oidc:
         doc["oidc"] = oidc
+    if (_b := _branding(tv.get("admin_brand_name"))):
+        doc["branding"] = _b
     return doc, notes
 
 
@@ -1629,6 +1644,9 @@ def capture_eks(namespace: str = "llm-gateway", release: str = "llm-gateway",
         doc["oidc"] = oidc
     if infra:
         doc["infra"] = infra
+    if (_b := _branding(_dmap(_val(v, "adminUi", "env", default={}))
+                        .get("ADMIN_BRAND_NAME"))):
+        doc["branding"] = _b
     return doc, notes
 
 
