@@ -3,6 +3,10 @@
 terraform {
   required_version = ">= 1.9.0"
   required_providers {
+    awscc = {
+      source  = "hashicorp/awscc"
+      version = ">= 1.25.0, < 2.0.0"
+    }
     aws = {
       source  = "hashicorp/aws"
       version = "~> 5.70"
@@ -82,4 +86,10 @@ provider "helm" {
       args        = ["eks", "get-token", "--cluster-name", module.eks.cluster_name, "--region", var.aws_region]
     }
   }
+}
+
+# Cognito Managed Login 브랜딩(module.cognito) 전용 — managed_login=false 면
+# 리소스가 없어 API 호출도 없다.
+provider "awscc" {
+  region = var.aws_region
 }

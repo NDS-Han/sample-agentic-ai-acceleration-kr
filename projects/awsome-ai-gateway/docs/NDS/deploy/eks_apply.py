@@ -1061,7 +1061,7 @@ def _infra_targets(cfg: GatewayConfig) -> list[str]:
         # web_search 프로비저닝 경로가 별도로 관리하므로 여기선 대상에 넣지 않는다.
         modules.add("module.irsa")
     if (cfg.domain.name or cfg.infra.cognito_groups
-            or cfg.infra.cognito_domain_suffix):
+            or cfg.infra.cognito_domain_suffix or cfg.branding.managed_login):
         # 콜백/로그아웃 URL(domain) 뿐 아니라 groups/suffix 도 gen tfvars 가
         # managed overlay 로 내리는 cognito 소유 키다 — domain 없이 그룹만
         # 바꿔도 수렴 대상에 포함해야 apply 가 반영한다.

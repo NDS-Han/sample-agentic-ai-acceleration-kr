@@ -909,3 +909,22 @@ def test_branding_rejects_non_string_and_unknown_key():
         schema.from_dict(minimal(branding={"name": 123}))
     with pytest.raises(schema.SchemaError, match="branding"):
         schema.from_dict(minimal(branding={"logo": "x.png"}))
+
+
+def test_branding_managed_login_default_off():
+    assert schema.from_dict(minimal()).branding.managed_login is False
+    assert schema.from_dict(minimal(branding={"name": "X"})).branding.managed_login is False
+
+
+def test_branding_managed_login_on_and_quoted_rejected():
+    cfg = schema.from_dict(minimal(deploy={"target": "ecs", "size_tier": "t1"},
+                                   images={"tag": "1.0.1"},
+                                   branding={"managed_login": True}))
+    assert cfg.branding.managed_login is True
+    with pytest.raises(schema.SchemaError, match="branding.managed_login"):
+        schema.from_dict(minimal(branding={"managed_login": "true"}))
+
+
+def test_branding_managed_login_compose_warns():
+    cfg = schema.from_dict(minimal(branding={"managed_login": True}))
+    assert any("managed_login" in w for w in cfg.warnings())

@@ -121,6 +121,7 @@ module "cognito" {
   callback_urls = local.callback_urls
   logout_urls   = local.logout_urls
   groups        = var.cognito_groups
+  managed_login = var.cognito_managed_login
 
   tags = var.tags
 }

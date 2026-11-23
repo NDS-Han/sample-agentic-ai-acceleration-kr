@@ -38,15 +38,19 @@ def _is_true_env(v) -> bool:
     return str(v if v is not None else "").strip().lower() in ("true", "1", "yes", "on")
 
 
-def _branding(raw) -> dict | None:
-    """배포된 ADMIN_BRAND_NAME → gateway.yaml branding 블록.
+def _branding(raw, managed_login=None) -> dict | None:
+    """배포된 ADMIN_BRAND_NAME (+ tfvars cognito_managed_login) → branding 블록.
 
     기본값·부재면 None (블록 생략) — 채택 yaml 이 apply 때 브랜드명을 기본값으로
-    되돌리지 않게, 커스텀 이름만 기록한다."""
+    되돌리지 않게, 커스텀 이름만 기록한다. managed_login 은 켜진 배포만 기록한다
+    (ecs 는 실제 tfvars 라 빠뜨리면 다음 apply 가 false 로 내려 꺼진다)."""
     name = str(raw).strip() if raw is not None else ""
-    if not name or name == DEFAULT_BRAND_NAME:
-        return None
-    return {"name": name}
+    out: dict = {}
+    if name and name != DEFAULT_BRAND_NAME:
+        out["name"] = name
+    if managed_login is True:
+        out["managed_login"] = True
+    return out or None
 
 
 def _is_false_env(v) -> bool:
@@ -753,7 +757,8 @@ def capture_ecs(env_dir: Path, region: str,
         doc["infra"] = infra_doc
     if oidc:
         doc["oidc"] = oidc
-    if (_b := _branding(tv.get("admin_brand_name"))):
+    if (_b := _branding(tv.get("admin_brand_name"),
+                        tv.get("cognito_managed_login"))):
         doc["branding"] = _b
     return doc, notes
 
@@ -1696,7 +1701,8 @@ def capture_eks(namespace: str = "llm-gateway", release: str = "llm-gateway",
                         "— helm values 기록이 없습니다 (비-helm 경로로 주입됐을 "
                         "수 있습니다)")
             break
-    if (_b := _branding(brand_val)):
+    _tv_eks = locals().get("tv") or {}
+    if (_b := _branding(brand_val, _tv_eks.get("cognito_managed_login"))):
         doc["branding"] = _b
     return doc, notes
 

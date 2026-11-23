@@ -1633,3 +1633,9 @@ def test_eks_capture_branding_absent_everywhere(monkeypatch):
             if res == "deployments" else {})
     doc, _ = capture.capture_eks()
     assert "branding" not in doc
+
+
+def test_branding_helper_records_managed_login_only_when_on():
+    assert capture._branding(None, True) == {"managed_login": True}
+    assert capture._branding("X", False) == {"name": "X"}
+    assert capture._branding(None, False) is None

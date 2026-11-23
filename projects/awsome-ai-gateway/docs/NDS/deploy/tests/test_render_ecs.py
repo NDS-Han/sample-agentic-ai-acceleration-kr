@@ -478,3 +478,9 @@ def test_admin_brand_name_tfvars():
     assert ecs_render.desired_tfvars(_cfg())["admin_brand_name"] == schema.DEFAULT_BRAND_NAME
     assert ecs_render.desired_tfvars(
         _cfg(branding={"name": "농심 AI Gateway"}))["admin_brand_name"] == "농심 AI Gateway"
+
+
+def test_cognito_managed_login_tfvars():
+    assert ecs_render.desired_tfvars(_cfg())["cognito_managed_login"] is False
+    assert ecs_render.desired_tfvars(
+        _cfg(branding={"managed_login": True}))["cognito_managed_login"] is True

@@ -91,6 +91,7 @@ images:
 
 branding:
   name: "농심 AI Gateway"     # admin-ui 사이드바·탭 제목 (생략 시 AWSome AI Gateway)
+  managed_login: false        # Cognito Managed Login 로그인 화면 (ecs/eks, Essentials 요금제)
 
 clients:
   models_profile: global      # global (권장) | regional
@@ -441,7 +442,22 @@ compose=env):
   (compose: `docker-compose.yml` environment, ecs: tfvars `admin_brand_name` →
   task definition, eks: `adminUi.env`). **이미지 재빌드 없이** `./deploy apply`
   재배포만으로 바뀝니다
-- Cognito 로그인 화면의 브랜딩은 이 키와 별개입니다
+- Cognito 로그인 화면의 브랜딩은 이 키와 별개입니다 — 아래 `branding.managed_login`
+
+### `branding.managed_login`
+
+- `true` 면 Cognito 로그인 화면을 **Managed Login**(v2)으로 바꾸고 저장소의
+  브랜딩(`deployment/terraform/modules/cognito/managed-login/`)을 적용합니다 —
+  왼쪽 그래프 패널 + 오른쪽 폼 분할 레이아웃. 자세한 내용: [managed-login.md](managed-login.md)
+- **ecs/eks 전용**(compose 는 Cognito 를 만들지 않아 경고 후 무시). user pool 을
+  **Essentials** 요금제로 고정합니다(Managed Login 이 Essentials 기능)
+- `./deploy apply` 가 terraform `module.cognito` 를 수렴합니다 — 도메인 버전·
+  요금제는 in-place 변경, 브랜딩 스타일은 생성. 이미지 재빌드는 필요 없습니다
+- 기본 `false` — 기존 배포는 classic Hosted UI 그대로입니다. **끄기**(true→false)는
+  브랜딩 스타일 삭제라 `./deploy` 의 파괴 변경 차단에 걸립니다 — env terraform
+  수동 절차(managed-login.md)
+- 폼 문구 언어는 admin-ui 의 KO/EN 선택을 따릅니다(authorize 요청의 `lang`).
+  왼쪽 패널 문구는 이미지라 영어 고정입니다
 
 ## 변경 후 절차 — `./deploy apply` 가 표준 경로
 

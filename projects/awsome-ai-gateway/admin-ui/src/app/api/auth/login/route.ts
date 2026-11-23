@@ -37,6 +37,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { redirectRelative } from '@/lib/redirect';
 import { secureCookieFlag } from '@/lib/cookies';
+import { resolveLocale } from '@/i18n/locale';
 
 // 로그인 진입점 — 캐시/정적최적화 금지. 여기서 만든 state/PKCE 가 캐시되면 모든 사용자가
 // 같은 state·verifier 를 쓰게 되어 CSRF 보호가 무력화된다(cli-download/route.ts:21 과 같은 이유).
@@ -203,6 +204,12 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   authorizeUrl.searchParams.set('nonce', nonce);
   authorizeUrl.searchParams.set('code_challenge', challenge);
   authorizeUrl.searchParams.set('code_challenge_method', 'S256');
+  // 로그인 화면 언어 = admin-ui 의 KO/EN 선택(locale 쿠키, 없으면 기본 ko).
+  // lang 은 Cognito Managed Login 의 지역화 파라미터, ui_locales 는 OIDC 표준
+  // (Cognito 외 IdP 용) — 서로 모르는 파라미터는 무시되므로 둘 다 싣는다.
+  const locale = resolveLocale(request.cookies.get('locale')?.value);
+  authorizeUrl.searchParams.set('lang', locale);
+  authorizeUrl.searchParams.set('ui_locales', locale);
 
   // 302 — authorize 로의 이동은 GET 이며 재사용될 값이 아니다.
   const res = NextResponse.redirect(authorizeUrl.toString(), { status: 302 });

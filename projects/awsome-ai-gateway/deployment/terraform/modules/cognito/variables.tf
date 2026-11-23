@@ -60,3 +60,13 @@ variable "deletion_protection" {
   type        = string
   default     = "INACTIVE"
 }
+
+variable "managed_login" {
+  # true: 도메인을 Managed Login(v2)으로 전환하고 managed-login/ 의 브랜딩
+  # (settings.json·background.svg·favicon.svg)을 앱 클라이언트에 적용한다.
+  # Essentials 기능이라 user_pool_tier 를 ESSENTIALS 로 고정한다.
+  # false(기본): classic Hosted UI 그대로 — 기존 배포는 변화 없음.
+  description = "Cognito Managed Login(v2) + 브랜딩 사용 여부 (gateway.yaml branding.managed_login)"
+  type        = bool
+  default     = false
+}

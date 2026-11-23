@@ -507,3 +507,11 @@ def test_admin_brand_name_from_branding(tmp_path):
     _, out, _ = _render(tmp_path, doc)
     v = yaml.safe_load((out / "values.yaml").read_text())
     assert v["adminUi"]["env"]["ADMIN_BRAND_NAME"] == "농심 AI Gateway"
+
+
+def test_cognito_managed_login_overlay_only_when_on():
+    """켜기만 발산 — 끄기(브랜딩 스타일 삭제)는 파괴 변경이라 env 수동 절차."""
+    off = eks_render.render_tfvars(schema.from_dict(BASE))
+    assert "cognito_managed_login" not in off
+    on = eks_render.render_tfvars(schema.from_dict(dict(BASE, branding={"managed_login": True})))
+    assert "cognito_managed_login = true" in on

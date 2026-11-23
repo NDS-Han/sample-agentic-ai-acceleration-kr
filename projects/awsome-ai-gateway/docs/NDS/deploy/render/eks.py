@@ -430,6 +430,8 @@ def render_tfvars(cfg: GatewayConfig, env_dir: Path | None = None) -> str:
         lines.append("enable_body_logging = true")
     if cfg.features.notifications.provider == "ses":
         lines.append("enable_notification_ses = true")
+    if cfg.branding.managed_login:
+        lines.append("cognito_managed_login = true")
     if cfg.features.alerting.enabled:
         lines.append("enable_alerting = true")
         # emails 는 enabled 게이트 안에서만 — schema 가 미리 잡지만 이중 방어.

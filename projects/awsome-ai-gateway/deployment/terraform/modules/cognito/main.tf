@@ -99,6 +99,10 @@ resource "aws_cognito_user_pool" "this" {
     }
   }
 
+  # Managed Login 은 Essentials 기능 — 켤 때만 명시한다(null = 현재 값 유지,
+  # 끄더라도 요금제를 자동으로 내리지 않는다).
+  user_pool_tier = var.managed_login ? "ESSENTIALS" : null
+
   tags = merge(var.tags, {
     Name        = local.user_pool_name
     Environment = var.environment
@@ -111,6 +115,8 @@ resource "aws_cognito_user_pool" "this" {
 resource "aws_cognito_user_pool_domain" "this" {
   domain       = "${var.project}-${var.environment}-${var.domain_suffix}"
   user_pool_id = aws_cognito_user_pool.this.id
+  # 1 = classic Hosted UI, 2 = Managed Login. in-place 변경(도메인 재생성 없음).
+  managed_login_version = var.managed_login ? 2 : 1
 }
 
 # ------------------------------------------------------------------------------
@@ -121,6 +127,40 @@ resource "aws_cognito_user_pool_ui_customization" "this" {
   client_id    = aws_cognito_user_pool_client.cli.id
   image_file   = filebase64("${path.module}/logo.png")
   css          = file("${path.module}/hosted-ui.css")
+}
+
+# ------------------------------------------------------------------------------
+# Managed Login 브랜딩 — 확정 시안 C(분할 레이아웃, 왼쪽 그래프 패널)
+# ------------------------------------------------------------------------------
+# classic 용 ui_customization 은 지우지 않는다 — Managed Login 도메인에서는
+# 쓰이지 않고, managed_login=false 로 되돌리면 그대로 다시 쓰인다(삭제는
+# ./deploy 의 파괴 변경 차단에도 걸린다).
+# 자산: background.svg 는 generate_background.py 로 재생성, 문구는 영어 고정
+# (이미지라 lang 전환을 따르지 않는다). 폼 문구 언어는 authorize 요청의 lang.
+resource "awscc_cognito_managed_login_branding" "this" {
+  count = var.managed_login ? 1 : 0
+
+  user_pool_id = aws_cognito_user_pool.this.id
+  client_id    = aws_cognito_user_pool_client.cli.id
+  settings     = jsonencode(jsondecode(file("${path.module}/managed-login/settings.json")))
+
+  assets = [
+    {
+      category   = "PAGE_BACKGROUND"
+      color_mode = "LIGHT"
+      extension  = "SVG"
+      bytes      = filebase64("${path.module}/managed-login/background.svg")
+    },
+    {
+      category   = "FAVICON_SVG"
+      color_mode = "DYNAMIC"
+      extension  = "SVG"
+      bytes      = filebase64("${path.module}/managed-login/favicon.svg")
+    },
+  ]
+
+  # 브랜딩은 Managed Login 도메인·Essentials 요금제가 먼저 있어야 만들 수 있다
+  depends_on = [aws_cognito_user_pool_domain.this]
 }
 
 # ------------------------------------------------------------------------------

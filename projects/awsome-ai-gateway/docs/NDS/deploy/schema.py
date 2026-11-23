@@ -199,6 +199,11 @@ class BrandingConfig:
     # admin-ui 사이드바·탭 제목의 서비스 이름. 비우면 DEFAULT_BRAND_NAME.
     # compose/ecs/eks 모두 admin-ui 런타임 env ADMIN_BRAND_NAME 으로 내려간다.
     name: str = ""
+    # Cognito Managed Login(v2) + 브랜딩(modules/cognito/managed-login). ecs/eks
+    # 전용 — terraform cognito 모듈이 도메인 버전·Essentials 요금제·브랜딩 스타일을
+    # 소유한다. 켜기만 managed overlay 로 발산한다(끄기는 브랜딩 스타일 삭제라
+    # 파괴 변경 — env terraform 수동 절차).
+    managed_login: bool = False
 
     @property
     def effective_name(self) -> str:
@@ -357,6 +362,9 @@ class GatewayConfig:
                 f"size_tier={self.deploy.size_tier} 는 단일 노드/백업-기반 구성입니다 — "
                 "HA·자동 장애조치가 없습니다(복원 = 스냅샷/백업)."
             )
+        if self.branding.managed_login and self.deploy.target == "compose":
+            w.append("branding.managed_login 은 ecs/eks 전용입니다 — compose 는 "
+                     "Cognito 를 만들지 않아 무시됩니다(외부 IdP 로그인 화면은 그쪽에서 설정).")
         if self.domain.hosts and not self.domain.name:
             w.append("domain.hosts 를 선언했지만 domain.name 이 없어 render 가 "
                      "무시합니다 — 파생 네이밍의 앵커가 되는 name 을 함께 채우세요.")
@@ -1082,7 +1090,7 @@ _NOTIF_KEYS = frozenset(("provider", "smtp_host", "smtp_port", "smtp_from",
                          "smtp_credentials_secret"))
 _IMAGE_KEYS = frozenset(("registry", "tag", "tags"))
 _CLIENT_KEYS = frozenset(("models_profile",))
-_BRANDING_KEYS = frozenset(("name",))
+_BRANDING_KEYS = frozenset(("name", "managed_login"))
 _OIDC_KEYS = frozenset(("issuer_url", "audience", "client_id", "client_secret",
                         "authorize_url", "token_url", "provider_name", "required_group",
                         "vk_ttl_hours", "groups_claim", "group_prefix",
@@ -1246,6 +1254,9 @@ def from_dict(raw: dict) -> GatewayConfig:
         # 앞뒤 공백만 정리한다 — 길이·문자 검증은 validate() 에서 오류로 알린다.
         branding=BrandingConfig(
             name=(_brand_raw.strip() if isinstance(_brand_raw, str) else ""),
+            managed_login=(_safe_bool(branding["managed_login"], errors,
+                                      "branding.managed_login")
+                           if "managed_login" in branding else False),
         ),
         infra=InfraConfig(
             azs=_str_items(infra.get("azs"), "infra.azs", errors),

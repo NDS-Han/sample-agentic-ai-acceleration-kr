@@ -12,3 +12,9 @@ provider "aws" {
     }
   }
 }
+
+# Cognito Managed Login 브랜딩(module.cognito) 전용 — managed_login=false 면
+# 리소스가 없어 API 호출도 없다.
+provider "awscc" {
+  region = var.aws_region
+}

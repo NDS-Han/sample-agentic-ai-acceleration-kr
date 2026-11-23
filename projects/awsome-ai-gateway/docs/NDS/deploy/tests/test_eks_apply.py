@@ -1932,3 +1932,9 @@ def test_dynamic_set_args_injects_brand_name():
     cfg2 = schema.from_dict(dict(base, branding={"name": "A,B\\C"}))
     args2 = eks_apply.dynamic_set_args(cfg2, {}, "ap-south-1")
     assert r"adminUi.env.ADMIN_BRAND_NAME=A\,B\\C" in args2
+
+
+def test_infra_targets_cognito_for_managed_login():
+    """도메인 없이 managed_login 만 켜도 module.cognito 가 수렴 대상이어야 한다."""
+    cfg = _cfg(domain={"mode": "none"}, branding={"managed_login": True})
+    assert "-target=module.cognito" in eks_apply._infra_targets(cfg)

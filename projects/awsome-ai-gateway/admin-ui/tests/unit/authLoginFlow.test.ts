@@ -346,6 +346,28 @@ describe('GET /api/auth/login — OIDC 설정됨', () => {
   });
 });
 
+describe('GET /api/auth/login — 로그인 화면 언어', () => {
+  it('locale 쿠키가 없으면 기본 ko 를 lang/ui_locales 로 싣는다', async () => {
+    configureOidc();
+    const res = await loginGET(req('http://admin.test/api/auth/login', { headers: { host: 'admin.test' } }));
+    const loc = new URL(res.headers.get('location')!);
+    expect(loc.searchParams.get('lang')).toBe('ko');
+    expect(loc.searchParams.get('ui_locales')).toBe('ko');
+  });
+
+  it('locale=en 쿠키면 en, 지원하지 않는 값이면 기본 ko 로 정규화한다', async () => {
+    configureOidc();
+    const en = await loginGET(
+      req('http://admin.test/api/auth/login', { headers: { host: 'admin.test' }, cookies: { locale: 'en' } }),
+    );
+    expect(new URL(en.headers.get('location')!).searchParams.get('lang')).toBe('en');
+    const fr = await loginGET(
+      req('http://admin.test/api/auth/login', { headers: { host: 'admin.test' }, cookies: { locale: 'fr' } }),
+    );
+    expect(new URL(fr.headers.get('location')!).searchParams.get('lang')).toBe('ko');
+  });
+});
+
 describe('GET /api/auth/login — 설정이 없을 때는 읽히는 503 (본문 없는 404 금지)', () => {
   it('둘 다 미설정 → 503 + 비어 있는 env 이름을 본문에 찍는다', async () => {
     const res = await loginGET(req('http://admin.test/api/auth/login'));

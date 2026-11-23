@@ -207,6 +207,7 @@ module "cognito" {
   callback_urls = var.cognito_callback_urls
   logout_urls   = var.cognito_logout_urls
   groups        = var.cognito_groups
+  managed_login = var.cognito_managed_login
   # prod 풀 삭제 = admin 전원 영구 유실 — destroy/-target 방지 (R32-M6).
   deletion_protection = "ACTIVE"
 

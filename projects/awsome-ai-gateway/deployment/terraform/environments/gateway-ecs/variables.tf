@@ -434,3 +434,9 @@ variable "alb_target_groups" {
   type    = list(object({ lb = string, tg = string }))
   default = []
 }
+
+variable "cognito_managed_login" {
+  description = "Cognito Managed Login(v2) + 브랜딩 — gateway.yaml branding.managed_login 이 managed overlay 로 내린다"
+  type        = bool
+  default     = false
+}

@@ -168,6 +168,8 @@ def desired_tfvars(cfg: GatewayConfig, extra_vars: dict | None = None) -> dict:
     vars_["service_keys_enabled"] = cfg.features.service_keys
     # admin-ui 브랜드명 — 실제 tfvars 라 기본값도 명시한다
     vars_["admin_brand_name"] = cfg.branding.effective_name
+    # Cognito Managed Login — 실제 tfvars 라 false 도 명시(기본과 같다)
+    vars_["cognito_managed_login"] = cfg.branding.managed_login
     # alerting — eks 의 overlay 양산 방식과 달리 ecs 는 실제 tfvars 라 false 를
     # 명시한다. emails 는 enabled 게이트(schema 검증) 안에서만 발산.
     vars_["enable_alerting"] = cfg.features.alerting.enabled
