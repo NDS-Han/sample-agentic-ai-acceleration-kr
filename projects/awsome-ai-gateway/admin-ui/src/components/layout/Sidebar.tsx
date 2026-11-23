@@ -178,12 +178,10 @@ export function Sidebar({
 
   return (
     <aside className="w-64 flex-shrink-0 flex flex-col border-r border-sidebar-border bg-sidebar-background">
-      {/* Logo / Brand — 고스트 그라데이션 마크(BrandLogo 단일 출처). ink 타일 위에
-          teal 그라데이션 고스트가 두 테마 모두에서 선명. */}
+      {/* Logo / Brand — 그래프 노드 마크(BrandLogo 단일 출처). 타일 없이 사이드바
+          배경 위에 바로 그리고, 색은 라이트/다크 테마를 따른다. */}
       <div className="flex h-16 items-center gap-2 border-b border-sidebar-border px-6">
-        <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-apple-sm bg-[#1b2430]">
-          <BrandLogo size={21} idSuffix="sidebar" />
-        </div>
+        <BrandLogo size={28} className="flex-shrink-0" />
         <span
           className="min-w-0 truncate text-sm font-semibold text-sidebar-foreground"
           title={brandName}

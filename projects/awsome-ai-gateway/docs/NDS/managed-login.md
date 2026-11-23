@@ -21,7 +21,7 @@ admin-ui 와 gateway-cli 가 같은 앱 클라이언트를 쓰므로 두 로그�
 | `settings.json` | 브랜딩 설정(색·폼 위치·헤더/푸터 끔 등). 색은 `#` 없는 RGBA hex |
 | `background.svg` | 페이지 배경 — 왼쪽 그래프 패널(노드·엣지 + CSS @keyframes 움직임 + 영문 문구), 오른쪽 폼 영역 |
 | `generate_background.py` | `background.svg` 생성기 — 문구·노드를 바꾸면 `python3 generate_background.py` 후 커밋 |
-| `favicon.svg` | 탭 아이콘(고스트 로고) |
+| `favicon.svg` | 탭 아이콘(그래프 노드 마크 — admin-ui `src/app/icon.svg` 와 같은 도형, `prefers-color-scheme` 로 라이트/다크 색 전환) |
 
 - 폼 정렬 — Cognito 폼은 END 정렬(402px 카드 + 81px 여백)이라, 흰 영역을
   `calc(100% - 564px)`로 두고 나머지를 패널이 채웁니다. 1024px 미만은 패널이

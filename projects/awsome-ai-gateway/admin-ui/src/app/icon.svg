@@ -1,14 +1,13 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48">
-  <defs>
-    <linearGradient id="tile" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#0d9488"/><stop offset="1" stop-color="#2dd4bf"/>
-    </linearGradient>
-  </defs>
-  <rect width="48" height="48" rx="11" fill="url(#tile)"/>
-  <path d="M13 23a11 11 0 0 1 22 0v13.6c0 1.1-1.3 1.7-2.2 1.1l-2.3-1.6-2.5 1.8a1.3 1.3 0 0 1-1.5 0l-2.5-1.8-2.4 1.7a1.3 1.3 0 0 1-1.5 0l-2.3-1.7-2.2 1.5c-.9.6-2.3 0-2.3-1.1z" fill="#ffffff"/>
-  <!-- 눈 — 큰 teal 동공 + 흰 반짝이(시안 E1). favicon 16px서도 또렷. -->
-  <circle cx="20.2" cy="23" r="3" fill="#0d9488"/>
-  <circle cx="27.8" cy="23" r="3" fill="#0d9488"/>
-  <circle cx="21.3" cy="21.9" r="0.95" fill="#ffffff"/>
-  <circle cx="28.9" cy="21.9" r="0.95" fill="#ffffff"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">
+  <!-- 브라우저 탭 favicon — components/brand/BrandLogo.tsx 와 같은 그래프 노드 마크.
+       탭 바는 앱 테마가 아니라 브라우저/OS 테마를 따르므로 prefers-color-scheme 로 칠한다.
+       16px 에서도 보이도록 BrandLogo 보다 노드·엣지를 조금 굵게. -->
+  <style>
+    .e{stroke:#0f766e}.a{fill:#0f766e}.b{fill:#0d9488}.c{fill:#14b8a6}
+    @media (prefers-color-scheme: dark){.e{stroke:#2dd4bf}.a{fill:#2dd4bf}.b{fill:#5eead4}.c{fill:#14b8a6}}
+  </style>
+  <path class="e" d="M9 21 L22 10 L24 23 Z" fill="none" stroke-width="2.2" stroke-linejoin="round"/>
+  <circle class="a" cx="9" cy="21" r="4"/>
+  <circle class="b" cx="22" cy="10" r="4"/>
+  <circle class="c" cx="24" cy="23" r="3.4"/>
 </svg>
