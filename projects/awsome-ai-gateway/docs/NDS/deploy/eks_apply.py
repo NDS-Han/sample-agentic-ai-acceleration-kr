@@ -1326,6 +1326,13 @@ _EMAIL_SUB_ADDR = re.compile(
 _MEMBER_ALARM_ADDR = re.compile(
     r"^module\.alerting(\[\d+\])?\.aws_cloudwatch_metric_alarm\."
     r"(?:aurora_cpu|cache_cpu|cache_memory|cache_connections)\[")
+# cognito managed-login 브랜딩 — 에셋/설정 변경은 ClientId createOnly 제약으로
+# destroy+create 교체만 가능하다(CloudControl patch 가 NotUpdatableException).
+# 스타일 전용 리소스라 교체 비용이 없고, 교체는 파일 해시 트리거로만 일어나
+# 선언된 에셋 변경을 의도로 받아들인다. 트리거 terraform_data 도 같이 교체된다.
+_BRANDING_ADDR = re.compile(
+    r"^module\.cognito\.(?:awscc_cognito_managed_login_branding\."
+    r"|terraform_data\.managed_login_branding_rev)")
 
 
 def _tf_init(cfg: GatewayConfig, env_dir: Path) -> subprocess.CompletedProcess:
@@ -1504,6 +1511,9 @@ def _inspect_managed_plan(env_dir: Path, plan_path: Path,
                         "삭제라 차단 (kubectl/AWS 복구 후 재실행)")
                 continue
             if _EMAIL_SUB_ADDR.match(addr) or _MEMBER_ALARM_ADDR.match(addr):
+                changes.append(f"{addr} ({'+'.join(acts)})")
+                continue
+            if _BRANDING_ADDR.match(addr):
                 changes.append(f"{addr} ({'+'.join(acts)})")
                 continue
             bad.append(f"{addr} — {'+'.join(acts)} (파괴적 변경은 자동 적용 불가)")

@@ -137,8 +137,24 @@ resource "aws_cognito_user_pool_ui_customization" "this" {
 # ./deploy 의 파괴 변경 차단에도 걸린다).
 # 자산: background.svg 는 generate_background.py 로 재생성, 문구는 영어 고정
 # (이미지라 lang 전환을 따르지 않는다). 폼 문구 언어는 authorize 요청의 lang.
+# 에셋·설정 내용 해시 — 바뀌면 아래 리소스를 교체한다. awscc 의 CloudControl
+# UpdateResource 는 ClientId(createOnly)를 patch 에 넣어 in-place update 가
+# NotUpdatableException 으로 실패하므로 destroy+create 가 유일한 변경 경로다.
+resource "terraform_data" "managed_login_branding_rev" {
+  count = var.managed_login ? 1 : 0
+  input = sha256(join("|", [
+    filebase64("${path.module}/managed-login/settings.json"),
+    filebase64("${path.module}/managed-login/background.svg"),
+    filebase64("${path.module}/managed-login/favicon.svg"),
+  ]))
+}
+
 resource "awscc_cognito_managed_login_branding" "this" {
   count = var.managed_login ? 1 : 0
+
+  lifecycle {
+    replace_triggered_by = [terraform_data.managed_login_branding_rev]
+  }
 
   user_pool_id = aws_cognito_user_pool.this.id
   client_id    = aws_cognito_user_pool_client.cli.id
