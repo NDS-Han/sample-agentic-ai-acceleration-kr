@@ -20,6 +20,7 @@ import {
   fmtLatencyMs,
   roundSharesTo100,
   fmtSharePct,
+  fmtDateMinute,
 } from '@/lib/utils/format';
 import { fmtPricePerM } from '@/lib/utils/pricing';
 
@@ -143,5 +144,17 @@ describe('roundSharesTo100 / fmtSharePct', () => {
     expect(r.reduce((a, b) => a + b, 0)).toBeCloseTo(100, 9);
     expect(fmtSharePct(r[2], raw[2])).toBe('<0.1%');
     expect(fmtSharePct(r[0], raw[0])).toBe('100.0%');
+  });
+});
+
+describe('fmtDateMinute — 연도 포함 분 단위 시점', () => {
+  it('주입된 TZ 로 날짜 경계를 넘긴다', () => {
+    expect(fmtDateMinute('2026-10-15T15:30:00Z', 'Asia/Seoul')).toBe('2026-10-16 00:30');
+    expect(fmtDateMinute('2026-10-15T15:30:00Z', 'Asia/Kolkata')).toBe('2026-10-15 21:00');
+    expect(fmtDateMinute('2026-10-15T15:30:00Z', 'UTC')).toBe('2026-10-15 15:30');
+  });
+
+  it('파싱 불가 입력은 그대로', () => {
+    expect(fmtDateMinute('not-a-date', 'UTC')).toBe('not-a-date');
   });
 });

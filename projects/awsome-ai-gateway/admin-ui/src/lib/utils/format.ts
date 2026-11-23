@@ -162,6 +162,26 @@ export function fmtDate(iso: string, timeZone?: string): string {
   return `${map.year}-${map.month}-${map.day}`;
 }
 
+/**
+ * 연도까지 있는 분 단위 시각 — 'YYYY-MM-DD HH:mm'. 발급일·등록일·마지막 요청처럼
+ * 몇 달 전일 수 있는 시점용(fmtDateTime 은 연도 없이 초까지라 로그 표 전용).
+ */
+export function fmtDateMinute(iso: string, timeZone?: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(d);
+  const m = Object.fromEntries(parts.map((p) => [p.type, p.value]));
+  return `${m.year}-${m.month}-${m.day} ${m.hour}:${m.minute}`;
+}
+
 export function fmtDateTime(iso: string, locale: string, timeZone?: string): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;

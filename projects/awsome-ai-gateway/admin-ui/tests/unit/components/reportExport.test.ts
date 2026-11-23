@@ -2,6 +2,7 @@
 
 import { escapeHtml, tableHtml, buildReportHtml } from '@/components/chat/reportExport';
 import type { ChatMessage } from '@/components/chat/types';
+import { tzAbbr } from '@/lib/utils/timezone';
 
 // reportExport 의 순수 HTML 조립 로직 검증(jsdom). 차트 SVG 캡처는 라이브 recharts
 // DOM 이 필요해 e2e 영역이므로 여기선 이스케이프·표·부록·narrative 추출에 집중.
@@ -105,11 +106,16 @@ describe('buildReportHtml', () => {
     expect(html).not.toContain('부록 — 실행된 SQL');
   });
 
-  it('labels the generated-at timestamp with the passed reporting timezone', () => {
+  it('generated-at is a moment in the browser TZ; date buckets name the reporting TZ', () => {
     const root = makeRoot('<p>x</p>');
     const html = buildReportHtml(root, baseMsg, 'T', 'America/Los_Angeles');
-    expect(html).toContain('(America/Los_Angeles)');
-    expect(html).not.toContain('(KST)');
+    const viewerTz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const meta = html.match(/<div class="meta">(.*?)<\/div>/)?.[1] ?? '';
+    // '생성 2026-11-23 09:13 UTC · 날짜 기준 PST (America/Los_Angeles)'
+    expect(meta).toMatch(
+      new RegExp(`^생성 \\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2} ${tzAbbr(viewerTz).replace(/[+]/g, '\\+')} · 날짜 기준 `),
+    );
+    expect(meta).toContain('(America/Los_Angeles)');
   });
 
   it('is a self-contained document with inline styles (no external deps)', () => {

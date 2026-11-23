@@ -79,8 +79,9 @@
     "reportingTz": {
       "dates": "날짜 기준: {zone}",
       "hours": "시간 기준: {zone}",
+      "dateOnly": "날짜(YYYY-MM-DD) 기준: {zone}",
       "period": "월 경계 기준: {zone}",
-      "hint": "집계 구간은 배포 리포팅 시간대(REPORTING_TIMEZONE)를 따릅니다. 개별 시각은 브라우저 시간대로 표시됩니다."
+      "hint": "달력 구간(일·월 차트, 예산 기간)과 시각 없는 날짜(YYYY-MM-DD, 예: 키 만료일)는 배포 리포팅 시간대(REPORTING_TIMEZONE)를 따릅니다. 시각이 있는 값은 브라우저 시간대로 표시하고 그 이름을 함께 적습니다."
     }
   },
   "auth": {

@@ -15,6 +15,7 @@ import { ReportingTimezoneProvider } from '@/components/common/ReportingTimezone
 import { BrowserTzCaption, ReportingTzCaption } from '@/components/common/ReportingTzCaption';
 import { usePointInTime } from '@/components/common/usePointInTime';
 import { tzAbbr } from '@/lib/utils/timezone';
+import { fmtDateMinute } from '@/lib/utils/format';
 
 function wrap(node: React.ReactNode, tz = 'Asia/Kolkata') {
   return (
@@ -30,6 +31,7 @@ function Stamp({ iso }: { iso: string }) {
     <span>
       <b data-testid="h">{pit.header('Time')}</b>
       <i data-testid="v">{pit.dateTimeZ(iso)}</i>
+      <u data-testid="s">{pit.stamp(iso)}</u>
     </span>
   );
 }
@@ -38,6 +40,11 @@ describe('ReportingTzCaption', () => {
   it('리포팅 TZ 에서 이름을 유도한다 — 하드코딩 없음', () => {
     render(wrap(<ReportingTzCaption kind="dates" />));
     expect(screen.getByText('Dates in IST (Asia/Kolkata)')).toBeTruthy();
+  });
+
+  it('dateOnly — 표 안 날짜 열 캡션', () => {
+    render(wrap(<ReportingTzCaption kind="dateOnly" />));
+    expect(screen.getByText('Dates (YYYY-MM-DD) in IST (Asia/Kolkata)')).toBeTruthy();
   });
 
   it('kind 별 문구', () => {
@@ -57,6 +64,10 @@ describe('usePointInTime', () => {
     const browserTz = Intl.DateTimeFormat().resolvedOptions().timeZone;
     expect(screen.getByTestId('h').textContent).toMatch(/^Time \(.+\)$/);
     expect(screen.getByTestId('v').textContent).not.toBe('');
+    // stamp 는 리포팅 TZ(Kolkata)가 아니라 브라우저 TZ 로.
+    expect(screen.getByTestId('s').textContent).toBe(
+      fmtDateMinute('2026-11-06T03:43:00Z', browserTz),
+    );
     expect(browserTz).toBeTruthy();
   });
 
@@ -64,6 +75,7 @@ describe('usePointInTime', () => {
     const html = renderToString(wrap(<Stamp iso="2026-11-06T03:43:00Z" />));
     expect(html).toContain('<b data-testid="h">Time</b>');
     expect(html).toMatch(/<i data-testid="v"><\/i>/);
+    expect(html).toMatch(/<u data-testid="s"><\/u>/);
   });
 });
 

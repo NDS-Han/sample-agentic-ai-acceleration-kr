@@ -79,8 +79,9 @@
     "reportingTz": {
       "dates": "Dates in {zone}",
       "hours": "Hours in {zone}",
+      "dateOnly": "Dates (YYYY-MM-DD) in {zone}",
       "period": "Month boundaries in {zone}",
-      "hint": "Aggregation buckets follow the deployment reporting time zone (REPORTING_TIMEZONE). Individual timestamps elsewhere use your browser time zone."
+      "hint": "Calendar buckets (daily/monthly charts, budget periods) and date-only values (YYYY-MM-DD, e.g. key expiry) follow the deployment reporting time zone (REPORTING_TIMEZONE). Values with a time of day are shown in your browser time zone with its name."
     }
   },
   "auth": {

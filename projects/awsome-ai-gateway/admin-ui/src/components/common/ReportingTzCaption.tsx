@@ -17,8 +17,9 @@ export function ReportingTzCaption({
   kind = 'dates',
   className = '',
 }: {
-  /** dates=일별 축, hours=시간 축, period=월(예산·기간) 경계. */
-  kind?: 'dates' | 'hours' | 'period';
+  /** dates=일별 축, hours=시간 축, period=월(예산·기간) 경계,
+   *  dateOnly=표 안의 시각 없는 날짜 열(YYYY-MM-DD, 키 만료일 등). */
+  kind?: 'dates' | 'hours' | 'period' | 'dateOnly';
   className?: string;
 }) {
   const t = useTranslations('common.reportingTz');
