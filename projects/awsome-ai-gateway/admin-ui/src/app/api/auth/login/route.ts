@@ -204,10 +204,13 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   authorizeUrl.searchParams.set('nonce', nonce);
   authorizeUrl.searchParams.set('code_challenge', challenge);
   authorizeUrl.searchParams.set('code_challenge_method', 'S256');
-  // 로그인 화면 언어 = admin-ui 의 KO/EN 선택(locale 쿠키, 없으면 기본 ko).
+  // 로그인 화면 언어 = admin-ui 와 같은 규칙(KO/EN 선택 쿠키 → 브라우저 언어 → ko).
   // lang 은 Cognito Managed Login 의 지역화 파라미터, ui_locales 는 OIDC 표준
   // (Cognito 외 IdP 용) — 서로 모르는 파라미터는 무시되므로 둘 다 싣는다.
-  const locale = resolveLocale(request.cookies.get('locale')?.value);
+  const locale = resolveLocale(
+    request.cookies.get('locale')?.value,
+    request.headers.get('accept-language'),
+  );
   authorizeUrl.searchParams.set('lang', locale);
   authorizeUrl.searchParams.set('ui_locales', locale);
 

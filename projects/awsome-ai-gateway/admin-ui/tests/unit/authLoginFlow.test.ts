@@ -355,6 +355,16 @@ describe('GET /api/auth/login — 로그인 화면 언어', () => {
     expect(loc.searchParams.get('ui_locales')).toBe('ko');
   });
 
+  it('locale 쿠키가 없으면 브라우저 언어(Accept-Language)를 따른다', async () => {
+    configureOidc();
+    const res = await loginGET(
+      req('http://admin.test/api/auth/login', {
+        headers: { host: 'admin.test', 'accept-language': 'en-US,en;q=0.9' },
+      }),
+    );
+    expect(new URL(res.headers.get('location')!).searchParams.get('lang')).toBe('en');
+  });
+
   it('locale=en 쿠키면 en, 지원하지 않는 값이면 기본 ko 로 정규화한다', async () => {
     configureOidc();
     const en = await loginGET(

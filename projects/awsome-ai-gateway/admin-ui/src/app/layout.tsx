@@ -3,7 +3,7 @@
 import type { Metadata } from 'next';
 import localFont from 'next/font/local';
 import { GeistMono } from 'geist/font/mono';
-import { cookies } from 'next/headers';
+import { cookies, headers } from 'next/headers';
 import { getMessages } from 'next-intl/server';
 import { NextIntlClientProvider } from 'next-intl';
 import '@/app/globals.css';
@@ -72,7 +72,10 @@ export default async function RootLayout({
 
   const messages = await getMessages();
   // request.ts 와 같은 규칙 — 쿠키 원시값을 그대로 쓰면 lang="fr" + ko 메시지 조합이 된다.
-  const locale = resolveLocale(cookieStore.get('locale')?.value);
+  const locale = resolveLocale(
+    cookieStore.get('locale')?.value,
+    (await headers()).get('accept-language'),
+  );
 
   // BI Insight(admin-chat-agent, AgentCore Runtime)는 별도 배포다 — NDS-02로
   // 배포되지 않은 환경에서는 사이드바 메뉴·퀵챗 패널·/chat 페이지를 전부 숨긴다.
