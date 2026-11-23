@@ -37,7 +37,7 @@ import { TopSpendTable, type TopSpendRow } from '@/components/dashboard/TopSpend
 import { PeriodSelector } from '@/components/dashboard/PeriodSelector';
 import { ClientFilter } from '@/components/dashboard/ClientFilter';
 import { reportingNowParts } from '@/lib/utils/period';
-import { fmtUsd, fmtTokensCompact } from '@/lib/utils/format';
+import { fmtUsd, fmtTokensCompact, usdTitle } from '@/lib/utils/format';
 import { teamDisplayName } from '@/lib/utils/trendSeries';
 import { userLabel } from '@/lib/userLabel';
 import { pageTitle } from '@/lib/pageMetadata';
@@ -117,6 +117,7 @@ async function DashboardKPIs({ period, client }: { period: string; client: strin
           <KPICard
             title={t('usageThisMonth')}
             value={kpi ? fmtUsd(kpi.total_cost_usd) : '—'}
+            valueTitle={usdTitle(kpi?.total_cost_usd)}
             icon={<DollarSign size={18} aria-hidden="true" />}
             description={kpi ? t('usageThisMonthDesc') : t('fetchFailed')}
             href={`/analytics?period=${period}${clientSuffix}`}
@@ -141,6 +142,7 @@ async function DashboardKPIs({ period, client }: { period: string; client: strin
           <KPICard
             title={t('avgCostPerUser')}
             value={kpi ? fmtUsd(kpi.cost_per_user_usd) : '—'}
+            valueTitle={usdTitle(kpi?.cost_per_user_usd)}
             icon={<Users size={18} aria-hidden="true" />}
             description={kpi ? t('avgCostPerUserDesc', { count: kpi.active_users }) : t('fetchFailed')}
             href={`/analytics?period=${period}&group_by=user${clientSuffix}`}
@@ -148,6 +150,7 @@ async function DashboardKPIs({ period, client }: { period: string; client: strin
           <KPICard
             title={t('dailyAvg')}
             value={kpi ? fmtUsd(dailyAvg) : '—'}
+            valueTitle={kpi ? usdTitle(dailyAvg) : undefined}
             icon={<CalendarClock size={18} aria-hidden="true" />}
             description={
               projection != null

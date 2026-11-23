@@ -9,6 +9,7 @@ import { fmtSharePct, fmtUsd, roundSharesTo100 } from '@/lib/utils/format';
 import type { ClientShareResponse } from '@/lib/actions/dashboard';
 import { CATEGORICAL_PALETTE } from '@/lib/utils/chartTheme';
 import { labelFor } from '@/lib/utils/modelLabel';
+import { Usd } from '@/components/common/Usd';
 
 // 항목 구분용 다색 카테고리 팔레트 (색맹 안전, 라이트/다크 공통).
 const COLORS = CATEGORICAL_PALETTE;
@@ -108,7 +109,7 @@ export function ClientShareDonutClient({ data }: Props) {
               </p>
               <p className="mt-0.5 text-[10px] text-muted-foreground tabular-nums">
                 {hoverIndex != null && centerItem
-                  ? fmtUsd(centerItem.cost_usd)
+                  ? <Usd value={centerItem.cost_usd} />
                   : t('topShare', { total: fmtUsd(data.total_cost_usd) })}
               </p>
             </div>
@@ -143,7 +144,7 @@ export function ClientShareDonutClient({ data }: Props) {
             <span className="text-muted-foreground tabular-nums text-xs text-right">
               {c.web_search_count > 0 ? t('webSearchCount', { count: c.web_search_count }) : ''}
             </span>
-            <span className="tabular-nums text-xs text-right">{fmtUsd(c.cost_usd)}</span>
+            <span className="tabular-nums text-xs text-right"><Usd value={c.cost_usd} /></span>
             <span className="text-muted-foreground tabular-nums text-xs text-right">
               {fmtSharePct(sharesRounded[i], c.share_pct)}
             </span>

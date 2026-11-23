@@ -12,7 +12,7 @@ import { isSyntheticEmail, userLabel } from '@/lib/userLabel';
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/common/Table';
 import { useToast } from '@/components/common/ToastProvider';
 import { useReportingTz } from '@/components/common/ReportingTimezoneProvider';
-import { fmtDate, fmtUsd } from '@/lib/utils/format';
+import { fmtDate } from '@/lib/utils/format';
 import {
   issueServiceKeyAction,
   listIssueTargetsAction,
@@ -22,6 +22,7 @@ import {
 } from '@/lib/actions/service-accounts';
 import { revokeKeyAction } from '@/lib/actions/keys';
 import type { ServiceAccountItem } from '@/types/entities';
+import { Usd } from '@/components/common/Usd';
 
 interface Props {
   accounts: ServiceAccountItem[];
@@ -234,7 +235,7 @@ export function ServiceAccountsPanel({ accounts, maxTtlDays, serviceKeysEnabled 
                   {a.month_tokens.toLocaleString()}
                 </Td>
                 <Td numeric className="text-muted-foreground">
-                  {fmtUsd(a.month_cost_usd)}
+                  <Usd value={a.month_cost_usd} />
                 </Td>
                 <Td numeric>
                   <div className="flex items-center justify-end gap-2">

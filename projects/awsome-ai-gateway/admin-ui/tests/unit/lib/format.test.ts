@@ -12,6 +12,8 @@ import { describe, it, expect } from 'vitest';
 import {
   fmtTokensCompact,
   fmtUsd,
+  fmtUsdExact,
+  usdTitle,
   fmtUsdRate,
   fmtUsdTick,
   niceTicks,
@@ -59,11 +61,21 @@ describe('fmtUsd — 단일 비용 포맷', () => {
     expect(fmtUsd(1234.5)).toBe('$1,234.50');
   });
 
-  it('$0.01 미만은 유효숫자 2개 — $0.007100 같은 0 패딩 없음', () => {
-    expect(fmtUsd(0.0071)).toBe('$0.0071');
-    expect(fmtUsd(0.000078)).toBe('$0.000078');
-    expect(fmtUsd(0.007)).toBe('$0.0070');
-    expect(fmtUsd(0.0000114)).toBe('$0.000011');
+  it("0 < n < $0.01 은 '< $0.01' — 소액 자릿수가 화면마다 제각각이던 것 통일", () => {
+    expect(fmtUsd(0.0071)).toBe('< $0.01');
+    expect(fmtUsd(0.000078)).toBe('< $0.01');
+    expect(fmtUsd(0.0000995)).toBe('< $0.01');
+    expect(fmtUsd(-0.003)).toBe('> -$0.01');
+  });
+
+  it('정확한 값(툴팁)은 유효숫자 2개 — usdTitle 은 줄인 경우에만', () => {
+    expect(fmtUsdExact(0.000078)).toBe('$0.000078');
+    expect(fmtUsdExact(0.007)).toBe('$0.0070');
+    expect(fmtUsdExact(0.16)).toBe('$0.16');
+    expect(usdTitle(0.000078)).toBe('$0.000078');
+    expect(usdTitle(0.16)).toBeUndefined();
+    expect(usdTitle(0)).toBeUndefined();
+    expect(usdTitle(null)).toBeUndefined();
   });
 
   it('반올림이 $0.01 에 닿으면 2자리 규칙으로 간다', () => {

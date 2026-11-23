@@ -4,11 +4,12 @@
 
 import { useLocale, useTranslations } from 'next-intl';
 import Link from 'next/link';
-import { fmtTime, fmtUsd } from '@/lib/utils/format';
+import { fmtTime } from '@/lib/utils/format';
 import { useDisplayTz } from '@/components/common/ReportingTimezoneProvider';
 import type { MonitoringUsersResponse } from '@/lib/actions/monitoring';
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/common/Table';
 import { EmailText } from '@/components/common/UnverifiedEmailBadge';
+import { Usd } from '@/components/common/Usd';
 
 // 에러율 강조 — 테마 토큰(다크/라이트 자동). 임계: ≥10% 위험, ≥5% 경고.
 function errorColor(pct: number) {
@@ -60,7 +61,7 @@ export function UserTopTable({ data }: { data: MonitoringUsersResponse }) {
               </Td>
               <Td numeric>{u.requests.toLocaleString()}</Td>
               <Td numeric>{u.tokens.toLocaleString()}</Td>
-              <Td numeric emphasis>{fmtUsd(u.cost_usd)}</Td>
+              <Td numeric emphasis><Usd value={u.cost_usd} /></Td>
               <Td numeric className={errorColor(u.error_rate_pct)}>
                 {u.error_rate_pct}%
               </Td>

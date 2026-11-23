@@ -3,15 +3,25 @@
 // Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
 
 import { useLocale, useTranslations } from 'next-intl';
-import { fmtDateTime, fmtUsd } from '@/lib/utils/format';
+import { fmtDateTime, fmtUsd, usdTitle } from '@/lib/utils/format';
 import { useDisplayTz } from '@/components/common/ReportingTimezoneProvider';
 import type { MonitoringOverviewResponse } from '@/lib/actions/monitoring';
 
-function StatCard({ label, value, sub }: { label: string; value: string; sub?: string }) {
+function StatCard({
+  label,
+  value,
+  valueTitle,
+  sub,
+}: {
+  label: string;
+  value: string;
+  valueTitle?: string;
+  sub?: string;
+}) {
   return (
     <div className="glass glass-hover rounded-apple p-4">
       <p className="text-sm text-muted-foreground">{label}</p>
-      <p className="text-2xl font-bold mt-1">{value}</p>
+      <p className="text-2xl font-bold mt-1" title={valueTitle}>{value}</p>
       {sub && <p className="text-xs text-muted-foreground mt-1">{sub}</p>}
     </div>
   );
@@ -49,7 +59,11 @@ export function MonitoringOverview({ data }: { data: MonitoringOverviewResponse 
           label={t('p95Latency')}
           value={h.total_requests > 0 ? `${h.p95_latency_ms}ms` : '—'}
         />
-        <StatCard label={t('totalCost')} value={fmtUsd(h.total_cost_usd)} />
+        <StatCard
+          label={t('totalCost')}
+          value={fmtUsd(h.total_cost_usd)}
+          valueTitle={usdTitle(h.total_cost_usd)}
+        />
         <StatCard label={t('activeModels')} value={String(data.active_models)} />
       </div>
     </div>

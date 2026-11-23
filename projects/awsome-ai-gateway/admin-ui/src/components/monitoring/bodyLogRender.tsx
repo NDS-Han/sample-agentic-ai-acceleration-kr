@@ -11,7 +11,8 @@ import { Badge, type BadgeTone } from '@/components/common/Badge';
 import { EmailText } from '@/components/common/UnverifiedEmailBadge';
 import { useToast } from '@/components/common/ToastProvider';
 import { useDisplayTz } from '@/components/common/ReportingTimezoneProvider';
-import { fmtDateTime, fmtTokensCompact, fmtUsd } from '@/lib/utils/format';
+import { fmtDateTime, fmtTokensCompact } from '@/lib/utils/format';
+import { Usd } from '@/components/common/Usd';
 
 // ── 본문 텍스트 추출 ──────────────────────────────────────────────────────────
 // request_body 방언: anthropic/openai chat = messages[], responses API = input.
@@ -747,7 +748,7 @@ export function BodyRecordContent({
           {data.cost_usd != null && (
             <div>
               <dt className="inline">{t('costLabel')}</dt>{' '}
-              <dd className="num inline">{fmtUsd(data.cost_usd)}</dd>
+              <dd className="num inline"><Usd value={data.cost_usd} /></dd>
             </div>
           )}
           {(data.input_tokens != null || data.output_tokens != null) && (

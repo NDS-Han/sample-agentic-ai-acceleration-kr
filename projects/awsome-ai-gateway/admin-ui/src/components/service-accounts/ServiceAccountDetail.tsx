@@ -21,10 +21,11 @@ import { Table, THead, TBody, Tr, Th, Td } from '@/components/common/Table';
 import { PeriodSelector } from '@/components/dashboard/PeriodSelector';
 import { TokenMixDonutClient } from '@/components/analytics/TokenMixDonutClient';
 import { useReportingTz } from '@/components/common/ReportingTimezoneProvider';
-import { fmtDate, fmtUsd } from '@/lib/utils/format';
+import { fmtDate, fmtUsd, fmtUsdExact, usdTitle } from '@/lib/utils/format';
 import { modelDisplay } from '@/lib/utils/modelLabel';
 import { monthsAgo } from '@/lib/utils/period';
 import type { ServiceAccountUsageResponse } from '@/types/entities';
+import { Usd } from '@/components/common/Usd';
 
 interface Props {
   data: ServiceAccountUsageResponse;
@@ -87,6 +88,7 @@ export function ServiceAccountDetail({ data, period }: Props) {
         <KPICard
           title={t('kpiCost')}
           value={fmtUsd(s.cost_usd)}
+          valueTitle={usdTitle(s.cost_usd)}
           icon={<DollarSign size={18} />}
           description={t('kpiCostDesc', {
             success: s.success.toLocaleString(),
@@ -172,7 +174,7 @@ export function ServiceAccountDetail({ data, period }: Props) {
                   {k.requests.toLocaleString()}
                 </Td>
                 <Td numeric className="text-muted-foreground">
-                  {fmtUsd(k.cost_usd)}
+                  <Usd value={k.cost_usd} />
                 </Td>
               </Tr>
             ))}
@@ -212,7 +214,7 @@ export function ServiceAccountDetail({ data, period }: Props) {
                     {m.tokens.toLocaleString()}
                   </Td>
                   <Td numeric className="text-muted-foreground">
-                    {fmtUsd(m.cost_usd)}
+                    <Usd value={m.cost_usd} />
                   </Td>
                   <Td numeric className="text-muted-foreground">
                     {(m.cost_share * 100).toFixed(1)}%
@@ -260,7 +262,7 @@ export function ServiceAccountDetail({ data, period }: Props) {
                   tick={{ fontSize: 11 }}
                   stroke="hsl(var(--muted-foreground))"
                   tickFormatter={(v: number) =>
-                    trendMetric === 'cost_usd' ? fmtUsd(v) : v.toLocaleString()
+                    trendMetric === 'cost_usd' ? fmtUsdExact(v) : v.toLocaleString()
                   }
                 />
                 <Tooltip
@@ -273,7 +275,7 @@ export function ServiceAccountDetail({ data, period }: Props) {
                   labelStyle={{ color: 'hsl(var(--muted-foreground))' }}
                   formatter={((value: number) => [
                     trendMetric === 'cost_usd'
-                      ? fmtUsd(value)
+                      ? fmtUsdExact(value)
                       : `${value.toLocaleString()} ${t('tokUnit')}`,
                     t(trendMetric === 'cost_usd' ? 'keyCost' : 'trendTokens'),
                   ]) as never}

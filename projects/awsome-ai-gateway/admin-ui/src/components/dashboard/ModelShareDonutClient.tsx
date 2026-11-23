@@ -12,6 +12,7 @@ import { CATEGORICAL_PALETTE, useChartTheme } from '@/lib/utils/chartTheme';
 import { modelDisplay } from '@/lib/utils/modelLabel';
 import { teamDisplayName } from '@/lib/utils/trendSeries';
 import { redirectToLoginIfUnauthorized } from '@/lib/utils/unauthorized';
+import { Usd } from '@/components/common/Usd';
 
 // 항목 구분용 다색 카테고리 팔레트 (색맹 안전, 라이트/다크 공통).
 const COLORS = CATEGORICAL_PALETTE;
@@ -226,7 +227,7 @@ export function ModelShareDonutClient({ initialData, teams, period, client }: Pr
                   </p>
                   <p className="mt-0.5 text-[10px] text-muted-foreground tabular-nums">
                     {hi != null && centerItem
-                      ? fmtUsd(centerItem.cost_usd)
+                      ? <Usd value={centerItem.cost_usd} />
                       : t('topShare', { total: fmtUsd(data.total_cost_usd) })}
                   </p>
                 </div>
@@ -265,7 +266,7 @@ export function ModelShareDonutClient({ initialData, teams, period, client }: Pr
                   </span>
                 </div>
                 <span className="tabular-nums text-xs text-right">
-                  {fmtUsd(m.cost_usd)}
+                  <Usd value={m.cost_usd} />
                 </span>
                 <span className="text-muted-foreground tabular-nums text-xs text-right">
                   {m.share_pct.toFixed(1)}%

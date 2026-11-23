@@ -25,7 +25,7 @@ import {
   CartesianGrid,
   Tooltip,
 } from 'recharts';
-import { fmtUsd, fmtUsdTick, niceTicks } from '@/lib/utils/format';
+import { fmtUsdExact, fmtUsdTick, niceTicks } from '@/lib/utils/format';
 import {
   buildTrendSeries,
   defaultSelectedTeamIds,
@@ -250,7 +250,7 @@ export function CostTrendCard({ trends, trendsByTeam = [] }: CostTrendCardProps)
                 fontSize: '12px',
               }}
               labelStyle={{ color: 'hsl(var(--muted-foreground))' }}
-              formatter={((value: number, name: string) => [fmtUsd(Number(value)), name]) as never}
+              formatter={((value: number, name: string) => [fmtUsdExact(Number(value)), name]) as never}
             />
             {/* type=linear + connectNulls 미설정: 실측이 없는 날은 곡선 보간도,
                 gap 잇기도 하지 않는다 — 사용량이 없는 날짜는 있는 그대로 비어 보인다. */}

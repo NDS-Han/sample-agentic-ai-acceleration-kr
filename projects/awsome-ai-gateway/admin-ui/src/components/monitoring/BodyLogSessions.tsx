@@ -20,12 +20,13 @@ import { EmailText } from '@/components/common/UnverifiedEmailBadge';
 import { isSyntheticEmail } from '@/lib/userLabel';
 import { useToast } from '@/components/common/ToastProvider';
 import { useDisplayTz } from '@/components/common/ReportingTimezoneProvider';
-import { fmtDateTime, fmtTokensCompact, fmtUsd } from '@/lib/utils/format';
+import { fmtDateTime, fmtTokensCompact } from '@/lib/utils/format';
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/common/Table';
 import { SkeletonTable } from '@/components/common/SkeletonTable';
 import { ErrorState } from '@/components/common/ErrorState';
 import { Button } from '@/components/common/Button';
 import { BodyRecordContent, statusTone } from './bodyLogRender';
+import { Usd } from '@/components/common/Usd';
 
 // 한 호출을 펼치면 그 호출만 단건 조회한다 — 클릭 한 번으로 50건 열람이 감사되는
 // 구조(eager batch)를 피하기 위해서다. 실제로 읽은 것만 감사된다.
@@ -548,7 +549,7 @@ export function BodyLogSessions({
               {t('callsCount', { count: selected.call_count })}
             </span>
             {selected.total_cost_usd != null && (
-              <span className="text-muted-foreground">{fmtUsd(selected.total_cost_usd)}</span>
+              <span className="text-muted-foreground"><Usd value={selected.total_cost_usd} /></span>
             )}
             {selected.error_count > 0 && (
               /* 오류 필터 — 세그먼트 토글. 배지 클릭은 발견이 안 된다. */
@@ -638,7 +639,7 @@ export function BodyLogSessions({
                     {call.latency_ms != null ? `${(call.latency_ms / 1000).toFixed(1)}s` : ''}
                   </span>
                   <span className="num text-right text-xs text-muted-foreground">
-                    {call.cost_usd != null ? fmtUsd(call.cost_usd) : ''}
+                    {call.cost_usd != null ? <Usd value={call.cost_usd} /> : ''}
                   </span>
                   <span className="num text-right text-xs text-muted-foreground">
                     {call.input_tokens != null || call.output_tokens != null
@@ -877,7 +878,7 @@ export function BodyLogSessions({
                     {s.models.join(', ')}
                   </Td>
                   <Td numeric className="text-sm">
-                    {s.total_cost_usd != null ? fmtUsd(s.total_cost_usd) : '—'}
+                    {s.total_cost_usd != null ? <Usd value={s.total_cost_usd} /> : '—'}
                   </Td>
                   <Td numeric>
                     {s.error_count > 0 ? (
