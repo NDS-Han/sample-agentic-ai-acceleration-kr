@@ -18,7 +18,7 @@ import { Badge } from '@/components/common/Badge';
 import { EmailText } from '@/components/common/UnverifiedEmailBadge';
 import { isSyntheticEmail } from '@/lib/userLabel';
 import { useToast } from '@/components/common/ToastProvider';
-import { useReportingTz } from '@/components/common/ReportingTimezoneProvider';
+import { useDisplayTz } from '@/components/common/ReportingTimezoneProvider';
 import { fmtDateTime } from '@/lib/utils/format';
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/common/Table';
 import { ErrorState } from '@/components/common/ErrorState';
@@ -70,7 +70,7 @@ export function BodyLogsViewer({
   const t = useTranslations('monitoring.bodyLogs');
   const tev = useTranslations('monitoring.events');
   const locale = useLocale();
-  const tz = useReportingTz();
+  const tz = useDisplayTz();
   const { toast } = useToast();
   const [query, setQuery] = useState(initialRequestId ?? '');
   const [loading, startTransition] = useTransition();

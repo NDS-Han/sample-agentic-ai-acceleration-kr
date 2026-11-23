@@ -4,7 +4,7 @@
 
 import { useLocale, useTranslations } from 'next-intl';
 import { fmtDateTime, fmtUsd } from '@/lib/utils/format';
-import { useReportingTz } from '@/components/common/ReportingTimezoneProvider';
+import { useDisplayTz } from '@/components/common/ReportingTimezoneProvider';
 import type { MonitoringOverviewResponse } from '@/lib/actions/monitoring';
 
 function StatCard({ label, value, sub }: { label: string; value: string; sub?: string }) {
@@ -20,15 +20,15 @@ function StatCard({ label, value, sub }: { label: string; value: string; sub?: s
 export function MonitoringOverview({ data }: { data: MonitoringOverviewResponse }) {
   const t = useTranslations('monitoring');
   const locale = useLocale();
-  const tz = useReportingTz();
+  const tz = useDisplayTz();
   const h = data.last_1h;
 
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <h2 className="text-base font-semibold">{t('lastHourSummary')}</h2>
-        {/* 시각은 브라우저 TZ 가 아니라 리포팅 TZ(REPORTING_TIMEZONE)로 그린다 — TZ 이름을
-            같이 적지 않으면 KST 로 오독된다(예: dev 가 Asia/Kolkata 면 15:17 KST 가 11:47). */}
+        {/* 한 시점이라 보는 사람의 브라우저 TZ 로 그린다(리포팅 TZ 는 집계 경계용).
+            TZ 이름을 같이 적어 어느 시계 기준인지 분명히 한다. */}
         <span className="text-xs text-muted-foreground" title={data.timestamp}>
           {t('asOf', { time: fmtDateTime(data.timestamp, locale, tz), tz })}
         </span>

@@ -19,7 +19,7 @@ import { Badge } from '@/components/common/Badge';
 import { EmailText } from '@/components/common/UnverifiedEmailBadge';
 import { isSyntheticEmail } from '@/lib/userLabel';
 import { useToast } from '@/components/common/ToastProvider';
-import { useReportingTz } from '@/components/common/ReportingTimezoneProvider';
+import { useDisplayTz } from '@/components/common/ReportingTimezoneProvider';
 import { fmtDateTime, fmtTokensCompact, fmtUsd } from '@/lib/utils/format';
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/common/Table';
 import { SkeletonTable } from '@/components/common/SkeletonTable';
@@ -85,7 +85,7 @@ export function BodyLogSessions({
   const t = useTranslations('monitoring.bodyLogs');
   const tev = useTranslations('monitoring.events');
   const locale = useLocale();
-  const tz = useReportingTz();
+  const tz = useDisplayTz();
   const { toast } = useToast();
 
   // usage status → 번역 라벨. 모르는 값은 원문 폴백(EventLog/뷰어와 동일 규칙).

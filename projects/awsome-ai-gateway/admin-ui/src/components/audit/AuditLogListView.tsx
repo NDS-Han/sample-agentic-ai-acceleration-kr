@@ -9,7 +9,7 @@ import { ChevronDown, ChevronRight } from 'lucide-react';
 import { listAuditLogsAction } from '@/lib/actions/audit';
 import { baseAction, isConfirmedAction } from '@/lib/audit/action';
 import { useToast } from '@/components/common/ToastProvider';
-import { useReportingTz } from '@/components/common/ReportingTimezoneProvider';
+import { useDisplayTz } from '@/components/common/ReportingTimezoneProvider';
 import { Badge, RoleBadge } from '@/components/common/Badge';
 import { UnverifiedEmailBadge } from '@/components/common/UnverifiedEmailBadge';
 import { Table, THead, TBody, Tr, Th, Td, TEmpty } from '@/components/common/Table';
@@ -80,7 +80,7 @@ export function AuditLogListView({
   const t = useTranslations('audit');
   const tAuth = useTranslations('auth');
   const locale = useLocale();
-  const tz = useReportingTz();
+  const tz = useDisplayTz();
   const { toast } = useToast();
   const [items, setItems] = useState(initialItems);
   const [cursor, setCursor] = useState(initialCursor);

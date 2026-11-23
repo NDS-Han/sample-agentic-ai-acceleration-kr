@@ -10,7 +10,7 @@ import type { BodyLogResponse } from '@/lib/actions/body-logs';
 import { Badge, type BadgeTone } from '@/components/common/Badge';
 import { EmailText } from '@/components/common/UnverifiedEmailBadge';
 import { useToast } from '@/components/common/ToastProvider';
-import { useReportingTz } from '@/components/common/ReportingTimezoneProvider';
+import { useDisplayTz } from '@/components/common/ReportingTimezoneProvider';
 import { fmtDateTime, fmtTokensCompact, fmtUsd } from '@/lib/utils/format';
 
 // ── 본문 텍스트 추출 ──────────────────────────────────────────────────────────
@@ -652,7 +652,7 @@ export function BodyRecordContent({
   const t = useTranslations('monitoring.bodyLogs');
   const tev = useTranslations('monitoring.events');
   const locale = useLocale();
-  const tz = useReportingTz();
+  const tz = useDisplayTz();
   const { toast } = useToast();
   const [rawReq, setRawReq] = useState(false);
   const [rawRes, setRawRes] = useState(false);

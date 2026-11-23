@@ -5,7 +5,7 @@
 import { useLocale, useTranslations } from 'next-intl';
 import Link from 'next/link';
 import { fmtTime, fmtUsd } from '@/lib/utils/format';
-import { useReportingTz } from '@/components/common/ReportingTimezoneProvider';
+import { useDisplayTz } from '@/components/common/ReportingTimezoneProvider';
 import type { MonitoringUsersResponse } from '@/lib/actions/monitoring';
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/common/Table';
 import { EmailText } from '@/components/common/UnverifiedEmailBadge';
@@ -20,7 +20,7 @@ function errorColor(pct: number) {
 export function UserTopTable({ data }: { data: MonitoringUsersResponse }) {
   const t = useTranslations('monitoring');
   const locale = useLocale();
-  const tz = useReportingTz();
+  const tz = useDisplayTz();
 
   if (data.users.length === 0) {
     return (

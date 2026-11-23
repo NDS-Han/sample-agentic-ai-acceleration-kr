@@ -15,7 +15,7 @@ import { Badge } from '@/components/common/Badge';
 import { EmailText } from '@/components/common/UnverifiedEmailBadge';
 import { isSyntheticEmail } from '@/lib/userLabel';
 import { useToast } from '@/components/common/ToastProvider';
-import { useReportingTz } from '@/components/common/ReportingTimezoneProvider';
+import { useDisplayTz } from '@/components/common/ReportingTimezoneProvider';
 import { fmtDateTime } from '@/lib/utils/format';
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/common/Table';
 import { eventTone, eventTypeLabels, EVENT_TYPE_FILTERS } from './eventMeta';
@@ -30,7 +30,7 @@ export function EventLog({
 }) {
   const t = useTranslations('monitoring');
   const locale = useLocale();
-  const tz = useReportingTz();
+  const tz = useDisplayTz();
   const { toast } = useToast();
   const [filter, setFilter] = useState<MonitoringEventTypeFilter>('all');
   const [data, setData] = useState<MonitoringEventsResponse>(initialData);

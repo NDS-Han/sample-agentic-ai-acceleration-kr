@@ -5,7 +5,7 @@
 import { useLocale, useTranslations } from 'next-intl';
 import Link from 'next/link';
 import { AlertTriangle, AlertCircle } from 'lucide-react';
-import { useReportingTz } from '@/components/common/ReportingTimezoneProvider';
+import { useDisplayTz } from '@/components/common/ReportingTimezoneProvider';
 import { fmtTime } from '@/lib/utils/format';
 import type { MonitoringModelsResponse } from '@/lib/actions/monitoring';
 import { Badge } from '@/components/common/Badge';
@@ -28,7 +28,7 @@ function SeverityIcon({ pct }: { pct: number }) {
 export function ModelHealthTable({ data }: { data: MonitoringModelsResponse }) {
   const t = useTranslations('monitoring');
   const locale = useLocale();
-  const tz = useReportingTz();
+  const tz = useDisplayTz();
 
   if (data.models.length === 0) {
     return (
