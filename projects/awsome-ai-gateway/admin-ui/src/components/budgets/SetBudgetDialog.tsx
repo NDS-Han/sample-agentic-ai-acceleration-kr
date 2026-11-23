@@ -25,6 +25,7 @@ import { SpinnerButton } from '@/components/common/SpinnerButton';
 import { useToast } from '@/components/common/ToastProvider';
 import { ConfirmImpactBox } from './ConfirmImpactBox';
 import { fmtUsd } from '@/lib/utils/format';
+import { Usd } from '@/components/common/Usd';
 import { NumberInput } from '@/components/common/NumberInput';
 
 interface SetBudgetDialogProps {
@@ -450,8 +451,13 @@ export function SetBudgetDialog({ isOpen, onClose, target }: SetBudgetDialogProp
         {t('dialogTarget')} <span className="font-medium text-foreground">{target.name}</span>
         {target.currentUsed != null && (
           <span className="ml-3 text-xs tabular-nums">
-            {t('currentUsage')} {fmtUsd(target.currentUsed)}
-            {target.currentLimit > 0 && ` · ${t('existingLimit')} ${fmtUsd(target.currentLimit)}`}
+            {t('currentUsage')} <Usd value={target.currentUsed} />
+            {target.currentLimit > 0 && (
+              <>
+                {` · ${t('existingLimit')} `}
+                <Usd value={target.currentLimit} />
+              </>
+            )}
           </span>
         )}
       </p>
@@ -509,7 +515,7 @@ export function SetBudgetDialog({ isOpen, onClose, target }: SetBudgetDialogProp
               </div>
               {target.parentLimit !== undefined && (
                 <p className="text-xs text-muted-foreground">
-                  {t('upperLimit')} {fmtUsd(target.parentLimit)}
+                  {t('upperLimit')} <Usd value={target.parentLimit} />
                 </p>
               )}
               {/* D-7: USER 입력 참고값 — 현재 cap 출처 + 팀 기본 cap D */}

@@ -5,7 +5,7 @@
 
 import { useTranslations } from 'next-intl';
 import type { MyBudgetResponse } from '@/lib/actions/my';
-import { fmtUsd } from '@/lib/utils/format';
+import { fmtUsd, usdTitle } from '@/lib/utils/format';
 import { UsageBar } from '@/components/budgets/budgetVisuals';
 import { alertLevelOf } from '@/lib/utils/alertLevel';
 import { AlertLevel } from '@/types/enums';
@@ -92,10 +92,12 @@ export function MyBudgetCard({
           <>
             <UsageBar pct={capPct} level={level} />
             <div className="flex items-center justify-between text-sm text-muted-foreground">
-              <span>
+              {/* 금액은 fmtUsd 그대로 — '$' 를 잘라 메시지에 다시 붙이면 '< $0.01' 이
+                  '$ $0.01' 로 깨진다. */}
+              <span title={usdTitle(effectiveCap)}>
                 {capIsTeamDefault
-                  ? t('limitTeamDefault', { amount: fmtUsd(effectiveCap).slice(1) })
-                  : t('limit', { amount: fmtUsd(effectiveCap).slice(1) })}
+                  ? t('limitTeamDefault', { amount: fmtUsd(effectiveCap) })
+                  : t('limit', { amount: fmtUsd(effectiveCap) })}
               </span>
               <span className={PCT_TONE[level] ?? 'text-muted-foreground'}>
                 {capPct.toFixed(1)}%

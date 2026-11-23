@@ -967,7 +967,7 @@
     "colModel": "Model",
     "monthlyBudget": "This month's budget",
     "spent": "Spent",
-    "limit": "Limit: ${amount}",
+    "limit": "Limit: {amount}",
     "remaining": "Remaining",
     "overagePolicy": "Overage policy",
     "policyLabel": {
@@ -984,7 +984,7 @@
     "teamSharedNote": "Shared by the whole team — requests are blocked when exhausted, regardless of your personal cap",
     "teamUnset": "No team budget is set — requests may be blocked until an admin sets one",
     "noCapNoTeam": "No budget limit is set",
-    "limitTeamDefault": "Limit: ${amount} (team default)",
+    "limitTeamDefault": "Limit: {amount} (team default)",
     "kpiCostDesc": "{requests} successful requests",
     "kpiRequestsDesc": "{count} models used",
     "requestsSubline": "Total {total} · errors {errors} ({rate}%)",

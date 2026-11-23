@@ -9,7 +9,7 @@
 
 import { Badge, RoleBadge as CommonRoleBadge, type BadgeTone } from '@/components/common/Badge';
 import { AlertLevel, BudgetScope } from '@/types/enums';
-import { fmtUsd } from '@/lib/utils/format';
+import { Usd } from '@/components/common/Usd';
 import { useTranslations } from 'next-intl';
 import { alertLevelOf, type AlertLevelValue } from '@/lib/utils/alertLevel';
 
@@ -86,7 +86,9 @@ export function BudgetGaugeRow({
         <span className="text-muted-foreground">{label}</span>
         <span className="font-medium tabular-nums">
           {maxN != null ? (
-            `${fmtUsd(usedN)} / ${fmtUsd(maxN)}`
+            <>
+              <Usd value={usedN} /> / <Usd value={maxN} />
+            </>
           ) : (
             <span className="text-muted-foreground italic font-normal">{unsetLabel}</span>
           )}

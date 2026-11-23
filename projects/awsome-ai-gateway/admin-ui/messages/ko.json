@@ -967,7 +967,7 @@
     "colModel": "모델",
     "monthlyBudget": "이번 달 예산",
     "spent": "사용액",
-    "limit": "한도: ${amount}",
+    "limit": "한도: {amount}",
     "remaining": "잔여",
     "overagePolicy": "초과 정책",
     "policyLabel": {
@@ -984,7 +984,7 @@
     "teamSharedNote": "팀 전원이 공유하는 한도입니다 — 소진되면 개인 한도와 무관하게 요청이 차단됩니다",
     "teamUnset": "팀 예산이 설정되지 않았습니다 — 관리자가 설정할 때까지 요청이 차단될 수 있습니다",
     "noCapNoTeam": "설정된 예산 한도가 없습니다",
-    "limitTeamDefault": "한도: ${amount} (팀 기본)",
+    "limitTeamDefault": "한도: {amount} (팀 기본)",
     "kpiCostDesc": "성공 요청 {requests}회",
     "kpiRequestsDesc": "모델 {count}개 사용",
     "requestsSubline": "전체 {total} · 오류 {errors} ({rate}%)",

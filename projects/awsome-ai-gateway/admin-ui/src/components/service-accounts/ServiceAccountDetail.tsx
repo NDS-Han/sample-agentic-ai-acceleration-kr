@@ -134,7 +134,10 @@ export function ServiceAccountDetail({ data, period }: Props) {
       </div>
 
       {(s.unattributed_requests > 0 || s.unattributed_cost_usd > 0) && (
-        <div className="glass rounded-apple border border-amber-500/40 p-3 text-xs text-amber-600 dark:text-amber-400">
+        <div
+          className="glass rounded-apple border border-amber-500/40 p-3 text-xs text-amber-600 dark:text-amber-400"
+          title={usdTitle(s.unattributed_cost_usd)}
+        >
           {t('unattributedNote', {
             count: s.unattributed_requests.toLocaleString(),
             cost: fmtUsd(s.unattributed_cost_usd),
