@@ -135,3 +135,29 @@ async def test_malformed_range_stays_400(reporting_tz):
             params={"period": "2026-01", "start_date": "2026-1-1", "end_date": "2026-01-02"},
         )
     assert res.status_code == 400
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "path",
+    ["/admin/analytics", "/admin/analytics/models", "/admin/analytics/export"],
+)
+@pytest.mark.parametrize(
+    "one_side",
+    [{"start_date": "2026-11-01"}, {"end_date": "2026-11-20"}],
+    ids=["start-only", "end-only"],
+)
+async def test_one_sided_custom_range_is_rejected(reporting_tz, path, one_side):
+    """한쪽 날짜만 온 custom 요청은 열린 구간·월 집계로 조용히 처리하지 않고 400.
+
+    조용히 월 집계로 떨어지면 '날짜를 바꿔도 숫자가 안 변하는' 무증상 오답이 되고,
+    빈 구간으로 처리하면 실제 0 사용량처럼 보인다. 둘 다 DB 질의 전에 거부된다.
+    """
+    reporting_tz("Asia/Kolkata")
+    app = _range_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as client:
+        res = await client.get(path, params={"period": "2026-11", **one_side})
+    assert res.status_code == 400, res.text
+    err = res.json()["error"]
+    assert err["type"] == "validation_error"
+    assert err["message"] == "custom range requires both start_date and end_date"

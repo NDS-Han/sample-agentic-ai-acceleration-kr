@@ -21,7 +21,7 @@ import { RefreshButton } from '@/components/analytics/RefreshButton';
 import { ModelCostDetail } from '@/components/analytics/ModelCostDetail';
 import { fetchAvailablePeriods } from '@/lib/actions/dashboard';
 import { fetchModelCostAnalytics } from '@/lib/actions/analytics-models';
-import { isMonth, isRangeTooLong, MAX_RANGE_DAYS, resolveMonth } from '@/lib/utils/period';
+import { customRangeIssue, isMonth, resolveMonth } from '@/lib/utils/period';
 import { pageTitle } from '@/lib/pageMetadata';
 
 // Next 15: searchParams 는 Promise — 페이지에서 await 한 뒤 resolve 된 값을 쓴다.
@@ -167,17 +167,11 @@ export default async function AnalyticsPage(props: AnalyticsPageProps) {
   const effectiveMonth = isMonth(requested) && periods.includes(requested) ? requested : latest;
 
   const filter = parseFilter(searchParams, effectiveMonth);
-  // 시작일 > 종료일 조합은 의미 없는 결과(빈 차트)를 낸다 — min/max 제약은
-  // 힌트일 뿐이라 역전 입력 가능. 역전 시 데이터 섹션 대신 안내를 보여준다.
-  const customRangeInvalid =
-    filter.period === 'custom' &&
-    !!filter.start_date &&
-    !!filter.end_date &&
-    filter.start_date > filter.end_date;
-  // 1년(MAX_RANGE_DAYS) 초과 구간 — API 가 422 로 거부하므로 섹션마다 에러 카드를
-  // 띄우는 대신 조회하지 않고 한 번 안내한다(필터의 인라인 안내와 같은 문구).
-  const customRangeTooLong =
-    filter.period === 'custom' && !customRangeInvalid && isRangeTooLong(filter.start_date, filter.end_date);
+  // custom 구간이 조회 불가(한쪽만·형식 오류/시작>끝/1년 초과)면 **아무것도 조회하지
+  // 않는다**. 예전엔 끝 날짜만 넣어도 조회가 나가 'Successful Requests 0 · $0.00 ·
+  // 집계된 사용량 없음' 이 떠서 실제 0 사용량처럼 읽혔다. 이유 안내는 필터의 날짜
+  // 입력 아래 한 곳에만 두고(배너 중복 없음), 데이터 자리는 '구간 미선택' 빈 상태.
+  const rangeIssue = filter.period === 'custom' ? customRangeIssue(filter.start_date, filter.end_date) : null;
   // 차트 key: custom 이면 날짜 구간, 아니면 월 — 변경 시 remount + 재요청.
   const sectionKey =
     filter.period === 'custom'
@@ -191,23 +185,26 @@ export default async function AnalyticsPage(props: AnalyticsPageProps) {
 
   return (
     <div className="space-y-6">
-      {/* 퀵챗 화면 컨텍스트 등록(렌더 null) — 적용 월/그룹/집계 헤드라인. PII 없음. */}
-      <Suspense key={`ctx-${sectionKey}-${filter.group_by}`} fallback={null}>
-        <ContextSection filter={filter} latestMonth={effectiveMonth} periodLabel={periodLabel} />
-      </Suspense>
+      {/* 퀵챗 화면 컨텍스트 등록(렌더 null) — 적용 월/그룹/집계 헤드라인. PII 없음.
+          구간이 조회 불가면 등록하지 않는다(조회도 하지 않는다). */}
+      {!rangeIssue && (
+        <Suspense key={`ctx-${sectionKey}-${filter.group_by}`} fallback={null}>
+          <ContextSection filter={filter} latestMonth={effectiveMonth} periodLabel={periodLabel} />
+        </Suspense>
+      )}
 
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h1 className="text-2xl font-bold">{t('pageTitle')}</h1>
         <div className="flex flex-wrap items-center gap-2">
           <AnalyticsFilter defaultValue={filter} periods={periods} currentMonth={effectiveMonth} />
-          <RefreshButton />
-          <ExportButton filter={filter} latestMonth={effectiveMonth} />
+          <RefreshButton disabled={!!rangeIssue} />
+          <ExportButton filter={filter} latestMonth={effectiveMonth} disabled={!!rangeIssue} />
         </div>
       </div>
 
       {/* custom 구간은 이관(seed) 사용량이 빠진다 — 월 버킷 개념이라 임의 일자에
           사상 불가. 차트가 조용히 달라 보이는 것보다 이유를 표시하는 편이 낫다. */}
-      {filter.period === 'custom' && !customRangeInvalid && !customRangeTooLong && (
+      {filter.period === 'custom' && !rangeIssue && (
         <div className="rounded-apple border border-border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
           {t('customSeedHint')}
         </div>
@@ -232,9 +229,13 @@ export default async function AnalyticsPage(props: AnalyticsPageProps) {
       )}
 
       {/* 각 섹션은 개별 Suspense. key 에 적용 월/날짜 포함 — 변경 시 재요청 */}
-      {customRangeInvalid || customRangeTooLong ? (
-        <div className="rounded-apple border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-foreground">
-          {customRangeInvalid ? t('invalidDateRange') : t('rangeTooLong', { max: MAX_RANGE_DAYS })}
+      {rangeIssue ? (
+        // 중립 빈 상태 — 0 지표를 그리지 않는다. 이유 문구는 필터에만(중복 금지).
+        <div
+          data-testid="custom-range-empty"
+          className="rounded-apple border border-dashed border-border px-4 py-10 text-center text-sm text-muted-foreground"
+        >
+          {t('customRangeEmpty')}
         </div>
       ) : (
         <>

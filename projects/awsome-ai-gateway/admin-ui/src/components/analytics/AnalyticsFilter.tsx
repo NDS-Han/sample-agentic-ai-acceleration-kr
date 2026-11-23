@@ -9,7 +9,7 @@ import type { GroupByType } from '@/types/enums';
 import {
   addDaysIso,
   currentCalendarMonth,
-  isRangeTooLong,
+  customRangeIssue,
   MAX_RANGE_DAYS,
   monthsAgo,
 } from '@/lib/utils/period';
@@ -81,7 +81,18 @@ export function AnalyticsFilter({ defaultValue, periods, currentMonth }: Analyti
   const endDate = defaultValue.end_date ?? '';
   const startMin = endDate ? addDaysIso(endDate, -(MAX_RANGE_DAYS - 1)) ?? undefined : undefined;
   const endMax = startDate ? addDaysIso(startDate, MAX_RANGE_DAYS - 1) ?? undefined : undefined;
-  const rangeTooLong = isRangeTooLong(startDate, endDate);
+  // 조회 불가 이유(한쪽만/역전/1년 초과) — 페이지도 같은 판정으로 조회를 막는다.
+  // 안내는 여기 한 곳(날짜 입력 바로 아래)에만 둔다.
+  const rangeIssue = isCustom ? customRangeIssue(startDate, endDate) : null;
+  const rangeInvalid = rangeIssue === 'reversed' || rangeIssue === 'tooLong';
+  const rangeMessage =
+    rangeIssue === 'incomplete'
+      ? t('selectDateRange')
+      : rangeIssue === 'reversed'
+        ? t('invalidDateRange')
+        : rangeIssue === 'tooLong'
+          ? t('rangeTooLong', { max: MAX_RANGE_DAYS })
+          : null;
 
   // 드롭다운 = 이번/지난 달 제외한 과거 데이터 월.
   const dropdownMonths = periods.filter((p) => p !== thisMonth && p !== lastMonth);
@@ -168,7 +179,9 @@ export function AnalyticsFilter({ defaultValue, periods, currentMonth }: Analyti
 
       {/* 커스텀 날짜 범위 — 직접 입력 모드에서만 나타난다 */}
       {isCustom && (
-        <div className="flex items-center gap-2">
+        // relative — 안내는 입력 바로 아래에 absolute 로 띄워 툴바 줄(그룹 기준·
+        // 새로고침·내보내기)을 밀어내지 않는다(유효 상태와 같은 배치).
+        <div className="relative flex items-center gap-2">
           <input
             id="start_date"
             type="date"
@@ -177,8 +190,8 @@ export function AnalyticsFilter({ defaultValue, periods, currentMonth }: Analyti
             min={startMin}
             max={endDate || undefined}
             title={t('rangeMaxHint', { max: MAX_RANGE_DAYS })}
-            aria-invalid={rangeTooLong || undefined}
-            aria-describedby={rangeTooLong ? 'range_too_long' : undefined}
+            aria-invalid={rangeInvalid || undefined}
+            aria-describedby={rangeMessage ? 'custom_range_message' : undefined}
             onChange={(e) => handleStartDateChange(e.target.value)}
             className="rounded-apple-md border border-input bg-background px-3 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-ring"
           />
@@ -191,18 +204,26 @@ export function AnalyticsFilter({ defaultValue, periods, currentMonth }: Analyti
             min={startDate || undefined}
             max={endMax}
             title={t('rangeMaxHint', { max: MAX_RANGE_DAYS })}
-            aria-invalid={rangeTooLong || undefined}
-            aria-describedby={rangeTooLong ? 'range_too_long' : undefined}
+            aria-invalid={rangeInvalid || undefined}
+            aria-describedby={rangeMessage ? 'custom_range_message' : undefined}
             onChange={(e) => handleEndDateChange(e.target.value)}
             className="rounded-apple-md border border-input bg-background px-3 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-ring"
           />
+          {rangeMessage && (
+            <p
+              id="custom_range_message"
+              // 미완성 입력은 오류가 아니라 안내(중립), 역전·초과는 오류.
+              role={rangeInvalid ? 'alert' : 'status'}
+              data-range-issue={rangeIssue}
+              className={[
+                'absolute left-0 top-full z-10 mt-1 w-max max-w-[80vw] text-xs',
+                rangeInvalid ? 'text-destructive' : 'text-muted-foreground',
+              ].join(' ')}
+            >
+              {rangeMessage}
+            </p>
+          )}
         </div>
-      )}
-
-      {isCustom && rangeTooLong && (
-        <p id="range_too_long" role="alert" className="basis-full text-xs text-destructive">
-          {t('rangeTooLong', { max: MAX_RANGE_DAYS })}
-        </p>
       )}
 
       {/* 그룹 기준 */}
