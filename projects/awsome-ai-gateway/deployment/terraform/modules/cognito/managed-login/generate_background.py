@@ -13,6 +13,15 @@
   거부한다 — 트래픽 점을 엣지 위에 정적으로 배치해 흐름만 남긴다
   (style/script 모두 사용하지 않는다).
 * 문구는 이미지에 구워지므로 언어 전환을 따르지 않는다 → 영어만 쓴다.
+* 폼 정렬 — Cognito 폼(categories.form.location.horizontal=END)은 너비
+  402px 카드에 오른쪽 여백 81px 로 놓인다(2026-11 실측). 패널을 반반으로
+  자르면 폼이 흰 영역의 오른쪽으로 치우치므로, 흰 영역을 폼 카드 + 양옆
+  여백(81px)인 FORM_COLUMN_PX 폭으로 두고 나머지를 패널로 채운다 —
+  CSS width: calc() (SVG2 기하 속성). CSS 를 무시하는 렌더러에서는 width
+  속성(50%)으로 떨어진다.
+* 좁은 화면(NARROW_PX 미만) — 반반 경계에 폼 카드가 걸치므로, 패널이 화면
+  전체를 덮고 문구는 숨겨 어두운 그래프 위에 흰 폼 카드만 뜨게 한다.
+  (media query 는 SVG 뷰포트 = 배경 영역 = 페이지 너비 기준)
 
 재생성: python3 generate_background.py  (background.svg 를 덮어쓴다)
 """
@@ -77,16 +86,29 @@ def graph() -> str:
     return "".join(el)
 
 
+# 폼 카드 402px + 양옆 81px — Cognito main-layout 실측값(위 docstring)
+FORM_COLUMN_PX = 402 + 81 * 2
+# 이보다 좁으면 패널 문구가 폼 카드와 겹친다 — 전체 어두운 배경으로 전환
+NARROW_PX = 1024
+
+STYLE = (
+    f".panel{{width:calc(100% - {FORM_COLUMN_PX}px)}}"
+    f"@media (max-width:{NARROW_PX - 1}px){{.panel{{width:100%}}"
+    ".copy{display:none}}"
+)
+
+
 def build() -> str:
     return (
         '<svg xmlns="http://www.w3.org/2000/svg" width="100%" height="100%">'
+        f'<style>{STYLE}</style>'
         '<rect width="100%" height="100%" fill="#ffffff"/>'
-        f'<rect width="50%" height="100%" fill="{PANEL}"/>'
+        f'<rect class="panel" width="50%" height="100%" fill="{PANEL}"/>'
         # 그래프 — 패널을 꽉 채우고 넘치는 부분은 잘라낸다
-        '<svg x="0" y="0" width="50%" height="100%" viewBox="0 0 640 800" '
+        '<svg class="panel" x="0" y="0" width="50%" height="100%" viewBox="0 0 640 800" '
         f'preserveAspectRatio="xMidYMid slice">{graph()}</svg>'
         # 문구 — 잘리지 않게 왼쪽 가운데 앵커
-        '<svg x="0" y="0" width="50%" height="100%" viewBox="0 0 640 800" '
+        '<svg class="panel copy" x="0" y="0" width="50%" height="100%" viewBox="0 0 640 800" '
         'preserveAspectRatio="xMinYMid meet">'
         f'<text x="56" y="372" fill="#ffffff" font-family="{FONT}" '
         f'font-size="40" font-weight="700" letter-spacing="-0.8">{HEADING[0]}</text>'
@@ -95,7 +117,7 @@ def build() -> str:
         f'<text x="56" y="462" fill="#b4b4b4" font-family="{FONT}" '
         f'font-size="16">{SUBTITLE}</text></svg>'
         # 하단 문구 — 왼쪽 아래 앵커
-        '<svg x="0" y="0" width="50%" height="100%" viewBox="0 0 640 800" '
+        '<svg class="panel copy" x="0" y="0" width="50%" height="100%" viewBox="0 0 640 800" '
         'preserveAspectRatio="xMinYMax meet">'
         f'<text x="56" y="752" fill="#a1a1a1" font-family="{FONT}" '
         f'font-size="12">{FOOTER}</text></svg>'
