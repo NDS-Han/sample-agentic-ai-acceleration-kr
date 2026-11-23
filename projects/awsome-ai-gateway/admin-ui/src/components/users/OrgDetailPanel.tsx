@@ -35,6 +35,7 @@ import { ScopeRateLimitPanel, type ScopeRateLimitHandle } from '@/components/use
 import { ScopeAppAccessPanel, type ScopeAppAccessHandle } from '@/components/users/ScopeAppAccessPanel';
 import { EffectivePolicyCard } from '@/components/users/EffectivePolicyCard';
 import { BudgetGaugeRow } from '@/components/budgets/budgetVisuals';
+import { fmtUsd } from '@/lib/utils/format';
 
 interface OrgDetailPanelProps {
   node: OrgTreeNode | null;
@@ -793,7 +794,17 @@ function UserPanel({
           <span className="badge badge-neutral whitespace-nowrap">{tp('readonly')}</span>
         }
       >
-        <div className="flex items-center justify-end mb-2">
+        <div className="flex items-center justify-end gap-3 mb-2">
+          {/* 팀 합계는 예산 관리 화면의 팀 행과 같은 설정(client=NULL 총액)이다 —
+              같은 행으로 바로 가서 대조할 수 있게 팀 딥링크를 둔다. */}
+          {policy?.team_id && (
+            <Link
+              href={`/budgets?team=${policy.team_id}`}
+              className="text-xs text-primary hover:underline"
+            >
+              {t('budgetInput.viewTeamBudget')}
+            </Link>
+          )}
           <Link
             href={`/budgets?user=${node.id}`}
             className="text-xs text-primary hover:underline"
@@ -805,17 +816,40 @@ function UserPanel({
             전체 앱을 보여준다 — 허용되지 않은 앱에 설정된 예산(고아 예산)도
             여기서 보여야 발견할 수 있다. */}
         <div className="space-y-2">
+          {/* 총액 행만(client=NULL) — 예산 관리 화면(summary)과 같은 기준. 앱별
+              TEAM 행이 섞이면 "팀 합계" 라벨로 다른 금액이 보인다. */}
           {policy?.budgets
-            .filter((b) => (b.scope === 'USER' && b.client === null) || b.scope === 'TEAM')
+            .filter((b) => b.client === null && (b.scope === 'USER' || b.scope === 'TEAM'))
             .map((b, i) => (
               <BudgetGaugeRow
                 key={`total-${i}`}
-                label={b.scope === 'TEAM' ? t('budgetInput.teamTotal') : t('budgetInput.userTotal')}
+                label={
+                  b.scope === 'TEAM'
+                    ? policy.team_name
+                      ? t('budgetInput.teamTotalNamed', { team: policy.team_name })
+                      : t('budgetInput.teamTotal')
+                    : t('budgetInput.userTotal')
+                }
                 max={b.max_budget_usd}
                 used={b.used_usd}
                 unsetLabel={t('budgetInput.placeholder')}
               />
             ))}
+          {(() => {
+            // 사용자 한도(총액·앱별) 중 팀 한도보다 큰 값이 있으면, 게이트웨이가 두
+            // 한도를 모두 검사하므로 팀 한도에서 먼저 막힌다는 점을 안내한다.
+            const team = policy?.budgets.find((b) => b.scope === 'TEAM' && b.client === null);
+            if (!team) return null;
+            const teamMax = Number(team.max_budget_usd);
+            const over = policy?.budgets.some(
+              (b) => b.scope === 'USER' && Number(b.max_budget_usd) > teamMax,
+            );
+            return over ? (
+              <p role="note" className="text-xs text-amber-600 dark:text-amber-400">
+                ⚠ {t('budgetInput.teamLimitFirst', { team: fmtUsd(teamMax) })}
+              </p>
+            ) : null;
+          })()}
           {CLIENT_OPTIONS.map((o) => {
             const cfg = policy?.budgets.find(
               (b) => b.scope === 'USER' && b.client === o.value,

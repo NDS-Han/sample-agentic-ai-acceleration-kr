@@ -394,7 +394,10 @@
     "modelsLoadFailed": "모델 목록을 불러오지 못했습니다 — 모델 선택이 비어 보입니다. 새로고침 후 다시 시도하세요.",
     "configFetchFailed": "현재 강제 적용(enforcement) 설정 조회 실패 — 정책과 임계값은 변경하지 않는 한 그대로 보존됩니다.",
     "zeroBudgetBadge": "차단됨",
-    "zeroBudgetHint": "예산 $0 — 모든 요청이 거부됩니다"
+    "zeroBudgetHint": "예산 $0 — 모든 요청이 거부됩니다",
+    "teamLimitFirst": "팀 한도가 먼저 적용됨",
+    "teamLimitFirstHint": "이 사용자의 한도가 팀 한도({team})보다 큽니다. 게이트웨이는 두 한도를 모두 검사하므로 팀 한도에 도달하면 요청이 차단됩니다.",
+    "teamRemainingCaption": "팀 잔여"
   },
   "models": {
     "title": "모델 관리",
@@ -673,7 +676,10 @@
       "title": "앱별 예산 (USD/월)",
       "editInBudgets": "예산 관리에서 설정 →",
       "teamTotal": "팀 총예산",
-      "userTotal": "사용자 총예산"
+      "userTotal": "사용자 총예산",
+      "teamTotalNamed": "팀 총예산 ({team})",
+      "viewTeamBudget": "팀 예산 보기 →",
+      "teamLimitFirst": "사용자 한도가 팀 한도({team})보다 큽니다. 게이트웨이는 두 한도를 모두 검사하므로 팀 한도가 먼저 적용됩니다."
     },
     "userModels": {
       "title": "사용자별 허용 모델 (팀 정책 override)",
@@ -775,7 +781,10 @@
         "team": "팀 정책",
         "organization": "조직 정책",
         "none": "제한 없음 (전체 허용)"
-      }
+      },
+      "chainUnavailableTeam": "이 팀은 사용 불가",
+      "chainUnavailableUser": "이 사용자는 사용 불가",
+      "chainUnavailableHint": "{models}: 아래 매트릭스의 모든 앱에서 차단(✗)된 모델입니다. 이 모델로의(또는 이 모델에서의) 다운그레이드는 서빙되지 않으니 모델 허용 정책이나 다운그레이드 규칙을 확인하세요."
     },
     "userModelsInheritTeam": "개인 설정 없음 — 체크 상태는 팀 정책 상속분입니다. 변경하면 이 사용자만의 정책으로 저장됩니다.",
     "userModelsInheritNone": "개인 설정 없음 — 모든 모델 허용 상태입니다(팀 정책도 없음).",
@@ -1344,7 +1353,7 @@
     "title": "앱 정책 관리",
     "toggleSaved": "{app} 허용 설정이 변경되었습니다.",
     "webSearchHint": "이 앱의 요청에 서버사이드 web_search 도구를 주입합니다.",
-    "webSearchNotDeployed": "기능이 배포되지 않았습니다 — gateway.yaml 의 features.web_search 를 켜고 배포(apply)해야 사용할 수 있습니다.",
+    "webSearchNotDeployed": "이 환경에는 웹서치가 배포되지 않았습니다. 배포 담당자에게 문의하세요.",
     "webSearchOff": "꺼짐",
     "webSearchOn": "켜짐",
     "webSearchSaved": "{app} 웹서치 설정이 저장되었습니다.",
@@ -1355,7 +1364,11 @@
     "routingExternalIdLabel": "External ID (선택)",
     "routingExternalIdPlaceholder": "대상 롤 trust의 sts:ExternalId 조건과 같은 값",
     "routingRegionLabel": "리전",
-    "routingSaved": "{app} 라우팅이 저장되었습니다."
+    "routingSaved": "{app} 라우팅이 저장되었습니다.",
+    "webSearchNotDeployedInfoLabel": "배포 설정",
+    "webSearchNotDeployedHint": "배포 담당자용: gateway.yaml 의 features.web_search 를 true 로 설정하고 배포(apply)하세요.",
+    "webSearchUnavailable": "사용 불가",
+    "webSearchSavedValue": "저장된 설정: {value}"
   },
   "forbidden": {
     "title": "접근 권한 없음",

@@ -14,6 +14,7 @@ import { SetBudgetDialog } from './SetBudgetDialog';
 import { AutoDowngradeConfig } from './AutoDowngradeConfig';
 import { TeamAllocationView } from './TeamAllocationView';
 import { AlertBadge, TypeBadge, UsageBar } from './budgetVisuals';
+import { Badge } from '@/components/common/Badge';
 import { fmtUsd } from '@/lib/utils/format';
 
 interface BudgetSummaryTableProps {
@@ -201,7 +202,18 @@ export function BudgetSummaryTable({ items, isAdmin, models, modelsLoadFailed, c
   const colCount = isAdmin ? 8 : 7;
   const isEmpty = visibleTeams.length === 0 && visibleUnassigned.length === 0;
 
-  const renderUserRow = (user: BudgetSummaryItem) => (
+  const renderUserRow = (user: BudgetSummaryItem) => {
+    // 게이트웨이는 사용자 cap 과 팀 한도를 둘 다 검사한다(AND) — 개별 cap 이 팀
+    // 한도보다 커도 팀 한도에서 먼저 막힌다. CAP 모델이 A_u > T(초과 약정)를
+    // 허용하므로 저장은 막지 않고, 표에서 어느 쪽이 실효 한도인지 보여준다.
+    const parentTeam = user.team_id
+      ? teamRows.find((tm) => tm.target_id === user.team_id)
+      : undefined;
+    const teamLimit = parentTeam?.limit ?? null;
+    const overTeam = user.limit != null && teamLimit != null && user.limit > teamLimit;
+    // 개별 cap·기본 cap 둘 다 없으면 팀 예산만 적용 — '-' 대신 팀 한도/잔여를 보여준다.
+    const teamOnly = user.limit == null && user.cap_source !== 'team_default';
+    return (
     <Tr key={user.target_id} className="bg-muted/10">
       <Td emphasis>
         <div className="flex items-center gap-2 pl-10">
@@ -219,13 +231,40 @@ export function BudgetSummaryTable({ items, isAdmin, models, modelsLoadFailed, c
           fmtUsd(user.limit)
         ) : user.cap_source === 'team_default' ? (
           <span className="text-muted-foreground italic">{t('defaultCapApplied')}</span>
+        ) : teamLimit != null ? (
+          <>
+            <span className="tabular-nums">{fmtUsd(teamLimit)}</span>
+            <span className="block text-[11px] text-muted-foreground italic">
+              {t('teamBudgetApplied')}
+            </span>
+          </>
         ) : (
           <span className="text-muted-foreground italic">{t('teamBudgetApplied')}</span>
+        )}
+        {overTeam && (
+          <span className="mt-0.5 flex justify-end">
+            <Badge tone="amber" className="whitespace-nowrap">
+              <span title={t('teamLimitFirstHint', { team: fmtUsd(teamLimit ?? 0) })}>
+                {t('teamLimitFirst')}
+              </span>
+            </Badge>
+          </span>
         )}
       </Td>
       <Td numeric>{fmtUsd(user.used)}</Td>
       <Td numeric>
-        {user.remaining != null ? fmtUsd(user.remaining) : <span className="text-muted-foreground italic">-</span>}
+        {user.remaining != null ? (
+          fmtUsd(user.remaining)
+        ) : teamOnly && parentTeam?.remaining != null ? (
+          <>
+            <span className="tabular-nums">{fmtUsd(parentTeam.remaining)}</span>
+            <span className="block text-[11px] text-muted-foreground italic">
+              {t('teamRemainingCaption')}
+            </span>
+          </>
+        ) : (
+          <span className="text-muted-foreground italic">-</span>
+        )}
       </Td>
       <Td>
         <div className="flex items-center gap-2">
@@ -262,7 +301,8 @@ export function BudgetSummaryTable({ items, isAdmin, models, modelsLoadFailed, c
         </Td>
       )}
     </Tr>
-  );
+    );
+  };
 
   return (
     <>

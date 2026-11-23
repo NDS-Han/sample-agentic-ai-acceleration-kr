@@ -215,3 +215,36 @@ describe('AppPolicyPanel — 탭 전환 중 도착한 저장 응답', () => {
     expect(screen.queryByText('m1')).not.toBeInTheDocument();
   });
 });
+
+describe('AppPolicyPanel — web search 미배포 표시 (P1-5)', () => {
+  beforeEach(() => {
+    appParam = 'claude-code';
+    vi.clearAllMocks();
+  });
+
+  it('미배포면 저장값(On) 대신 "사용 불가" 라벨 + 저장값 보조 문구를 보인다', async () => {
+    getAppPolicyAction.mockImplementation(async (client: string) => ({
+      success: true,
+      data: { ...policyFor(client), web_search_enabled: true, web_search_deployed: false },
+    }));
+    render(<AppPolicyPanel />);
+    expect(await screen.findByText('webSearchUnavailable')).toBeInTheDocument();
+    expect(screen.getByText('webSearchSavedValue')).toBeInTheDocument();
+    expect(screen.queryByText('webSearchOn')).not.toBeInTheDocument();
+    // 배포 설정 키는 툴팁으로
+    expect(screen.getByText('webSearchNotDeployedHint')).toBeInTheDocument();
+    expect(screen.queryByRole('checkbox', { name: 'webSearchTitle' })).not.toBeInTheDocument();
+  });
+
+  it('배포돼 있으면 스위치와 저장값 라벨을 그대로 보인다', async () => {
+    getAppPolicyAction.mockImplementation(async (client: string) => ({
+      success: true,
+      data: { ...policyFor(client), web_search_enabled: true, web_search_deployed: true },
+    }));
+    render(<AppPolicyPanel />);
+    const sw = await screen.findByRole('checkbox', { name: 'webSearchTitle' });
+    expect(sw).toBeChecked();
+    expect(screen.getByText('webSearchOn')).toBeInTheDocument();
+    expect(screen.queryByText('webSearchUnavailable')).not.toBeInTheDocument();
+  });
+});

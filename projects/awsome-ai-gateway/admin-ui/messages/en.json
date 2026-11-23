@@ -394,7 +394,10 @@
     "modelsLoadFailed": "Failed to load model list — model selectors may appear empty. Refresh and try again.",
     "configFetchFailed": "Failed to fetch current enforcement settings — policy and thresholds will be preserved as-is unless changed.",
     "zeroBudgetBadge": "Blocked",
-    "zeroBudgetHint": "Budget $0 — all requests are rejected"
+    "zeroBudgetHint": "Budget $0 — all requests are rejected",
+    "teamLimitFirst": "Team limit applies first",
+    "teamLimitFirstHint": "This user's limit is higher than the team limit ({team}). The gateway checks both, so requests are blocked once the team limit is reached.",
+    "teamRemainingCaption": "Team remaining"
   },
   "models": {
     "title": "Model Management",
@@ -673,7 +676,10 @@
       "title": "Per-app budgets (USD/month)",
       "editInBudgets": "Edit in Budget Management →",
       "teamTotal": "Team total",
-      "userTotal": "User total"
+      "userTotal": "User total",
+      "teamTotalNamed": "Team total ({team})",
+      "viewTeamBudget": "View team budget →",
+      "teamLimitFirst": "A user limit is higher than the team limit ({team}). The gateway checks both, so the team limit applies first."
     },
     "userModels": {
       "title": "Per-user allowed models (overrides team policy)",
@@ -775,7 +781,10 @@
         "team": "Team policy",
         "organization": "Organization policy",
         "none": "Unrestricted (all apps)"
-      }
+      },
+      "chainUnavailableTeam": "Not available to this team",
+      "chainUnavailableUser": "Not available to this user",
+      "chainUnavailableHint": "{models}: blocked (✗) for every app in the matrix below. A downgrade to or from this model cannot be served — review the model access policy or the downgrade rules."
     },
     "userModelsInheritTeam": "No personal override — checkmarks show the inherited team policy. Changes save as a per-user policy.",
     "userModelsInheritNone": "No personal override — all models allowed (no team policy either).",
@@ -1344,7 +1353,7 @@
     "title": "App Policy",
     "toggleSaved": "{app} access setting updated.",
     "webSearchHint": "Injects the server-side web_search tool into requests from this app.",
-    "webSearchNotDeployed": "Feature not deployed — enable features.web_search in gateway.yaml and apply to use it.",
+    "webSearchNotDeployed": "Web search is not deployed in this environment. Contact your deployment administrator.",
     "webSearchOff": "Off",
     "webSearchOn": "On",
     "webSearchSaved": "{app} web search setting saved.",
@@ -1355,7 +1364,11 @@
     "routingExternalIdLabel": "External ID (optional)",
     "routingExternalIdPlaceholder": "Must match the sts:ExternalId in the role's trust policy",
     "routingRegionLabel": "Region",
-    "routingSaved": "{app} routing saved."
+    "routingSaved": "{app} routing saved.",
+    "webSearchNotDeployedInfoLabel": "Deployment setting",
+    "webSearchNotDeployedHint": "For deployment administrators: set features.web_search to true in gateway.yaml and apply the deployment.",
+    "webSearchUnavailable": "Unavailable",
+    "webSearchSavedValue": "Saved setting: {value}"
   },
   "forbidden": {
     "title": "Access denied",

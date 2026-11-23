@@ -493,17 +493,41 @@ export function AppPolicyPanel() {
             <div>
               <h2 className="text-sm font-semibold">{t('webSearchTitle')}</h2>
               <p className="text-xs text-muted-foreground mt-0.5">{t('webSearchHint')}</p>
+              {/* 미배포 안내는 관리자용 문구, 배포 담당자용 설정 키(gateway.yaml)는 툴팁으로. */}
               {shown.web_search_deployed === false && (
-                <p className="text-xs text-amber-500 mt-0.5">{t('webSearchNotDeployed')}</p>
+                <p className="flex items-center gap-1 text-xs text-amber-500 mt-0.5">
+                  {t('webSearchNotDeployed')}
+                  <InfoTooltip label={t('webSearchNotDeployedInfoLabel')}>
+                    {t('webSearchNotDeployedHint')}
+                  </InfoTooltip>
+                </p>
               )}
             </div>
+            {/* 미배포면 스위치는 꺼진 모양이므로 라벨도 저장값(On/Off) 대신 "사용 불가" —
+                저장값은 배포 후 그대로 적용되니 보조 문구로 남긴다. */}
+            {shown.web_search_deployed === false ? (
+              <div className="flex items-center gap-2">
+                <div
+                  className="relative w-9 h-5 bg-muted-foreground/30 rounded-full opacity-60 after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:w-4 after:h-4 after:bg-background after:rounded-full"
+                  aria-hidden="true"
+                />
+                <span className="text-right">
+                  <span className="block text-sm text-muted-foreground">{t('webSearchUnavailable')}</span>
+                  <span className="block text-[11px] text-muted-foreground/80">
+                    {t('webSearchSavedValue', {
+                      value: shown.web_search_enabled ? t('webSearchOn') : t('webSearchOff'),
+                    })}
+                  </span>
+                </span>
+              </div>
+            ) : (
             <label className="flex items-center gap-2 cursor-pointer">
               <div className="relative inline-flex items-center">
                 <input
                   type="checkbox"
-                  checked={shown.web_search_deployed !== false && shown.web_search_enabled}
+                  checked={shown.web_search_enabled}
                   onChange={(e) => handleToggleWebSearch(e.target.checked)}
-                  disabled={isWsSaving || shown.web_search_deployed === false}
+                  disabled={isWsSaving}
                   className="sr-only peer"
                   aria-label={t('webSearchTitle')}
                 />
@@ -513,6 +537,7 @@ export function AppPolicyPanel() {
                 {shown.web_search_enabled ? t('webSearchOn') : t('webSearchOff')}
               </span>
             </label>
+            )}
           </div>
 
           {/* 크로스계정 라우팅 — routing_profiles.account_role_arn/external_id/region.

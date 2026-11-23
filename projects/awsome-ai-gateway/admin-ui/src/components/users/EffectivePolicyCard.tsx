@@ -80,6 +80,24 @@ export function EffectivePolicyCard({ userId, teamId, policy: policyProp, loadFa
         m.output_price_per_1k == null ? null : parseFloat(m.output_price_per_1k),
     }));
 
+  // 다운그레이드 체인 ↔ 허용 매트릭스 교차 검증 — 두 정책은 따로 저장되고 서로
+  // 검증하지 않는다(admin-api 는 강등 대상(to)만 팀 allowed-models 로 검사, from 과
+  // 모델→앱 축은 검사하지 않음). 체인의 별칭이 매트릭스에서 어느 앱에서도 ✓ 가
+  // 아니면(행 전체 ✗, 또는 비활성이라 행 자체가 없음) 이 스코프에서는 쓸 수 없다.
+  const chainAliases = [
+    ...new Set(
+      policy.downgrade_rules.flatMap((r) => [r.from_model_alias, r.to_model_alias]),
+    ),
+  ];
+  const unavailable = new Set(
+    chainAliases.filter(
+      (a) => !policy.cells.some((c) => c.model_alias === a && c.allowed),
+    ),
+  );
+  // 팀 스코프 뷰(user_id=null)와 사용자 뷰는 매트릭스 판정 대상이 다르다.
+  const unavailableLabel =
+    policy.user_id == null ? t('chainUnavailableTeam') : t('chainUnavailableUser');
+
   return (
     <div className="space-y-3">
       {/* 상: 다운그레이드 다이어그램(전체 폭 — 노드/엣지가 읽힐 크기가 필요) /
@@ -98,10 +116,17 @@ export function EffectivePolicyCard({ userId, teamId, policy: policyProp, loadFa
               return `$${per1m.toFixed(2).replace(/\.?0+$/, '')}/1M output`;
             }}
             edgeTag={(r) => (r.scope === 'TEAM' ? t('scopeTeam') : t('scopeUser'))}
+            unavailable={unavailable}
+            unavailableLabel={unavailableLabel}
           />
         ) : (
           <p className="text-xs text-muted-foreground rounded-md border border-dashed border-border px-3 py-2">
             {t('downgradeNone')}
+          </p>
+        )}
+        {unavailable.size > 0 && (
+          <p role="note" className="mt-1.5 text-xs text-amber-600 dark:text-amber-400">
+            ⚠ {t('chainUnavailableHint', { models: [...unavailable].join(', ') })}
           </p>
         )}
       </div>

@@ -23,6 +23,10 @@ export interface DowngradeDiagramRule {
  * 판정으로 실제 발화 경로를 계산해, 발화 엣지만 선명하게(나머지는 흐리게),
  * 최종 도달 노드에 링을 표시하고 하단에 소스별 결과 칩을 보여준다.
  * 같은 임계치로 이어진 체인이 한 번에 최하위까지 떨어지는 동작이 여기서 드러난다.
+ *
+ * unavailable 을 넘기면 해당 별칭 노드를 회색·취소선으로 그리고 단가 대신
+ * unavailableLabel 을 보여준다 — 허용 매트릭스에서 막힌 모델이 체인에 끼어 있음을
+ * 표시하는 읽기 전용 카드용(판정은 호출자 몫).
  */
 export function DowngradeDiagram({
   rules,
@@ -32,6 +36,8 @@ export function DowngradeDiagram({
   simPct,
   simLabels,
   terminalLabel,
+  unavailable,
+  unavailableLabel,
 }: {
   rules: DowngradeDiagramRule[];
   models: PolicyModelRef[];
@@ -44,6 +50,9 @@ export function DowngradeDiagram({
     resolved: (_src: string, _dst: string, _hops: number) => string;
   };
   terminalLabel?: string;
+  /** 사용할 수 없는 모델 별칭 — 회색·취소선 노드로 표시. */
+  unavailable?: ReadonlySet<string>;
+  unavailableLabel?: string;
 }) {
   // from/to 가 비어 있는 규칙(작성 중인 새 행)은 레이아웃·렌더 모두에서 제외한다 —
   // 포함하면 빈 alias 가 유령 노드 열을 만들고 엣지가 화면 밖으로 길게 뻗는다.
@@ -195,18 +204,32 @@ export function DowngradeDiagram({
               const m = models.find(mm => mm.alias === alias);
               const isLanding = sim?.landing.has(alias) ?? false;
               const dimmed = sim != null && !sim.inPath.has(alias);
+              const blocked = unavailable?.has(alias) ?? false;
               return (
                 <div
                   key={alias}
-                  className={`mx-auto w-[86%] rounded-lg border px-2 py-1 text-center shadow-sm transition-opacity ${toneOf(alias)} ${
-                    isLanding ? 'ring-2 ring-primary' : ''
-                  } ${dimmed ? 'opacity-40' : ''}`}
+                  title={blocked && unavailableLabel ? `${alias} — ${unavailableLabel}` : undefined}
+                  className={`mx-auto w-[86%] rounded-lg border px-2 py-1 text-center shadow-sm transition-opacity ${
+                    blocked
+                      ? 'bg-muted/40 border-dashed border-border text-muted-foreground'
+                      : toneOf(alias)
+                  } ${isLanding ? 'ring-2 ring-primary' : ''} ${dimmed ? 'opacity-40' : ''}`}
                 >
-                  <div className="truncate font-mono text-[11px] font-medium">{alias}</div>
-                  <div className="text-[9px] tabular-nums opacity-80">
-                    {m ? formatOutPrice(m) : '—'}
-                    {terminal.has(alias) && terminalLabel ? ` · ${terminalLabel}` : ''}
+                  <div
+                    className={`truncate font-mono text-[11px] font-medium ${blocked ? 'line-through' : ''}`}
+                  >
+                    {alias}
                   </div>
+                  {blocked && unavailableLabel ? (
+                    <div className="truncate text-[9px] font-medium text-amber-600 dark:text-amber-400">
+                      ⚠ {unavailableLabel}
+                    </div>
+                  ) : (
+                    <div className="text-[9px] tabular-nums opacity-80">
+                      {m ? formatOutPrice(m) : '—'}
+                      {terminal.has(alias) && terminalLabel ? ` · ${terminalLabel}` : ''}
+                    </div>
+                  )}
                 </div>
               );
             })}
