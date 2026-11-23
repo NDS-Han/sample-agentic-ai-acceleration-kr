@@ -33,13 +33,14 @@ import {
 import { ModelShareDonutClient } from '@/components/dashboard/ModelShareDonutClient';
 import { ClientShareDonutClient } from '@/components/dashboard/ClientShareDonutClient';
 import { CostTrendCard } from '@/components/dashboard/CostTrendCard';
+import { monthRange } from '@/lib/utils/trendSeries';
 import { TopSpendTable, type TopSpendRow } from '@/components/dashboard/TopSpendTable';
 import { PeriodSelector } from '@/components/dashboard/PeriodSelector';
 import { ClientFilter } from '@/components/dashboard/ClientFilter';
 import { reportingNowParts } from '@/lib/utils/period';
-import { fmtUsd, fmtTokensCompact } from '@/lib/utils/format';
+import { fmtUsd, fmtTokensCompact, usdTitle } from '@/lib/utils/format';
 import { teamDisplayName } from '@/lib/utils/trendSeries';
-import { userLabel } from '@/lib/userLabel';
+import { isSyntheticEmail, userLabel } from '@/lib/userLabel';
 import { pageTitle } from '@/lib/pageMetadata';
 
 
@@ -117,6 +118,7 @@ async function DashboardKPIs({ period, client }: { period: string; client: strin
           <KPICard
             title={t('usageThisMonth')}
             value={kpi ? fmtUsd(kpi.total_cost_usd) : '—'}
+            valueTitle={usdTitle(kpi?.total_cost_usd)}
             icon={<DollarSign size={18} aria-hidden="true" />}
             description={kpi ? t('usageThisMonthDesc') : t('fetchFailed')}
             href={`/analytics?period=${period}${clientSuffix}`}
@@ -141,6 +143,7 @@ async function DashboardKPIs({ period, client }: { period: string; client: strin
           <KPICard
             title={t('avgCostPerUser')}
             value={kpi ? fmtUsd(kpi.cost_per_user_usd) : '—'}
+            valueTitle={usdTitle(kpi?.cost_per_user_usd)}
             icon={<Users size={18} aria-hidden="true" />}
             description={kpi ? t('avgCostPerUserDesc', { count: kpi.active_users }) : t('fetchFailed')}
             href={`/analytics?period=${period}&group_by=user${clientSuffix}`}
@@ -148,6 +151,7 @@ async function DashboardKPIs({ period, client }: { period: string; client: strin
           <KPICard
             title={t('dailyAvg')}
             value={kpi ? fmtUsd(dailyAvg) : '—'}
+            valueTitle={kpi ? usdTitle(dailyAvg) : undefined}
             icon={<CalendarClock size={18} aria-hidden="true" />}
             description={
               projection != null
@@ -245,7 +249,11 @@ async function TrendAndDistribution({ period, client }: { period: string; client
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-[1.6fr_1fr]">
         {/* 섹션별 실패를 조용한 빈 차트 대신 재시도 가능한 에러 상태로 표시 */}
         {analyticsResult.status === 'fulfilled' ? (
-          <CostTrendCard trends={analytics.trends ?? []} trendsByTeam={analytics.trends_by_team ?? []} />
+          <CostTrendCard
+            trends={analytics.trends ?? []}
+            trendsByTeam={analytics.trends_by_team ?? []}
+            range={monthRange(period)}
+          />
         ) : (
           <ErrorState />
         )}
@@ -312,17 +320,27 @@ async function TeamUserRanking({ period, client }: { period: string; client: str
   // 있으면 "팀 예산 적용"으로 표기(§60.9 팔로업) — 완전 무예산과 구분. 소속 팀명을
   // 이름 아래 병기하고, 팀 예산 적용 시엔 팀의 사용액/한도도 함께 보여줘 어떤
   // 유저가 어떤 팀에서 얼마를 쓰는지 한눈에 보이게 한다.
+  // 표시 이름이 겹치는 유저(예: 'Load Test' 2명)는 보조 줄에 이메일을 같이 적어 구분한다.
+  const displayName = (u: (typeof topUsers)[number]) => u.name || userLabel({ email: u.email });
+  const nameCount = new Map<string, number>();
+  for (const u of topUsers) nameCount.set(displayName(u), (nameCount.get(displayName(u)) ?? 0) + 1);
+
   const userRows: TopSpendRow[] = topUsers.map((u) => {
+    const name = displayName(u);
+    const team = u.team_name
+      ? teamDisplayName({ team: u.team_name, dept_name: u.department_name })
+      : null;
+    // 합성 이메일(<sub>@unknown)은 구분자로도 노출하지 않는다.
+    const email =
+      (nameCount.get(name) ?? 0) > 1 && u.email && !isSyntheticEmail(u.email) ? u.email : null;
     const usagePct = userPctById.get(u.user_id) ?? null;
     const teamLimit = u.team_id ? teamLimitById.get(u.team_id) ?? null : null;
     const teamBudgetApplied = usagePct == null && !!u.team_id && teamLimit != null;
     return {
       id: u.user_id,
       // 이름이 없을 때 합성 이메일(<sub>@unknown)을 그대로 노출하지 않는다.
-      name: u.name || userLabel({ email: u.email }),
-      subtitle: u.team_name
-        ? teamDisplayName({ team: u.team_name, dept_name: u.department_name })
-        : null,
+      name,
+      subtitle: [email, team].filter(Boolean).join(' · ') || null,
       usedUsd: u.cost_usd,
       usagePct,
       href: `/users?node=${u.user_id}`,

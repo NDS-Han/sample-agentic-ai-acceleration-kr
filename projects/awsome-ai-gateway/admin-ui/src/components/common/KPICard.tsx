@@ -7,6 +7,8 @@ import { AlertLevel as AlertLevelConst } from '@/types/enums';
 interface KPICardProps {
   title: string;
   value: string | number;
+  /** 값 툴팁 — 줄여 표시한 값('< $0.01')의 정확한 값 등. */
+  valueTitle?: string;
   icon: React.ReactNode;
   alertLevel?: AlertLevel;
   /** 경보 심각도의 텍스트 표기 — 색만으로 전달되지 않도록(접근성).
@@ -38,6 +40,7 @@ const ALERT_TEXT_CLASSES: Record<AlertLevel, string> = {
 export function KPICard({
   title,
   value,
+  valueTitle,
   icon,
   alertLevel = AlertLevelConst.NORMAL,
   alertLabel,
@@ -73,7 +76,7 @@ export function KPICard({
       </div>
 
       {/* Value */}
-      <p className="text-3xl font-bold text-foreground tracking-tight">
+      <p className="text-3xl font-bold text-foreground tracking-tight" title={valueTitle}>
         {typeof value === 'number' ? value.toLocaleString() : value}
       </p>
 

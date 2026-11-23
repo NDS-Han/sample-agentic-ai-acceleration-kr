@@ -2,16 +2,26 @@
 
 // Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
 
-import { useLocale, useTranslations } from 'next-intl';
-import { fmtDateTime, fmtUsd } from '@/lib/utils/format';
-import { useReportingTz } from '@/components/common/ReportingTimezoneProvider';
+import { useTranslations } from 'next-intl';
+import { fmtUsd, usdTitle } from '@/lib/utils/format';
+import { usePointInTime } from '@/components/common/usePointInTime';
 import type { MonitoringOverviewResponse } from '@/lib/actions/monitoring';
 
-function StatCard({ label, value, sub }: { label: string; value: string; sub?: string }) {
+function StatCard({
+  label,
+  value,
+  valueTitle,
+  sub,
+}: {
+  label: string;
+  value: string;
+  valueTitle?: string;
+  sub?: string;
+}) {
   return (
     <div className="glass glass-hover rounded-apple p-4">
       <p className="text-sm text-muted-foreground">{label}</p>
-      <p className="text-2xl font-bold mt-1">{value}</p>
+      <p className="text-2xl font-bold mt-1" title={valueTitle}>{value}</p>
       {sub && <p className="text-xs text-muted-foreground mt-1">{sub}</p>}
     </div>
   );
@@ -19,18 +29,18 @@ function StatCard({ label, value, sub }: { label: string; value: string; sub?: s
 
 export function MonitoringOverview({ data }: { data: MonitoringOverviewResponse }) {
   const t = useTranslations('monitoring');
-  const locale = useLocale();
-  const tz = useReportingTz();
+  const pit = usePointInTime();
   const h = data.last_1h;
 
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <h2 className="text-base font-semibold">{t('lastHourSummary')}</h2>
-        {/* 시각은 브라우저 TZ 가 아니라 리포팅 TZ(REPORTING_TIMEZONE)로 그린다 — TZ 이름을
-            같이 적지 않으면 KST 로 오독된다(예: dev 가 Asia/Kolkata 면 15:17 KST 가 11:47). */}
-        <span className="text-xs text-muted-foreground" title={data.timestamp}>
-          {t('asOf', { time: fmtDateTime(data.timestamp, locale, tz), tz })}
+        {/* 한 시점이라 보는 사람의 브라우저 TZ 로 그린다(리포팅 TZ 는 집계 경계용).
+            TZ 이름을 같이 적어 어느 시계 기준인지 분명히 한다. */}
+        <span className="text-xs text-muted-foreground" title={pit.title}>
+          {/* 마운트 전에는 비워 둔다 — 파드 TZ 로 그린 시각이 잠깐 보이지 않게. */}
+          {pit.tz ? t('asOf', { time: pit.dateTime(data.timestamp), tz: pit.abbr }) : '\u00a0'}
         </span>
       </div>
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4">
@@ -49,7 +59,11 @@ export function MonitoringOverview({ data }: { data: MonitoringOverviewResponse 
           label={t('p95Latency')}
           value={h.total_requests > 0 ? `${h.p95_latency_ms}ms` : '—'}
         />
-        <StatCard label={t('totalCost')} value={fmtUsd(h.total_cost_usd)} />
+        <StatCard
+          label={t('totalCost')}
+          value={fmtUsd(h.total_cost_usd)}
+          valueTitle={usdTitle(h.total_cost_usd)}
+        />
         <StatCard label={t('activeModels')} value={String(data.active_models)} />
       </div>
     </div>

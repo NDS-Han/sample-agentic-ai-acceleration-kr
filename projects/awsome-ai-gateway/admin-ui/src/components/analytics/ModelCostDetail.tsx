@@ -10,6 +10,7 @@ import { fmtLatencyMs, fmtUsd } from '@/lib/utils/format';
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/common/Table';
 import { CATEGORICAL_PALETTE } from '@/lib/utils/chartTheme';
 import { modelDisplay } from '@/lib/utils/modelLabel';
+import { Usd } from '@/components/common/Usd';
 
 // 모델 색상의 단일 출처는 CATEGORICAL_PALETTE — 같은 페이지의 '모델별 비용'
 // 막대 차트(BreakdownChartClient)와 대시보드 도넛이 같은 팔레트를 쓴다.
@@ -105,7 +106,7 @@ export function ModelCostDetail({ data }: { data: ModelCostAnalyticsResponse }) 
                       {modelDisplay(m.model_alias, m.display_name)}
                     </Td>
                     <Td numeric>{m.request_count.toLocaleString()}</Td>
-                    <Td numeric className="font-semibold">{fmtUsd(m.total_cost_usd)}</Td>
+                    <Td numeric className="font-semibold"><Usd value={m.total_cost_usd} /></Td>
                     <Td numeric>{m.input_tokens.toLocaleString()}</Td>
                     <Td numeric>{m.output_tokens.toLocaleString()}</Td>
                     <Td

@@ -3,15 +3,16 @@
 // Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
 
 import { useState } from 'react';
-import { useLocale, useTranslations } from 'next-intl';
+import { useTranslations } from 'next-intl';
 import { ChevronDown, ChevronRight, Copy, Wrench } from 'lucide-react';
 
 import type { BodyLogResponse } from '@/lib/actions/body-logs';
 import { Badge, type BadgeTone } from '@/components/common/Badge';
 import { EmailText } from '@/components/common/UnverifiedEmailBadge';
 import { useToast } from '@/components/common/ToastProvider';
-import { useReportingTz } from '@/components/common/ReportingTimezoneProvider';
-import { fmtDateTime, fmtTokensCompact, fmtUsd } from '@/lib/utils/format';
+import { usePointInTime } from '@/components/common/usePointInTime';
+import { fmtTokensCompact } from '@/lib/utils/format';
+import { Usd } from '@/components/common/Usd';
 
 // ── 본문 텍스트 추출 ──────────────────────────────────────────────────────────
 // request_body 방언: anthropic/openai chat = messages[], responses API = input.
@@ -651,8 +652,7 @@ export function BodyRecordContent({
 }) {
   const t = useTranslations('monitoring.bodyLogs');
   const tev = useTranslations('monitoring.events');
-  const locale = useLocale();
-  const tz = useReportingTz();
+  const pit = usePointInTime();
   const { toast } = useToast();
   const [rawReq, setRawReq] = useState(false);
   const [rawRes, setRawRes] = useState(false);
@@ -715,7 +715,7 @@ export function BodyRecordContent({
             {STATUS_LABELS[statusValue] ?? statusValue ?? '-'}
           </Badge>
           <span className="text-foreground">{rec?.model_alias ?? data.model_alias}</span>
-          <span>{data.requested_at ? fmtDateTime(data.requested_at, locale, tz) : '-'}</span>
+          <span title={pit.title}>{data.requested_at ? pit.dateTimeZ(data.requested_at) : '-'}</span>
           <span className="font-mono">{data.request_id}</span>
           {(data.user_email ?? rec?.user_id) && (
             <span title={rec?.user_id ?? undefined}>
@@ -747,7 +747,7 @@ export function BodyRecordContent({
           {data.cost_usd != null && (
             <div>
               <dt className="inline">{t('costLabel')}</dt>{' '}
-              <dd className="num inline">{fmtUsd(data.cost_usd)}</dd>
+              <dd className="num inline"><Usd value={data.cost_usd} /></dd>
             </div>
           )}
           {(data.input_tokens != null || data.output_tokens != null) && (

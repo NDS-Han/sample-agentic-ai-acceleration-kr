@@ -3,7 +3,7 @@
 // Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
 
 import { useCallback, useEffect, useRef, useState, useTransition } from 'react';
-import { useLocale, useTranslations } from 'next-intl';
+import { useTranslations } from 'next-intl';
 import { ChevronDown, ChevronRight, Link2, RefreshCw } from 'lucide-react';
 
 import {
@@ -19,13 +19,14 @@ import { Badge } from '@/components/common/Badge';
 import { EmailText } from '@/components/common/UnverifiedEmailBadge';
 import { isSyntheticEmail } from '@/lib/userLabel';
 import { useToast } from '@/components/common/ToastProvider';
-import { useReportingTz } from '@/components/common/ReportingTimezoneProvider';
-import { fmtDateTime, fmtTokensCompact, fmtUsd } from '@/lib/utils/format';
+import { usePointInTime } from '@/components/common/usePointInTime';
+import { fmtTokensCompact } from '@/lib/utils/format';
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/common/Table';
 import { SkeletonTable } from '@/components/common/SkeletonTable';
 import { ErrorState } from '@/components/common/ErrorState';
 import { Button } from '@/components/common/Button';
 import { BodyRecordContent, statusTone } from './bodyLogRender';
+import { Usd } from '@/components/common/Usd';
 
 // 한 호출을 펼치면 그 호출만 단건 조회한다 — 클릭 한 번으로 50건 열람이 감사되는
 // 구조(eager batch)를 피하기 위해서다. 실제로 읽은 것만 감사된다.
@@ -84,8 +85,7 @@ export function BodyLogSessions({
 }) {
   const t = useTranslations('monitoring.bodyLogs');
   const tev = useTranslations('monitoring.events');
-  const locale = useLocale();
-  const tz = useReportingTz();
+  const pit = usePointInTime();
   const { toast } = useToast();
 
   // usage status → 번역 라벨. 모르는 값은 원문 폴백(EventLog/뷰어와 동일 규칙).
@@ -541,14 +541,15 @@ export function BodyLogSessions({
                 <Badge tone="neutral">{t('heuristicSession')}</Badge>
               </span>
             )}
-            <span className="text-muted-foreground">
-              {fmtDateTime(selected.started_at, locale, tz)} → {fmtDateTime(selected.ended_at, locale, tz)}
+            {/* 아래 호출 행 시각도 같은 브라우저 TZ — 이름은 여기 한 번 적는다. */}
+            <span className="text-muted-foreground" title={pit.title}>
+              {pit.dateTime(selected.started_at)} → {pit.dateTimeZ(selected.ended_at)}
             </span>
             <span className="text-muted-foreground">
               {t('callsCount', { count: selected.call_count })}
             </span>
             {selected.total_cost_usd != null && (
-              <span className="text-muted-foreground">{fmtUsd(selected.total_cost_usd)}</span>
+              <span className="text-muted-foreground"><Usd value={selected.total_cost_usd} /></span>
             )}
             {selected.error_count > 0 && (
               /* 오류 필터 — 세그먼트 토글. 배지 클릭은 발견이 안 된다. */
@@ -621,8 +622,8 @@ export function BodyLogSessions({
                     <ChevronRight size={14} aria-hidden="true" />
                   )}
                   <span className="text-xs text-muted-foreground">#{i + 1}</span>
-                  <span className="whitespace-nowrap">
-                    {fmtDateTime(call.requested_at, locale, tz)}
+                  <span className="whitespace-nowrap" title={pit.title}>
+                    {pit.dateTime(call.requested_at)}
                   </span>
                   <span className="truncate">{call.model_alias ?? '-'}</span>
                   {/* 정상 호출에 매 행 색 배지를 달면 드문 오류가 색에 묻힌다 —
@@ -638,7 +639,7 @@ export function BodyLogSessions({
                     {call.latency_ms != null ? `${(call.latency_ms / 1000).toFixed(1)}s` : ''}
                   </span>
                   <span className="num text-right text-xs text-muted-foreground">
-                    {call.cost_usd != null ? fmtUsd(call.cost_usd) : ''}
+                    {call.cost_usd != null ? <Usd value={call.cost_usd} /> : ''}
                   </span>
                   <span className="num text-right text-xs text-muted-foreground">
                     {call.input_tokens != null || call.output_tokens != null
@@ -821,8 +822,8 @@ export function BodyLogSessions({
             <THead>
               <Tr>
                 <Th className="w-6"></Th>
-                <Th>{t('colEnded')}</Th>
-                <Th>{t('colStarted')}</Th>
+                <Th title={pit.title}>{pit.header(t('colEnded'))}</Th>
+                <Th title={pit.title}>{pit.header(t('colStarted'))}</Th>
                 <Th>{t('colUser')}</Th>
                 <Th>{t('colClient')}</Th>
                 <Th numeric>{t('colCalls')}</Th>
@@ -854,9 +855,9 @@ export function BodyLogSessions({
                       <ChevronRight size={14} aria-hidden="true" />
                     </button>
                   </Td>
-                  <Td className="whitespace-nowrap">{fmtDateTime(s.ended_at, locale, tz)}</Td>
+                  <Td className="whitespace-nowrap">{pit.dateTime(s.ended_at)}</Td>
                   <Td className="whitespace-nowrap text-muted-foreground">
-                    {fmtDateTime(s.started_at, locale, tz)}
+                    {pit.dateTime(s.started_at)}
                   </Td>
                   <Td
                     className="max-w-40 truncate text-sm"
@@ -877,7 +878,7 @@ export function BodyLogSessions({
                     {s.models.join(', ')}
                   </Td>
                   <Td numeric className="text-sm">
-                    {s.total_cost_usd != null ? fmtUsd(s.total_cost_usd) : '—'}
+                    {s.total_cost_usd != null ? <Usd value={s.total_cost_usd} /> : '—'}
                   </Td>
                   <Td numeric>
                     {s.error_count > 0 ? (

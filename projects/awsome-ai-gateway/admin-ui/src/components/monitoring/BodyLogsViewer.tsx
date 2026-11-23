@@ -3,7 +3,7 @@
 // Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
 
 import { useEffect, useRef, useState, useTransition } from 'react';
-import { useLocale, useTranslations } from 'next-intl';
+import { useTranslations } from 'next-intl';
 import { Copy, RefreshCw, Search } from 'lucide-react';
 
 import { fetchBodyLog, type BodyLogResponse } from '@/lib/actions/body-logs';
@@ -18,8 +18,7 @@ import { Badge } from '@/components/common/Badge';
 import { EmailText } from '@/components/common/UnverifiedEmailBadge';
 import { isSyntheticEmail } from '@/lib/userLabel';
 import { useToast } from '@/components/common/ToastProvider';
-import { useReportingTz } from '@/components/common/ReportingTimezoneProvider';
-import { fmtDateTime } from '@/lib/utils/format';
+import { usePointInTime } from '@/components/common/usePointInTime';
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/common/Table';
 import { ErrorState } from '@/components/common/ErrorState';
 import { Button } from '@/components/common/Button';
@@ -69,8 +68,7 @@ export function BodyLogsViewer({
 }) {
   const t = useTranslations('monitoring.bodyLogs');
   const tev = useTranslations('monitoring.events');
-  const locale = useLocale();
-  const tz = useReportingTz();
+  const pit = usePointInTime();
   const { toast } = useToast();
   const [query, setQuery] = useState(initialRequestId ?? '');
   const [loading, startTransition] = useTransition();
@@ -285,7 +283,7 @@ export function BodyLogsViewer({
           <Table>
             <THead>
               <Tr>
-                <Th>{t('colTime')}</Th>
+                <Th title={pit.title}>{pit.header(t('colTime'))}</Th>
                 <Th>{t('colRequestId')}</Th>
                 <Th>{t('colUser')}</Th>
                 <Th>{t('colModel')}</Th>
@@ -296,7 +294,7 @@ export function BodyLogsViewer({
             <TBody>
               {shown.map((ev: MonitoringEvent) => (
                 <Tr key={ev.request_id}>
-                  <Td className="whitespace-nowrap">{fmtDateTime(ev.timestamp, locale, tz)}</Td>
+                  <Td className="whitespace-nowrap">{pit.dateTime(ev.timestamp)}</Td>
                   <Td>
                     <button
                       type="button"

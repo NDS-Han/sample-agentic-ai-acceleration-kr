@@ -19,6 +19,7 @@ import { Table, THead, TBody, TFoot, Tr, Th, Td, TEmpty } from '@/components/com
 import { ConfirmImpactBox } from './ConfirmImpactBox';
 import { fmtUsd } from '@/lib/utils/format';
 import { NumberInput } from '@/components/common/NumberInput';
+import { Usd } from '@/components/common/Usd';
 
 interface TeamAllocationViewProps {
   teamId: string;
@@ -420,7 +421,7 @@ export function TeamAllocationView({
                       </div>
                     </Td>
                     <Td numeric className="text-muted-foreground">
-                      {fmtUsd(m.used_usd)}
+                      <Usd value={m.used_usd} />
                     </Td>
                   </Tr>
                 );
@@ -431,7 +432,7 @@ export function TeamAllocationView({
             <Tr>
               <Td emphasis colSpan={3}>{t('sumAllocated')}</Td>
               <Td className="text-muted-foreground">
-                {fmtUsd(allocation.sum_allocated_usd ?? 0)}
+                <Usd value={allocation.sum_allocated_usd ?? 0} />
               </Td>
               <Td />
             </Tr>

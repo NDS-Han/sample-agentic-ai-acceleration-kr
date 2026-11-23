@@ -4,7 +4,7 @@
 
 
 import { useEffect, useRef, useState, useTransition } from 'react';
-import { useLocale, useTranslations } from 'next-intl';
+import { useTranslations } from 'next-intl';
 import Link from 'next/link';
 import {
   fetchMonitoringEvents,
@@ -15,8 +15,7 @@ import { Badge } from '@/components/common/Badge';
 import { EmailText } from '@/components/common/UnverifiedEmailBadge';
 import { isSyntheticEmail } from '@/lib/userLabel';
 import { useToast } from '@/components/common/ToastProvider';
-import { useReportingTz } from '@/components/common/ReportingTimezoneProvider';
-import { fmtDateTime } from '@/lib/utils/format';
+import { usePointInTime } from '@/components/common/usePointInTime';
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/common/Table';
 import { eventTone, eventTypeLabels, EVENT_TYPE_FILTERS } from './eventMeta';
 
@@ -29,8 +28,7 @@ export function EventLog({
   bodyLoggingEnabled?: boolean;
 }) {
   const t = useTranslations('monitoring');
-  const locale = useLocale();
-  const tz = useReportingTz();
+  const pit = usePointInTime();
   const { toast } = useToast();
   const [filter, setFilter] = useState<MonitoringEventTypeFilter>('all');
   const [data, setData] = useState<MonitoringEventsResponse>(initialData);
@@ -118,7 +116,7 @@ export function EventLog({
         <Table density="compact">
           <THead>
             <Tr>
-              <Th>{t('events.colTime')}</Th>
+              <Th title={pit.title}>{pit.header(t('events.colTime'))}</Th>
               <Th>{t('events.colType')}</Th>
               <Th>{t('events.colModel')}</Th>
               <Th>{t('events.colUser')}</Th>
@@ -130,7 +128,7 @@ export function EventLog({
             {data.events.map((ev, i) => (
               <Tr key={`${ev.timestamp}-${i}`}>
                 <Td className="text-muted-foreground whitespace-nowrap num">
-                  {fmtDateTime(ev.timestamp, locale, tz)}
+                  {pit.dateTime(ev.timestamp)}
                 </Td>
                 <Td>
                   <Badge tone={eventTone(ev.event_type)}>

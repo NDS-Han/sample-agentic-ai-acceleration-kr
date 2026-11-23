@@ -1,7 +1,7 @@
 // Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
 
 import { getTranslations } from 'next-intl/server';
-import { fmtUsd } from '@/lib/utils/format';
+import { fmtUsd, usdTitle } from '@/lib/utils/format';
 import { errorRateInfo } from '@/lib/utils/errorRate';
 import type { AnalyticsFilterForm } from '@/types/api';
 import { buildAnalyticsQuery, fetchAnalyticsOnce } from '@/lib/utils/analyticsQuery';
@@ -31,12 +31,14 @@ interface AnalyticsAPIResponse {
 interface MetricCardProps {
   label: string;
   value: string;
+  /** 값 툴팁 — '< $0.01' 로 줄인 금액의 정확한 값. */
+  valueTitle?: string;
   description?: string;
   /** 임계 초과 경고 — 보더+설명 텍스트를 warning 색으로. */
   warn?: boolean;
 }
 
-function MetricCard({ label, value, description, warn }: MetricCardProps) {
+function MetricCard({ label, value, valueTitle, description, warn }: MetricCardProps) {
   return (
     <div
       className={`glass glass-hover rounded-apple p-4 flex flex-col gap-2 ${
@@ -44,7 +46,7 @@ function MetricCard({ label, value, description, warn }: MetricCardProps) {
       }`}
     >
       <p className="text-sm font-medium text-muted-foreground">{label}</p>
-      <p className="text-2xl font-bold">{value}</p>
+      <p className="text-2xl font-bold" title={valueTitle}>{value}</p>
       {description && (
         <p className={`text-xs ${warn ? 'text-warning font-medium' : 'text-muted-foreground'}`}>
           {description}
@@ -96,11 +98,13 @@ export async function ROIMetricsCards({ filter, latestMonth }: ROIMetricsCardsPr
     {
       label: t('totalCost'),
       value: fmtUsd(totalCost),
+      valueTitle: usdTitle(totalCost),
       description: t('totalCostDescription'),
     },
     {
       label: t('averageCostPerUser'),
       value: fmtUsd(avgCostPerUser),
+      valueTitle: usdTitle(avgCostPerUser),
       description: t('activeUsersDescription', { count: summary.active_users }),
     },
   ];

@@ -4,8 +4,8 @@
  * CostTrendCard — 합계 + 팀별 추이 멀티 시리즈 조립·토글 검증.
  *
  * 못박는 것:
- *  - 날짜 축 = 합계 + 팀 포인트의 합집합(정렬). 어느 시리즈든 없는 날짜는 null
- *    (0 으로 접으면 "그날 비용 0" 이라는 거짓 사실).
+ *  - 날짜 축 = 합계 + 팀 포인트의 합집합(정렬). 어느 시리즈든 없는 날짜는 0(오늘 이후는 null)
+ *    (사용 기록이 없는 날 = 실제 $0. 아직 오지 않은 날만 비운다.)
  *  - 기본 선택 = 비용 상위 5개 팀, 나머지는 'other' 합산. 칩 토글로 켠 팀은
  *    개별 시리즈, 꺼진 팀은 'other' 에 합쳐진다(합계와 어긋나지 않는다).
  *  - 합계 시리즈는 trends 값 그대로 — 팀 시리즈 합산으로 재계산하지 않는다.
@@ -68,7 +68,7 @@ describe('buildTrendChartData', () => {
     expect(r.showOther).toBe(false);
   });
 
-  it('팀별로 다른 날짜에 데이터가 있어도 날짜 축은 합집합이다 — 빈 날짜는 null', () => {
+  it('팀별로 다른 날짜에 데이터가 있어도 날짜 축은 합집합이다 — 사용 없는 날은 0', () => {
     const r = buildTrendChartData(
       [pt('2026-09-01', 10), pt('2026-09-02', 4), pt('2026-09-03', 6)],
       [
@@ -77,8 +77,8 @@ describe('buildTrendChartData', () => {
       ],
     );
     expect(r.data.map((d) => d.label)).toEqual(['09-01', '09-02', '09-03']);
-    expect(r.data.map((d) => d.team_a)).toEqual([10, null, null]);
-    expect(r.data.map((d) => d.team_b)).toEqual([null, 4, 6]);
+    expect(r.data.map((d) => d.team_a)).toEqual([10, 0, 0]);
+    expect(r.data.map((d) => d.team_b)).toEqual([0, 4, 6]);
     expect(r.data.map((d) => d.total)).toEqual([10, 4, 6]);
   });
 
@@ -136,14 +136,36 @@ describe('buildTrendChartData', () => {
     expect(new Set(dashes).size).toBe(5);
   });
 
-  it('기간 중 실측 없는 날짜도 축에 넣고 값은 null 이다 — 0 으로 채우지 않는다', () => {
+  it('기간 중 사용 없는 날짜는 $0 으로 잇는다 — 선이 끊겨 마지막 값이 이어지는 것처럼 보이지 않게', () => {
     const r = buildTrendChartData(
       [pt('2026-11-06', 0.1), pt('2026-11-09', 0.2)],
       [team('a', 'A', [['2026-11-06', 0.1], ['2026-11-09', 0.2]])],
     );
     expect(r.data.map((d) => d.label)).toEqual(['11-06', '11-07', '11-08', '11-09']);
-    expect(r.data.map((d) => d.total)).toEqual([0.1, null, null, 0.2]);
-    expect(r.data.map((d) => d.team_a)).toEqual([0.1, null, null, 0.2]);
+    expect(r.data.map((d) => d.total)).toEqual([0.1, 0, 0, 0.2]);
+    expect(r.data.map((d) => d.team_a)).toEqual([0.1, 0, 0, 0.2]);
+  });
+
+  it('range 를 주면 축이 기간 전체로 넓어지고, 오늘 이후만 null 이다', () => {
+    const r = buildTrendChartData(
+      [pt('2026-11-05', 0.1), pt('2026-11-06', 0.3)],
+      [team('a', 'A', [['2026-11-06', 0.3]])],
+      undefined,
+      { range: { start: '2026-11-03', end: '2026-11-10' }, today: '2026-11-08' },
+    );
+    expect(r.data.map((d) => d.label)).toEqual([
+      '11-03', '11-04', '11-05', '11-06', '11-07', '11-08', '11-09', '11-10',
+    ]);
+    expect(r.data.map((d) => d.total)).toEqual([0, 0, 0.1, 0.3, 0, 0, null, null]);
+    expect(r.data.map((d) => d.team_a)).toEqual([0, 0, 0, 0.3, 0, 0, null, null]);
+  });
+
+  it('데이터가 없으면 range 가 있어도 빈 데이터다', () => {
+    const r = buildTrendChartData([], [], undefined, {
+      range: { start: '2026-11-01', end: '2026-11-30' },
+      today: '2026-11-23',
+    });
+    expect(r.data).toEqual([]);
   });
 
   it('빈 입력이면 빈 데이터다 — 렌더는 빈 상태로 간다', () => {

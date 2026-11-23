@@ -26,6 +26,7 @@ import {
   type UsageTrend,
 } from '@/lib/utils/rateLimitUsage';
 import { useReportingTz } from '@/components/common/ReportingTimezoneProvider';
+import { ReportingTzCaption } from '@/components/common/ReportingTzCaption';
 
 const WINDOWS: TrendWindow[] = ['1h', '6h', '24h', '7d'];
 const WINDOW_LABEL: Record<TrendWindow, string> = {
@@ -148,6 +149,8 @@ export function UsageTrendChart({ scope, scopeId, limits }: UsageTrendChartProps
           ))}
         </div>
       </div>
+      {/* 시간 축 버킷은 리포팅 TZ(배포 리전) 기준. */}
+      <ReportingTzCaption kind="hours" />
       <div className="mt-1 flex items-center gap-1">
         {(['rpm', 'tpm', 'cph'] as Metric[]).map((m) => (
           <button

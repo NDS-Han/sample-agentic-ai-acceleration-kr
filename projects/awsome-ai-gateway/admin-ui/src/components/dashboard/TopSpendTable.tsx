@@ -12,7 +12,7 @@
 import { useTranslations } from 'next-intl';
 import Link from 'next/link';
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/common/Table';
-import { fmtUsd } from '@/lib/utils/format';
+import { Usd } from '@/components/common/Usd';
 
 interface TopSpendRow {
   id: string;
@@ -102,14 +102,17 @@ export function TopSpendTable({
                         <span className="block truncate">{r.name}</span>
                       )}
                       {r.subtitle && (
-                        <span className="block truncate text-[11px] font-normal text-muted-foreground">
+                        <span
+                          className="block truncate text-[11px] font-normal text-muted-foreground"
+                          title={r.subtitle}
+                        >
                           {r.subtitle}
                         </span>
                       )}
                     </span>
                   </span>
                 </Td>
-                <Td numeric className="font-semibold">{fmtUsd(r.usedUsd)}</Td>
+                <Td numeric className="font-semibold"><Usd value={r.usedUsd} /></Td>
                 <Td>
                   {r.usagePct != null ? (
                     <div className="flex items-center gap-2">
@@ -133,7 +136,7 @@ export function TopSpendTable({
                       </span>
                       {r.teamBudget && (
                         <span className="block text-[11px] tabular-nums text-muted-foreground/80">
-                          {fmtUsd(r.teamBudget.used)} / {fmtUsd(r.teamBudget.limit)}
+                          <Usd value={r.teamBudget.used} /> / <Usd value={r.teamBudget.limit} />
                         </span>
                       )}
                     </span>

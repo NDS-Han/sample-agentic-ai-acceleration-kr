@@ -13,6 +13,7 @@
 //    텍스트만 인쇄용 진한 잉크로 바뀐다). CSS 변수 기반이라 React 재렌더 불필요.
 
 import type { ChatMessage } from './types';
+import { tzZoneText } from '@/lib/utils/timezone';
 
 // recharts SVG 로 렌더되는 차트 종류(table/kpi/image 는 SVG 아님 — 데이터 표로 대체).
 const SVG_CHART_KINDS = new Set(['bar', 'line', 'area', 'pie']);
@@ -285,7 +286,7 @@ export function buildReportHtml(
   <header class="report-header">
     <div class="brand"><span class="dot"></span>AWSome AI Gateway · BI Insight</div>
     <h1>${escapeHtml(title)}</h1>
-    <div class="meta">생성 ${escapeHtml(when)} (${escapeHtml(reportingTz)})</div>
+    <div class="meta">생성 ${escapeHtml(when)} ${escapeHtml(tzZoneText(reportingTz))}</div>
   </header>
   <main>
     ${narrative ? `<section class="narrative"><h2>분석 요약</h2>${narrative}</section>` : ''}

@@ -14,7 +14,7 @@ import {
   YAxis,
 } from 'recharts';
 import { useTranslations } from 'next-intl';
-import { fmtUsd, fmtUsdTick, niceTicks } from '@/lib/utils/format';
+import { fmtUsdExact, fmtUsdTick, niceTicks } from '@/lib/utils/format';
 import type { ModelBreakdown, TeamBreakdown } from '@/types/entities';
 import { CATEGORICAL_PALETTE, useChartTheme } from '@/lib/utils/chartTheme';
 
@@ -87,7 +87,7 @@ export function BreakdownChartClient({ labels, values, title }: BreakdownChartCl
           />
           <Tooltip
             cursor={{ fill: 'rgba(127,127,127,0.10)' }}
-            formatter={(value) => [fmtUsd(Number(value)), t('costUsd')]}
+            formatter={(value) => [fmtUsdExact(Number(value)), t('costUsd')]}
             contentStyle={{
               background: theme.surface,
               border: '1px solid hsl(var(--border))',

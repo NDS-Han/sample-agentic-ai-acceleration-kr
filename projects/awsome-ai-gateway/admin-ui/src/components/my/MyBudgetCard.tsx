@@ -9,6 +9,7 @@ import { fmtUsd } from '@/lib/utils/format';
 import { UsageBar } from '@/components/budgets/budgetVisuals';
 import { alertLevelOf } from '@/lib/utils/alertLevel';
 import { AlertLevel } from '@/types/enums';
+import { Usd } from '@/components/common/Usd';
 
 const KNOWN_POLICIES = ['HARD_BLOCK', 'SOFT_WARNING', 'THROTTLE'];
 
@@ -75,7 +76,7 @@ export function MyBudgetCard({
       <div className="space-y-3">
         <div className="flex items-end justify-between">
           <span className="text-sm text-muted-foreground">{t('spent')}</span>
-          <span className="text-2xl font-bold">{fmtUsd(b.used_usd)}</span>
+          <span className="text-2xl font-bold"><Usd value={b.used_usd} /></span>
         </div>
 
         {isZeroBudget ? (
@@ -102,7 +103,7 @@ export function MyBudgetCard({
             </div>
             <div className="flex items-center justify-between text-sm">
               <span className="text-muted-foreground">{t('remaining')}</span>
-              <span className="font-medium">{fmtUsd(capRemaining)}</span>
+              <span className="font-medium"><Usd value={capRemaining} /></span>
             </div>
             {hasPersonalBudget && (
               <div className="flex items-center justify-between text-sm">
@@ -125,7 +126,7 @@ export function MyBudgetCard({
               </span>
               {team.limit_usd != null && (
                 <span className="text-muted-foreground">
-                  {fmtUsd(team.used_usd)} / {fmtUsd(team.limit_usd)}
+                  <Usd value={team.used_usd} /> / <Usd value={team.limit_usd} />
                 </span>
               )}
             </div>
@@ -139,7 +140,7 @@ export function MyBudgetCard({
                 <div className="flex items-center justify-between text-sm">
                   <span className="text-muted-foreground">{t('teamRemaining')}</span>
                   <span className={`font-medium ${PCT_TONE[teamLevel] ?? ''}`}>
-                    {fmtUsd(team.remaining_usd ?? 0)}
+                    <Usd value={team.remaining_usd ?? 0} />
                     <span className="ml-1 text-xs font-normal">
                       ({(team.usage_pct ?? 0).toFixed(1)}%)
                     </span>

@@ -16,7 +16,7 @@ import {
   YAxis,
 } from 'recharts';
 import type { MyBudgetResponse, MyUsageResponse, ModelUsage } from '@/lib/actions/my';
-import { fmtUsd } from '@/lib/utils/format';
+import { fmtUsd, fmtUsdExact, usdTitle } from '@/lib/utils/format';
 import { modelDisplay } from '@/lib/utils/modelLabel';
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/common/Table';
 import { TokenMixDonutClient, TOKEN_BUCKETS } from '@/components/analytics/TokenMixDonutClient';
@@ -25,6 +25,8 @@ import { errorRateInfo } from '@/lib/utils/errorRate';
 import { AlertLevel } from '@/types/enums';
 import { MyBudgetCard } from '@/components/my/MyBudgetCard';
 import { ErrorState } from '@/components/common/ErrorState';
+import { Usd } from '@/components/common/Usd';
+import { ReportingTzCaption } from '@/components/common/ReportingTzCaption';
 
 const compact = new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 });
 
@@ -79,6 +81,7 @@ export function MyUsageDashboard({
             <KPICard
               title={t('totalCost')}
               value={fmtUsd(totalCost)}
+              valueTitle={usdTitle(totalCost)}
               icon={<DollarSign size={18} />}
               description={t('kpiCostDesc', { requests: totalRequests.toLocaleString() })}
             />
@@ -147,7 +150,7 @@ export function MyUsageDashboard({
                       tick={{ fontSize: 11 }}
                       stroke="hsl(var(--muted-foreground))"
                       tickFormatter={(v: number) =>
-                        trendMetric === 'cost_usd' ? fmtUsd(v) : compact.format(v)
+                        trendMetric === 'cost_usd' ? fmtUsdExact(v) : compact.format(v)
                       }
                     />
                     <Tooltip
@@ -160,7 +163,7 @@ export function MyUsageDashboard({
                       labelStyle={{ color: 'hsl(var(--muted-foreground))' }}
                       formatter={((value: number) => [
                         trendMetric === 'cost_usd'
-                          ? fmtUsd(value)
+                          ? fmtUsdExact(value)
                           : `${value.toLocaleString()} ${t('tokUnit')}`,
                         t(trendMetric === 'cost_usd' ? 'keyCost' : 'trendTokens'),
                       ]) as never}
@@ -175,6 +178,7 @@ export function MyUsageDashboard({
                     />
                   </AreaChart>
                 </ResponsiveContainer>
+                <ReportingTzCaption kind="dates" className="mt-1" />
                 <details className="mt-3 group">
                   <summary className="cursor-pointer select-none text-xs text-muted-foreground hover:text-foreground">
                     {t('dailyDetail')}
@@ -193,7 +197,7 @@ export function MyUsageDashboard({
                         {data.daily_usage.map((row) => (
                           <Tr key={row.date}>
                             <Td className="num">{row.date}</Td>
-                            <Td numeric>{fmtUsd(row.cost_usd)}</Td>
+                            <Td numeric><Usd value={row.cost_usd} /></Td>
                             <Td numeric>{row.requests.toLocaleString()}</Td>
                             <Td numeric>{row.tokens.toLocaleString()}</Td>
                           </Tr>
@@ -272,7 +276,7 @@ export function MyUsageDashboard({
                           </span>
                         </div>
                       </Td>
-                      <Td numeric>{fmtUsd(row.cost_usd)}</Td>
+                      <Td numeric><Usd value={row.cost_usd} /></Td>
                       <Td numeric className="text-muted-foreground">
                         {share != null ? `${share.toFixed(1)}%` : '—'}
                       </Td>

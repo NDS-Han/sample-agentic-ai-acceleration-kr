@@ -8,21 +8,35 @@
  *
  * 규칙(기본 precision=2):
  *  - |n| ≥ $0.01 또는 0 → 소수 2자리 + 천단위 그룹핑 ($1,234.50, $0.16)
- *  - 0 < |n| < $0.01 → 유효숫자 2개 ($0.0071, $0.000078). 예전엔 소수 6자리
- *    고정이라 $0.007100 처럼 의미 없는 0 이 붙었다. '$0.00' 으로 뭉개면 사용
- *    자체가 없어 보이므로 소액도 값이 보이게 한다.
+ *  - 0 < |n| < $0.01 → '< $0.01'. 유효숫자로 펼치면 같은 화면에서 '$0.00010'·
+ *    '$0.000078' 처럼 자릿수가 제각각이 된다. '$0.00' 으로 뭉개면 사용 자체가
+ *    없어 보이므로 "있지만 1센트 미만"으로 표시하고, 정확한 값은 usdTitle()
+ *    (또는 <Usd>) 툴팁으로 보여준다.
  * precision 을 3 이상으로 명시하면 그 자릿수 고정(채팅 버블 등 기존 호출 유지).
  */
 export function fmtUsd(n: number, precision = 2): string {
   if (!Number.isFinite(n)) return '$0.00';
-  if (precision <= 2 && n !== 0 && Math.abs(n) < 0.01) {
-    const small = smallUsd(n);
-    if (small) return small;
-  }
+  if (precision <= 2 && isSubCent(n)) return n < 0 ? '> -$0.01' : '< $0.01';
   return `$${n.toLocaleString('en-US', {
     minimumFractionDigits: precision,
     maximumFractionDigits: precision,
   })}`;
+}
+
+/** 0 이 아니고 2자리 반올림으로도 $0.01 에 닿지 않는 금액. */
+function isSubCent(n: number): boolean {
+  return n !== 0 && Math.abs(n) < 0.01 && smallUsd(n) !== null;
+}
+
+/** 정확한 금액 — 1센트 미만은 유효숫자 2개($0.000078), 그 외는 fmtUsd 와 같다. */
+export function fmtUsdExact(n: number): string {
+  if (!Number.isFinite(n)) return '$0.00';
+  return (isSubCent(n) && smallUsd(n)) || fmtUsd(n);
+}
+
+/** fmtUsd 가 '< $0.01' 로 줄인 금액이면 툴팁용 정확한 값, 아니면 undefined. */
+export function usdTitle(n: number | null | undefined): string | undefined {
+  return n != null && Number.isFinite(n) && isSubCent(n) ? fmtUsdExact(n) : undefined;
 }
 
 /** $0.01 미만 — 유효숫자 2개. 반올림 결과가 $0.01 에 닿으면 null(2자리 규칙으로). */

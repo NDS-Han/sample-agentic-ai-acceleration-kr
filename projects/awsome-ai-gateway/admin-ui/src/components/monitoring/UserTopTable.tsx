@@ -2,13 +2,13 @@
 
 // Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
 
-import { useLocale, useTranslations } from 'next-intl';
+import { useTranslations } from 'next-intl';
 import Link from 'next/link';
-import { fmtTime, fmtUsd } from '@/lib/utils/format';
-import { useReportingTz } from '@/components/common/ReportingTimezoneProvider';
+import { usePointInTime } from '@/components/common/usePointInTime';
 import type { MonitoringUsersResponse } from '@/lib/actions/monitoring';
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/common/Table';
 import { EmailText } from '@/components/common/UnverifiedEmailBadge';
+import { Usd } from '@/components/common/Usd';
 
 // 에러율 강조 — 테마 토큰(다크/라이트 자동). 임계: ≥10% 위험, ≥5% 경고.
 function errorColor(pct: number) {
@@ -19,8 +19,7 @@ function errorColor(pct: number) {
 
 export function UserTopTable({ data }: { data: MonitoringUsersResponse }) {
   const t = useTranslations('monitoring');
-  const locale = useLocale();
-  const tz = useReportingTz();
+  const pit = usePointInTime();
 
   if (data.users.length === 0) {
     return (
@@ -46,7 +45,9 @@ export function UserTopTable({ data }: { data: MonitoringUsersResponse }) {
             <Th numeric>{t('table.tokens')}</Th>
             <Th numeric>{t('table.costUsd')}</Th>
             <Th numeric>{t('table.errorRate')}</Th>
-            <Th numeric>{t('table.lastRequest')}</Th>
+            <Th numeric title={pit.title}>
+              {pit.header(t('table.lastRequest'))}
+            </Th>
           </Tr>
         </THead>
         <TBody>
@@ -60,13 +61,13 @@ export function UserTopTable({ data }: { data: MonitoringUsersResponse }) {
               </Td>
               <Td numeric>{u.requests.toLocaleString()}</Td>
               <Td numeric>{u.tokens.toLocaleString()}</Td>
-              <Td numeric emphasis>{fmtUsd(u.cost_usd)}</Td>
+              <Td numeric emphasis><Usd value={u.cost_usd} /></Td>
               <Td numeric className={errorColor(u.error_rate_pct)}>
                 {u.error_rate_pct}%
               </Td>
               <Td numeric className="text-muted-foreground">
                 {u.last_request_at
-                  ? fmtTime(u.last_request_at, locale, tz)
+                  ? pit.time(u.last_request_at)
                   : '-'}
               </Td>
             </Tr>

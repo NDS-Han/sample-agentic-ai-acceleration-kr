@@ -16,6 +16,7 @@ import { TeamAllocationView } from './TeamAllocationView';
 import { AlertBadge, TypeBadge, UsageBar } from './budgetVisuals';
 import { Badge } from '@/components/common/Badge';
 import { fmtUsd } from '@/lib/utils/format';
+import { Usd } from '@/components/common/Usd';
 
 interface BudgetSummaryTableProps {
   items: BudgetSummaryItem[];
@@ -251,7 +252,7 @@ export function BudgetSummaryTable({ items, isAdmin, models, modelsLoadFailed, c
           </span>
         )}
       </Td>
-      <Td numeric>{fmtUsd(user.used)}</Td>
+      <Td numeric><Usd value={user.used} /></Td>
       <Td numeric>
         {user.remaining != null ? (
           fmtUsd(user.remaining)
@@ -414,9 +415,9 @@ export function BudgetSummaryTable({ items, isAdmin, models, modelsLoadFailed, c
                             </span>
                           )}
                         </Td>
-                        <Td numeric>{fmtUsd(team.used)}</Td>
+                        <Td numeric><Usd value={team.used} /></Td>
                         <Td numeric>
-                          {team.remaining != null ? fmtUsd(team.remaining) : <span className="text-muted-foreground italic">-</span>}
+                          {team.remaining != null ? <Usd value={team.remaining} /> : <span className="text-muted-foreground italic">-</span>}
                         </Td>
                         <Td>
                           <div className="flex items-center gap-2">
