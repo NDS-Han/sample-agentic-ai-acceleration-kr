@@ -15,6 +15,7 @@ import { ReportCard } from './ReportCard';
 import { PlanCard } from './PlanCard';
 import { exportMessageReport } from './reportExport';
 import { useReportingTz } from '@/components/common/ReportingTimezoneProvider';
+import { usePointInTime } from '@/components/common/usePointInTime';
 import { fmtUsd } from '@/lib/utils/format';
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/common/Table';
 
@@ -119,6 +120,7 @@ function ReasoningBlock({ text, live }: { text: string; live: boolean }) {
 export function MessageBubble({ message, onPlanProceed, sessionId }: Props) {
   const t = useTranslations('chat');
   const reportingTz = useReportingTz();
+  const pit = usePointInTime();
   const isUser = message.role === 'user';
   const bodyRef = useRef<HTMLDivElement>(null);
 
@@ -159,12 +161,15 @@ export function MessageBubble({ message, onPlanProceed, sessionId }: Props) {
       <div className="flex-1 min-w-0" ref={bodyRef}>
         <div className="text-xs font-medium text-muted-foreground mb-1.5">
           {isUser ? t('you') : t('assistantName')}
-          {message.createdAt && (
-            <span className="ml-2 text-muted-foreground/70">
+          {/* 보낸 시각 — 브라우저 TZ + 이름. 마운트 전(pit.tz=null)에는 그리지 않는다. */}
+          {message.createdAt && pit.tz && (
+            <span className="ml-2 text-muted-foreground/70" title={pit.title}>
               {new Date(message.createdAt).toLocaleTimeString('ko-KR', {
                 hour: '2-digit',
                 minute: '2-digit',
-              })}
+                timeZone: pit.tz,
+              })}{' '}
+              {pit.abbr}
             </span>
           )}
         </div>

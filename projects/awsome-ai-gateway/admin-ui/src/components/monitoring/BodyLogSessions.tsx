@@ -3,7 +3,7 @@
 // Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
 
 import { useCallback, useEffect, useRef, useState, useTransition } from 'react';
-import { useLocale, useTranslations } from 'next-intl';
+import { useTranslations } from 'next-intl';
 import { ChevronDown, ChevronRight, Link2, RefreshCw } from 'lucide-react';
 
 import {
@@ -19,8 +19,8 @@ import { Badge } from '@/components/common/Badge';
 import { EmailText } from '@/components/common/UnverifiedEmailBadge';
 import { isSyntheticEmail } from '@/lib/userLabel';
 import { useToast } from '@/components/common/ToastProvider';
-import { useDisplayTz } from '@/components/common/ReportingTimezoneProvider';
-import { fmtDateTime, fmtTokensCompact } from '@/lib/utils/format';
+import { usePointInTime } from '@/components/common/usePointInTime';
+import { fmtTokensCompact } from '@/lib/utils/format';
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/common/Table';
 import { SkeletonTable } from '@/components/common/SkeletonTable';
 import { ErrorState } from '@/components/common/ErrorState';
@@ -85,8 +85,7 @@ export function BodyLogSessions({
 }) {
   const t = useTranslations('monitoring.bodyLogs');
   const tev = useTranslations('monitoring.events');
-  const locale = useLocale();
-  const tz = useDisplayTz();
+  const pit = usePointInTime();
   const { toast } = useToast();
 
   // usage status → 번역 라벨. 모르는 값은 원문 폴백(EventLog/뷰어와 동일 규칙).
@@ -542,8 +541,9 @@ export function BodyLogSessions({
                 <Badge tone="neutral">{t('heuristicSession')}</Badge>
               </span>
             )}
-            <span className="text-muted-foreground">
-              {fmtDateTime(selected.started_at, locale, tz)} → {fmtDateTime(selected.ended_at, locale, tz)}
+            {/* 아래 호출 행 시각도 같은 브라우저 TZ — 이름은 여기 한 번 적는다. */}
+            <span className="text-muted-foreground" title={pit.title}>
+              {pit.dateTime(selected.started_at)} → {pit.dateTimeZ(selected.ended_at)}
             </span>
             <span className="text-muted-foreground">
               {t('callsCount', { count: selected.call_count })}
@@ -622,8 +622,8 @@ export function BodyLogSessions({
                     <ChevronRight size={14} aria-hidden="true" />
                   )}
                   <span className="text-xs text-muted-foreground">#{i + 1}</span>
-                  <span className="whitespace-nowrap">
-                    {fmtDateTime(call.requested_at, locale, tz)}
+                  <span className="whitespace-nowrap" title={pit.title}>
+                    {pit.dateTime(call.requested_at)}
                   </span>
                   <span className="truncate">{call.model_alias ?? '-'}</span>
                   {/* 정상 호출에 매 행 색 배지를 달면 드문 오류가 색에 묻힌다 —
@@ -822,8 +822,8 @@ export function BodyLogSessions({
             <THead>
               <Tr>
                 <Th className="w-6"></Th>
-                <Th>{t('colEnded')}</Th>
-                <Th>{t('colStarted')}</Th>
+                <Th title={pit.title}>{pit.header(t('colEnded'))}</Th>
+                <Th title={pit.title}>{pit.header(t('colStarted'))}</Th>
                 <Th>{t('colUser')}</Th>
                 <Th>{t('colClient')}</Th>
                 <Th numeric>{t('colCalls')}</Th>
@@ -855,9 +855,9 @@ export function BodyLogSessions({
                       <ChevronRight size={14} aria-hidden="true" />
                     </button>
                   </Td>
-                  <Td className="whitespace-nowrap">{fmtDateTime(s.ended_at, locale, tz)}</Td>
+                  <Td className="whitespace-nowrap">{pit.dateTime(s.ended_at)}</Td>
                   <Td className="whitespace-nowrap text-muted-foreground">
-                    {fmtDateTime(s.started_at, locale, tz)}
+                    {pit.dateTime(s.started_at)}
                   </Td>
                   <Td
                     className="max-w-40 truncate text-sm"

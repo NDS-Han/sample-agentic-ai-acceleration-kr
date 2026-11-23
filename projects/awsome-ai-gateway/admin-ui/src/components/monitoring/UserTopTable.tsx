@@ -2,10 +2,9 @@
 
 // Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
 
-import { useLocale, useTranslations } from 'next-intl';
+import { useTranslations } from 'next-intl';
 import Link from 'next/link';
-import { fmtTime } from '@/lib/utils/format';
-import { useDisplayTz } from '@/components/common/ReportingTimezoneProvider';
+import { usePointInTime } from '@/components/common/usePointInTime';
 import type { MonitoringUsersResponse } from '@/lib/actions/monitoring';
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/common/Table';
 import { EmailText } from '@/components/common/UnverifiedEmailBadge';
@@ -20,8 +19,7 @@ function errorColor(pct: number) {
 
 export function UserTopTable({ data }: { data: MonitoringUsersResponse }) {
   const t = useTranslations('monitoring');
-  const locale = useLocale();
-  const tz = useDisplayTz();
+  const pit = usePointInTime();
 
   if (data.users.length === 0) {
     return (
@@ -47,7 +45,9 @@ export function UserTopTable({ data }: { data: MonitoringUsersResponse }) {
             <Th numeric>{t('table.tokens')}</Th>
             <Th numeric>{t('table.costUsd')}</Th>
             <Th numeric>{t('table.errorRate')}</Th>
-            <Th numeric>{t('table.lastRequest')}</Th>
+            <Th numeric title={pit.title}>
+              {pit.header(t('table.lastRequest'))}
+            </Th>
           </Tr>
         </THead>
         <TBody>
@@ -67,7 +67,7 @@ export function UserTopTable({ data }: { data: MonitoringUsersResponse }) {
               </Td>
               <Td numeric className="text-muted-foreground">
                 {u.last_request_at
-                  ? fmtTime(u.last_request_at, locale, tz)
+                  ? pit.time(u.last_request_at)
                   : '-'}
               </Td>
             </Tr>

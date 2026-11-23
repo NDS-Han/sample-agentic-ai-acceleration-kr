@@ -8,6 +8,7 @@ import type { AnalyticsFilterForm } from '@/types/api';
 import type { GroupByType } from '@/types/enums';
 import { currentCalendarMonth, monthsAgo } from '@/lib/utils/period';
 import { useReportingTz } from '@/components/common/ReportingTimezoneProvider';
+import { ReportingTzCaption } from '@/components/common/ReportingTzCaption';
 
 interface AnalyticsFilterProps {
   defaultValue: AnalyticsFilterForm;
@@ -190,6 +191,8 @@ export function AnalyticsFilter({ defaultValue, periods, currentMonth }: Analyti
           </option>
         ))}
       </select>
+      {/* 월·일 경계는 리포팅 TZ(배포 리전) 기준. */}
+      <ReportingTzCaption kind="period" className="basis-full" />
     </div>
   );
 }

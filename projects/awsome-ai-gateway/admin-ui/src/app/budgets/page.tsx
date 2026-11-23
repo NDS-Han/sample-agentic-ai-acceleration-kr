@@ -14,6 +14,7 @@ import { TeamAllocationView } from '@/components/budgets/TeamAllocationView';
 import { ErrorState } from '@/components/common/ErrorState';
 import { RegisterScreenContext } from '@/components/chat/RegisterScreenContext';
 import { pageTitle } from '@/lib/pageMetadata';
+import { ReportingTzCaption } from '@/components/common/ReportingTzCaption';
 
 interface BudgetsPageProps {
   // /users 패널의 "예산에서 편집" 딥링크 — ?team= 은 팀 행 펼침·스크롤,
@@ -179,8 +180,10 @@ export default async function BudgetsPage(props: BudgetsPageProps) {
           개별 사용자·팀 이름은 미동봉(PII). agent 는 query_db 로 상세 재조회 가능. */}
       <RegisterScreenContext page="예산 관리" period={`${period} 월간`} data={contextData} />
 
-      <div className="flex items-center justify-between">
+      <div>
         <h1 className="text-2xl font-bold">{t('title')}</h1>
+        {/* 예산 기간(월)·사용액 집계 경계는 리포팅 TZ(배포 리전) 기준. */}
+        <ReportingTzCaption kind="period" className="mt-1" />
       </div>
 
       {isAdmin ? (

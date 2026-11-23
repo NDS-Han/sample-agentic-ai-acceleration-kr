@@ -37,6 +37,7 @@ import {
 } from '@/lib/utils/trendSeries';
 import { reportingNowParts } from '@/lib/utils/period';
 import { useReportingTz } from '@/components/common/ReportingTimezoneProvider';
+import { ReportingTzCaption } from '@/components/common/ReportingTzCaption';
 
 export { defaultSelectedTeamIds };
 
@@ -178,7 +179,9 @@ export function CostTrendCard({ trends, trendsByTeam = [], range }: CostTrendCar
     // 늘어난 높이를 차트가 채우도록 — 카드 하단에 빈 밴드가 생기지 않는다.
     <div className="glass glass-hover flex h-full flex-col rounded-apple p-5">
       <div className="text-sm font-semibold tracking-tight">{t('costTrendTitle')}</div>
-      <div className="mb-3 text-xs text-muted-foreground">{t('costTrendSubtitle')}</div>
+      <div className="text-xs text-muted-foreground">{t('costTrendSubtitle')}</div>
+      {/* 일별 버킷은 리포팅 TZ(배포 리전) 기준 — 시점 시각(브라우저 TZ)과 구분. */}
+      <ReportingTzCaption kind="dates" className="mb-3" />
 
       {/* 범례는 이 칩 줄 하나 — 예전엔 차트 아래 recharts Legend 가 같은 팀을
           한 번 더 나열했다. 합계·기타는 토글 대상이 아니라 정적 항목으로 둔다. */}

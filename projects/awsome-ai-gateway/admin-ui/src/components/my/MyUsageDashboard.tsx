@@ -26,6 +26,7 @@ import { AlertLevel } from '@/types/enums';
 import { MyBudgetCard } from '@/components/my/MyBudgetCard';
 import { ErrorState } from '@/components/common/ErrorState';
 import { Usd } from '@/components/common/Usd';
+import { ReportingTzCaption } from '@/components/common/ReportingTzCaption';
 
 const compact = new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 });
 
@@ -177,6 +178,7 @@ export function MyUsageDashboard({
                     />
                   </AreaChart>
                 </ResponsiveContainer>
+                <ReportingTzCaption kind="dates" className="mt-1" />
                 <details className="mt-3 group">
                   <summary className="cursor-pointer select-none text-xs text-muted-foreground hover:text-foreground">
                     {t('dailyDetail')}

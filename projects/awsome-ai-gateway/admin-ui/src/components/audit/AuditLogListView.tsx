@@ -9,12 +9,11 @@ import { ChevronDown, ChevronRight } from 'lucide-react';
 import { listAuditLogsAction } from '@/lib/actions/audit';
 import { baseAction, isConfirmedAction } from '@/lib/audit/action';
 import { useToast } from '@/components/common/ToastProvider';
-import { useDisplayTz } from '@/components/common/ReportingTimezoneProvider';
+import { usePointInTime } from '@/components/common/usePointInTime';
 import { Badge, RoleBadge } from '@/components/common/Badge';
 import { UnverifiedEmailBadge } from '@/components/common/UnverifiedEmailBadge';
 import { Table, THead, TBody, Tr, Th, Td, TEmpty } from '@/components/common/Table';
 import { Button } from '@/components/common/Button';
-import { fmtDateTime } from '@/lib/utils/format';
 import { isSyntheticEmail, userLabel } from '@/lib/userLabel';
 import { ChangesPanel } from './ChangesPanel';
 import type { AuditLogItem } from '@/types/entities';
@@ -80,7 +79,7 @@ export function AuditLogListView({
   const t = useTranslations('audit');
   const tAuth = useTranslations('auth');
   const locale = useLocale();
-  const tz = useDisplayTz();
+  const pit = usePointInTime();
   const { toast } = useToast();
   const [items, setItems] = useState(initialItems);
   const [cursor, setCursor] = useState(initialCursor);
@@ -187,7 +186,7 @@ export function AuditLogListView({
         <THead>
           <Tr>
             <Th className="w-6"></Th>
-            <Th>{t('colTime')}</Th>
+            <Th title={pit.title}>{pit.header(t('colTime'))}</Th>
             <Th>{t('colActor')}</Th>
             <Th>{t('colAction')}</Th>
             <Th>{t('colTarget')}</Th>
@@ -224,7 +223,7 @@ export function AuditLogListView({
                   </button>
                 </Td>
                 <Td className="num whitespace-nowrap text-muted-foreground" title={it.timestamp}>
-                  {fmtDateTime(it.timestamp, locale === 'ko' ? 'ko-KR' : 'en-US', tz)}
+                  {pit.dateTime(it.timestamp, locale === 'ko' ? 'ko-KR' : 'en-US')}
                 </Td>
                 <Td>
                   <div className="flex items-center gap-2">

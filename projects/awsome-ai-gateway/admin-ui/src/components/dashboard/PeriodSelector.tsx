@@ -10,6 +10,7 @@ import {
 } from '@/lib/utils/period';
 import { useReportingTz } from '@/components/common/ReportingTimezoneProvider';
 import { SegmentedGroup, segmentedItemClass } from '@/components/common/Segmented';
+import { ReportingTzCaption } from '@/components/common/ReportingTzCaption';
 
 interface PeriodSelectorProps {
   periods: string[]; // 선택 가능한 월 (YYYY-MM), 최신순
@@ -63,57 +64,61 @@ export function PeriodSelector({ periods, current }: PeriodSelectorProps) {
   const btn = segmentedItemClass;
 
   return (
-    <SegmentedGroup label={t('periodSelect')}>
-      <button
-        type="button"
-        onClick={() => go(thisMonth)}
-        aria-pressed={current === thisMonth}
-        className={btn(current === thisMonth)}
-      >
-        {t('thisMonth')}
-      </button>
-      <button
-        type="button"
-        onClick={() => go(lastMonth)}
-        aria-pressed={current === lastMonth}
-        className={btn(current === lastMonth)}
-      >
-        {t('lastMonth')}
-      </button>
+    // 월 경계는 리포팅 TZ(배포 리전) 기준 — 선택기 아래 한 번 적는다.
+    <div className="flex flex-col items-start gap-0.5 sm:items-end">
+      <SegmentedGroup label={t('periodSelect')}>
+        <button
+          type="button"
+          onClick={() => go(thisMonth)}
+          aria-pressed={current === thisMonth}
+          className={btn(current === thisMonth)}
+        >
+          {t('thisMonth')}
+        </button>
+        <button
+          type="button"
+          onClick={() => go(lastMonth)}
+          aria-pressed={current === lastMonth}
+          className={btn(current === lastMonth)}
+        >
+          {t('lastMonth')}
+        </button>
 
-      {dropdownMonths.length > 0 && (
-        <div className={`relative ${dropdownActive ? 'text-primary' : 'text-muted-foreground'}`}>
-          <select
-            aria-label={t('periodSelectMonth')}
-            value={dropdownActive ? current : ''}
-            onChange={(e) => {
-              if (e.target.value) go(e.target.value);
-            }}
-            className={[btn(dropdownActive), 'appearance-none pr-7 cursor-pointer', dropdownActive ? '' : 'bg-transparent'].join(' ')}
-          >
-            <option value="" disabled>
-              {t('periodSelect')}
-            </option>
-            {dropdownMonths.map((p) => (
-              <option key={p} value={p}>
-                {monthLabel(p)}
+        {dropdownMonths.length > 0 && (
+          <div className={`relative ${dropdownActive ? 'text-primary' : 'text-muted-foreground'}`}>
+            <select
+              aria-label={t('periodSelectMonth')}
+              value={dropdownActive ? current : ''}
+              onChange={(e) => {
+                if (e.target.value) go(e.target.value);
+              }}
+              className={[btn(dropdownActive), 'appearance-none pr-7 cursor-pointer', dropdownActive ? '' : 'bg-transparent'].join(' ')}
+            >
+              <option value="" disabled>
+                {t('periodSelect')}
               </option>
-            ))}
-          </select>
-          <svg
-            aria-hidden="true"
-            className="pointer-events-none absolute right-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2.5"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          >
-            <polyline points="6 9 12 15 18 9" />
-          </svg>
-        </div>
-      )}
-    </SegmentedGroup>
+              {dropdownMonths.map((p) => (
+                <option key={p} value={p}>
+                  {monthLabel(p)}
+                </option>
+              ))}
+            </select>
+            <svg
+              aria-hidden="true"
+              className="pointer-events-none absolute right-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2.5"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <polyline points="6 9 12 15 18 9" />
+            </svg>
+          </div>
+        )}
+      </SegmentedGroup>
+      <ReportingTzCaption kind="period" />
+    </div>
   );
 }

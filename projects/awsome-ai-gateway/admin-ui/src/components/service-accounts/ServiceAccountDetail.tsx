@@ -26,6 +26,7 @@ import { modelDisplay } from '@/lib/utils/modelLabel';
 import { monthsAgo } from '@/lib/utils/period';
 import type { ServiceAccountUsageResponse } from '@/types/entities';
 import { Usd } from '@/components/common/Usd';
+import { ReportingTzCaption } from '@/components/common/ReportingTzCaption';
 
 interface Props {
   data: ServiceAccountUsageResponse;
@@ -248,6 +249,8 @@ export function ServiceAccountDetail({ data, period }: Props) {
               ))}
             </div>
           </div>
+          {/* 일별 버킷은 리포팅 TZ(배포 리전) 기준. */}
+          <ReportingTzCaption kind="dates" className="mb-1" />
           {data.daily.length > 0 ? (
             <ResponsiveContainer width="100%" height={260}>
               <AreaChart data={data.daily}>

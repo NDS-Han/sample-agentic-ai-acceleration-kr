@@ -2,9 +2,9 @@
 
 // Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
 
-import { useLocale, useTranslations } from 'next-intl';
-import { fmtDateTime, fmtUsd, usdTitle } from '@/lib/utils/format';
-import { useDisplayTz } from '@/components/common/ReportingTimezoneProvider';
+import { useTranslations } from 'next-intl';
+import { fmtUsd, usdTitle } from '@/lib/utils/format';
+import { usePointInTime } from '@/components/common/usePointInTime';
 import type { MonitoringOverviewResponse } from '@/lib/actions/monitoring';
 
 function StatCard({
@@ -29,8 +29,7 @@ function StatCard({
 
 export function MonitoringOverview({ data }: { data: MonitoringOverviewResponse }) {
   const t = useTranslations('monitoring');
-  const locale = useLocale();
-  const tz = useDisplayTz();
+  const pit = usePointInTime();
   const h = data.last_1h;
 
   return (
@@ -39,8 +38,9 @@ export function MonitoringOverview({ data }: { data: MonitoringOverviewResponse 
         <h2 className="text-base font-semibold">{t('lastHourSummary')}</h2>
         {/* 한 시점이라 보는 사람의 브라우저 TZ 로 그린다(리포팅 TZ 는 집계 경계용).
             TZ 이름을 같이 적어 어느 시계 기준인지 분명히 한다. */}
-        <span className="text-xs text-muted-foreground" title={data.timestamp}>
-          {t('asOf', { time: fmtDateTime(data.timestamp, locale, tz), tz })}
+        <span className="text-xs text-muted-foreground" title={pit.title}>
+          {/* 마운트 전에는 비워 둔다 — 파드 TZ 로 그린 시각이 잠깐 보이지 않게. */}
+          {pit.tz ? t('asOf', { time: pit.dateTime(data.timestamp), tz: pit.abbr }) : '\u00a0'}
         </span>
       </div>
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4">

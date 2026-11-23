@@ -2,11 +2,10 @@
 
 // Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
 
-import { useLocale, useTranslations } from 'next-intl';
+import { useTranslations } from 'next-intl';
 import Link from 'next/link';
 import { AlertTriangle, AlertCircle } from 'lucide-react';
-import { useDisplayTz } from '@/components/common/ReportingTimezoneProvider';
-import { fmtTime } from '@/lib/utils/format';
+import { usePointInTime } from '@/components/common/usePointInTime';
 import type { MonitoringModelsResponse } from '@/lib/actions/monitoring';
 import { Badge } from '@/components/common/Badge';
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/common/Table';
@@ -27,8 +26,7 @@ function SeverityIcon({ pct }: { pct: number }) {
 
 export function ModelHealthTable({ data }: { data: MonitoringModelsResponse }) {
   const t = useTranslations('monitoring');
-  const locale = useLocale();
-  const tz = useDisplayTz();
+  const pit = usePointInTime();
 
   if (data.models.length === 0) {
     return (
@@ -54,7 +52,9 @@ export function ModelHealthTable({ data }: { data: MonitoringModelsResponse }) {
             <Th numeric>{t('table.requests')}</Th>
             <Th numeric>{t('table.avgLatency')}</Th>
             <Th numeric>{t('table.errorRate')}</Th>
-            <Th numeric>{t('table.lastRequest')}</Th>
+            <Th numeric title={pit.title}>
+              {pit.header(t('table.lastRequest'))}
+            </Th>
           </Tr>
         </THead>
         <TBody>
@@ -82,7 +82,7 @@ export function ModelHealthTable({ data }: { data: MonitoringModelsResponse }) {
               </Td>
               <Td numeric className="text-muted-foreground">
                 {m.last_request_at
-                  ? fmtTime(m.last_request_at, locale, tz)
+                  ? pit.time(m.last_request_at)
                   : '-'}
               </Td>
             </Tr>
