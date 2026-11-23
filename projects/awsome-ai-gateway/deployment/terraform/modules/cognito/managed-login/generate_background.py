@@ -19,6 +19,11 @@
   여백(81px)인 FORM_COLUMN_PX 폭으로 두고 나머지를 패널로 채운다 —
   CSS width: calc() (SVG2 기하 속성). CSS 를 무시하는 렌더러에서는 width
   속성(50%)으로 떨어진다.
+* 움직임 — SMIL(animate/animateMotion)은 검증에서 거부되므로 <style> 의 CSS
+  @keyframes 로만 만든다: 트래픽 점은 엣지를 따라 translate, 허브 링은
+  퍼지며 사라지고, 일부 노드는 깜빡인다. 각 요소의 정지 위치(cx/cy)는
+  애니메이션 중간 프레임이라 CSS 를 무시하는 렌더러에서는 정지 그래프로
+  보인다. prefers-reduced-motion 이면 애니메이션을 끈다.
 * 좁은 화면(NARROW_PX 미만) — 반반 경계에 폼 카드가 걸치므로, 패널이 화면
   전체를 덮고 문구는 숨겨 어두운 그래프 위에 흰 폼 카드만 뜨게 한다.
   (media query 는 SVG 뷰포트 = 배경 영역 = 페이지 너비 기준)
@@ -54,10 +59,24 @@ def _line(a, b, stroke, width):
             f'stroke="{stroke}" stroke-width="{width}"/>')
 
 
-def _packet(a, b, color, t):
-    """엣지 위 t(0~1) 지점의 정지 트래픽 점 — 애니메이션의 한 프레임."""
+PACKET_KEYFRAMES: list[str] = []
+
+
+def _packet(a, b, color, t, dur):
+    """엣지 위 t(0~1) 지점의 트래픽 점 — 정지 위치가 곧 애니메이션의 한 프레임.
+
+    CSS 로 시작 노드(-t)에서 끝 노드(1-t)까지 translate 한다. 음수 delay 로
+    로드 순간부터 t 지점을 지나는 중인 것처럼 보이게 해 점들이 엇갈린다."""
     (x1, y1), (x2, y2) = NODES[a], NODES[b]
-    return (f'<circle cx="{x1 + (x2 - x1) * t:.1f}" cy="{y1 + (y2 - y1) * t:.1f}" '
+    dx, dy = x2 - x1, y2 - y1
+    n = len(PACKET_KEYFRAMES)
+    PACKET_KEYFRAMES.append(
+        f"@keyframes pk{n}{{"
+        f"0%{{transform:translate({-dx * t:.1f}px,{-dy * t:.1f}px);opacity:0}}"
+        "12%{opacity:1}85%{opacity:1}"
+        f"100%{{transform:translate({dx * (1 - t):.1f}px,{dy * (1 - t):.1f}px);opacity:0}}}}"
+        f".pk{n}{{animation:pk{n} {dur:.1f}s linear {-dur * t:.2f}s infinite}}")
+    return (f'<circle class="pk{n}" cx="{x1 + dx * t:.1f}" cy="{y1 + dy * t:.1f}" '
             f'r="2.8" fill="{color}"/>')
 
 
@@ -66,9 +85,10 @@ def graph() -> str:
     el += [_line(c, "hub", "#2b3332", 1.2) for c in CLIENTS]
     el += [_line("hub", m, "#24504b", 1.2) for m in MODELS]
     # client→hub·hub→model 방향으로 엇갈린 위치의 정지 트래픽 점들
-    el += [_packet(c, "hub", "#5eead4", 0.2 + 0.25 * (i % 3))
+    PACKET_KEYFRAMES.clear()
+    el += [_packet(c, "hub", "#5eead4", 0.2 + 0.25 * (i % 3), 3.2 + 0.4 * (i % 3))
            for i, c in enumerate(CLIENTS)]
-    el += [_packet("hub", m, "#2dd4bf", 0.35 + 0.3 * i)
+    el += [_packet("hub", m, "#2dd4bf", 0.35 + 0.3 * i, 2.2 + 0.3 * i)
            for i, m in enumerate(MODELS)]
     for k, (x, y) in NODES.items():
         if k == "hub":
@@ -76,10 +96,11 @@ def graph() -> str:
         stroke = "#2f6e67" if k.startswith("m") else "#3a3a3a"
         # twinkle 노드는 살짝 밝은 채움으로 구분
         fill = "#2a4a44" if k in TWINKLE else "#1c1c1c"
-        el.append(f'<circle cx="{x}" cy="{y}" r="4" fill="{fill}" '
+        cls = ' class="tw"' if k in TWINKLE else ""
+        el.append(f'<circle{cls} cx="{x}" cy="{y}" r="4" fill="{fill}" '
                   f'stroke="{stroke}" stroke-width="1.4"/>')
     hx, hy = NODES["hub"]
-    el.append(f'<circle cx="{hx}" cy="{hy}" r="22" fill="none" '
+    el.append(f'<circle class="ring" cx="{hx}" cy="{hy}" r="22" fill="none" '
               f'stroke="#2dd4bf" stroke-width="1" opacity="0.18"/>')
     el.append(f'<circle cx="{hx}" cy="{hy}" r="8" fill="#0f766e" '
               f'stroke="#5eead4" stroke-width="1.6"/>')
@@ -91,22 +112,36 @@ FORM_COLUMN_PX = 402 + 81 * 2
 # 이보다 좁으면 패널 문구가 폼 카드와 겹친다 — 전체 어두운 배경으로 전환
 NARROW_PX = 1024
 
-STYLE = (
+LAYOUT_STYLE = (
     f".panel{{width:calc(100% - {FORM_COLUMN_PX}px)}}"
     f"@media (max-width:{NARROW_PX - 1}px){{.panel{{width:100%}}"
     ".copy{display:none}}"
 )
+MOTION_STYLE = (
+    ".ring{transform-box:fill-box;transform-origin:center;"
+    "animation:ring 2.8s ease-out infinite}"
+    "@keyframes ring{0%{transform:scale(.4);opacity:.55}"
+    "100%{transform:scale(1.6);opacity:0}}"
+    ".tw{animation:tw 5s ease-in-out infinite}"
+    "@keyframes tw{0%,100%{opacity:1}50%{opacity:.45}}"
+)
+REDUCED_MOTION = (
+    "@media (prefers-reduced-motion:reduce){"
+    ".ring,.tw,[class^=pk]{animation:none}}"
+)
 
 
 def build() -> str:
+    g = graph()  # PACKET_KEYFRAMES 를 채운다
+    style = LAYOUT_STYLE + MOTION_STYLE + "".join(PACKET_KEYFRAMES) + REDUCED_MOTION
     return (
         '<svg xmlns="http://www.w3.org/2000/svg" width="100%" height="100%">'
-        f'<style>{STYLE}</style>'
+        f'<style>{style}</style>'
         '<rect width="100%" height="100%" fill="#ffffff"/>'
         f'<rect class="panel" width="50%" height="100%" fill="{PANEL}"/>'
         # 그래프 — 패널을 꽉 채우고 넘치는 부분은 잘라낸다
         '<svg class="panel" x="0" y="0" width="50%" height="100%" viewBox="0 0 640 800" '
-        f'preserveAspectRatio="xMidYMid slice">{graph()}</svg>'
+        f'preserveAspectRatio="xMidYMid slice">{g}</svg>'
         # 문구 — 잘리지 않게 왼쪽 가운데 앵커
         '<svg class="panel copy" x="0" y="0" width="50%" height="100%" viewBox="0 0 640 800" '
         'preserveAspectRatio="xMinYMid meet">'
