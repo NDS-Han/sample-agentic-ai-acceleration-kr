@@ -61,6 +61,43 @@ export function monthsAgo(n: number, tz = reportingTimezone()): string {
   return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
 }
 
+/**
+ * 임의 일자 구간(Analytics 직접 입력)의 최대 길이 — 양끝 포함 일수, 1년(윤년 포함).
+ * admin-api `usage_filters.MAX_RANGE_DAYS` 와 같은 값이어야 한다: UI 는 날짜 선택기
+ * min/max·안내로, API 는 422 로 막는다. trendSeries 의 날짜 채움 가드도 이 값을 쓴다.
+ */
+export const MAX_RANGE_DAYS = 366;
+
+const ISO_DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * 'YYYY-MM-DD' 에 달력 일수 n 을 더한다. 날짜 문자열을 UTC 자정으로 두고 UTC 로 더하므로
+ * 실행 환경 TZ·DST 와 무관하다(달력 날짜 단위 — 24h 밀리초를 현지 시각에 더하지 않음).
+ * 형식이 아니면 null.
+ */
+export function addDaysIso(day: string, n: number): string | null {
+  if (!ISO_DAY_RE.test(day)) return null;
+  const [y, m, d] = day.split('-').map(Number);
+  const t = new Date(Date.UTC(y, m - 1, d + n));
+  return Number.isNaN(t.getTime()) ? null : t.toISOString().slice(0, 10);
+}
+
+/** [start, end] 양끝 포함 일수. 형식이 아니면 null. */
+export function rangeDaysInclusive(start: string, end: string): number | null {
+  if (!ISO_DAY_RE.test(start) || !ISO_DAY_RE.test(end)) return null;
+  const s = Date.parse(`${start}T00:00:00Z`);
+  const e = Date.parse(`${end}T00:00:00Z`);
+  if (!Number.isFinite(s) || !Number.isFinite(e)) return null;
+  return Math.round((e - s) / 86_400_000) + 1;
+}
+
+/** 구간이 MAX_RANGE_DAYS 를 넘는지(형식이 아니면 false — 형식 오류는 다른 안내). */
+export function isRangeTooLong(start: string | null | undefined, end: string | null | undefined): boolean {
+  if (!start || !end) return false;
+  const days = rangeDaysInclusive(start, end);
+  return days !== null && days > MAX_RANGE_DAYS;
+}
+
 /** 문자열이 'YYYY-MM' 월 형식인지. */
 export function isMonth(value: string | null | undefined): value is string {
   return !!value && /^\d{4}-\d{2}$/.test(value);

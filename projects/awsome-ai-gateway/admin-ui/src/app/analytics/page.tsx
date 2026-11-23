@@ -21,7 +21,7 @@ import { RefreshButton } from '@/components/analytics/RefreshButton';
 import { ModelCostDetail } from '@/components/analytics/ModelCostDetail';
 import { fetchAvailablePeriods } from '@/lib/actions/dashboard';
 import { fetchModelCostAnalytics } from '@/lib/actions/analytics-models';
-import { isMonth, resolveMonth } from '@/lib/utils/period';
+import { isMonth, isRangeTooLong, MAX_RANGE_DAYS, resolveMonth } from '@/lib/utils/period';
 import { pageTitle } from '@/lib/pageMetadata';
 
 // Next 15: searchParams 는 Promise — 페이지에서 await 한 뒤 resolve 된 값을 쓴다.
@@ -174,6 +174,10 @@ export default async function AnalyticsPage(props: AnalyticsPageProps) {
     !!filter.start_date &&
     !!filter.end_date &&
     filter.start_date > filter.end_date;
+  // 1년(MAX_RANGE_DAYS) 초과 구간 — API 가 422 로 거부하므로 섹션마다 에러 카드를
+  // 띄우는 대신 조회하지 않고 한 번 안내한다(필터의 인라인 안내와 같은 문구).
+  const customRangeTooLong =
+    filter.period === 'custom' && !customRangeInvalid && isRangeTooLong(filter.start_date, filter.end_date);
   // 차트 key: custom 이면 날짜 구간, 아니면 월 — 변경 시 remount + 재요청.
   const sectionKey =
     filter.period === 'custom'
@@ -203,7 +207,7 @@ export default async function AnalyticsPage(props: AnalyticsPageProps) {
 
       {/* custom 구간은 이관(seed) 사용량이 빠진다 — 월 버킷 개념이라 임의 일자에
           사상 불가. 차트가 조용히 달라 보이는 것보다 이유를 표시하는 편이 낫다. */}
-      {filter.period === 'custom' && !customRangeInvalid && (
+      {filter.period === 'custom' && !customRangeInvalid && !customRangeTooLong && (
         <div className="rounded-apple border border-border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
           {t('customSeedHint')}
         </div>
@@ -228,9 +232,9 @@ export default async function AnalyticsPage(props: AnalyticsPageProps) {
       )}
 
       {/* 각 섹션은 개별 Suspense. key 에 적용 월/날짜 포함 — 변경 시 재요청 */}
-      {customRangeInvalid ? (
+      {customRangeInvalid || customRangeTooLong ? (
         <div className="rounded-apple border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-foreground">
-          {t('invalidDateRange')}
+          {customRangeInvalid ? t('invalidDateRange') : t('rangeTooLong', { max: MAX_RANGE_DAYS })}
         </div>
       ) : (
         <>

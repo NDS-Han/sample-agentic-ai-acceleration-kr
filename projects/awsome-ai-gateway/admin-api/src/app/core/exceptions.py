@@ -35,6 +35,19 @@ class ValidationError(AppError):
         super().__init__(message=message, code="validation_error")
 
 
+class DateRangeTooLongError(ValidationError):
+    """custom 일자 구간이 상한(MAX_RANGE_DAYS)을 넘음 — **422**.
+
+    형식·달력·순서 오류(ValidationError → 400)와 달리 입력은 해석 가능하지만 처리
+    정책상 받지 않는 값이라 422 로 구분한다. ValidationError 의 하위형이라 기존
+    `except ValidationError` 호출부는 그대로 잡는다.
+    """
+
+    def __init__(self, message: str):
+        super().__init__(message)
+        self.code = "date_range_too_long"
+
+
 class BudgetExceededError(AppError):
     def __init__(self, message: str = "Budget limit exceeded"):
         super().__init__(message=message, code="budget_exceeded")

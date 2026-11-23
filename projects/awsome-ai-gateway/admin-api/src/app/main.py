@@ -29,6 +29,7 @@ from app.core.exceptions import (
     BudgetRuleError,
     ConfirmationRequiredError,
     ConflictError,
+    DateRangeTooLongError,
     ForbiddenError,
     NotFoundError,
     STSVerificationError,
@@ -417,6 +418,14 @@ def register_exception_handlers(app: FastAPI) -> None:
         return JSONResponse(
             status_code=403,
             content={"error": {"type": "forbidden", "message": exc.message, "code": exc.code}},
+        )
+
+    # ValidationError 보다 먼저(하위형) — Starlette 는 MRO 순으로 핸들러를 찾는다.
+    @app.exception_handler(DateRangeTooLongError)
+    async def date_range_too_long_handler(request: Request, exc: DateRangeTooLongError):
+        return JSONResponse(
+            status_code=422,
+            content={"error": {"type": "validation_error", "message": exc.message, "code": exc.code}},
         )
 
     @app.exception_handler(ValidationError)

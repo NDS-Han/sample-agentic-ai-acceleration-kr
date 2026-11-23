@@ -908,6 +908,8 @@
     "costSeriesOther": "Other",
     "date": "Date",
     "invalidDateRange": "The start date must be before the end date. Please adjust the date range.",
+    "rangeTooLong": "The date range can be at most {max, number} days (1 year). Shorten the range.",
+    "rangeMaxHint": "Up to {max, number} days (1 year)",
     "customSeedHint": "Custom ranges show recorded usage only — amounts migrated from earlier data aren't included.",
     "clientFilterLabel": "App filter applied:",
     "clientFilterClear": "Clear filter"

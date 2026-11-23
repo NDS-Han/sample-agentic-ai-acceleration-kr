@@ -6,7 +6,13 @@ import { useRouter, usePathname } from 'next/navigation';
 import { useLocale, useTranslations } from 'next-intl';
 import type { AnalyticsFilterForm } from '@/types/api';
 import type { GroupByType } from '@/types/enums';
-import { currentCalendarMonth, monthsAgo } from '@/lib/utils/period';
+import {
+  addDaysIso,
+  currentCalendarMonth,
+  isRangeTooLong,
+  MAX_RANGE_DAYS,
+  monthsAgo,
+} from '@/lib/utils/period';
 import { useReportingTz } from '@/components/common/ReportingTimezoneProvider';
 import { ReportingTzCaption } from '@/components/common/ReportingTzCaption';
 
@@ -68,6 +74,14 @@ export function AnalyticsFilter({ defaultValue, periods, currentMonth }: Analyti
   function handleEndDateChange(end_date: string) {
     router.push(`${pathname}?${buildSearchParams({ end_date })}`);
   }
+
+  // 직접 입력 구간 상한(1년) — 선택기 min/max 로 1차 차단. 상대 날짜가 없으면 제한 없음.
+  // URL 직접 입력 등으로 이미 넘은 구간은 아래 인라인 안내(페이지도 조회를 막는다).
+  const startDate = defaultValue.start_date ?? '';
+  const endDate = defaultValue.end_date ?? '';
+  const startMin = endDate ? addDaysIso(endDate, -(MAX_RANGE_DAYS - 1)) ?? undefined : undefined;
+  const endMax = startDate ? addDaysIso(startDate, MAX_RANGE_DAYS - 1) ?? undefined : undefined;
+  const rangeTooLong = isRangeTooLong(startDate, endDate);
 
   // 드롭다운 = 이번/지난 달 제외한 과거 데이터 월.
   const dropdownMonths = periods.filter((p) => p !== thisMonth && p !== lastMonth);
@@ -159,8 +173,12 @@ export function AnalyticsFilter({ defaultValue, periods, currentMonth }: Analyti
             id="start_date"
             type="date"
             aria-label={t('startDate')}
-            defaultValue={defaultValue.start_date ?? ''}
-            max={defaultValue.end_date ?? undefined}
+            defaultValue={startDate}
+            min={startMin}
+            max={endDate || undefined}
+            title={t('rangeMaxHint', { max: MAX_RANGE_DAYS })}
+            aria-invalid={rangeTooLong || undefined}
+            aria-describedby={rangeTooLong ? 'range_too_long' : undefined}
             onChange={(e) => handleStartDateChange(e.target.value)}
             className="rounded-apple-md border border-input bg-background px-3 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-ring"
           />
@@ -169,12 +187,22 @@ export function AnalyticsFilter({ defaultValue, periods, currentMonth }: Analyti
             id="end_date"
             type="date"
             aria-label={t('endDate')}
-            defaultValue={defaultValue.end_date ?? ''}
-            min={defaultValue.start_date ?? undefined}
+            defaultValue={endDate}
+            min={startDate || undefined}
+            max={endMax}
+            title={t('rangeMaxHint', { max: MAX_RANGE_DAYS })}
+            aria-invalid={rangeTooLong || undefined}
+            aria-describedby={rangeTooLong ? 'range_too_long' : undefined}
             onChange={(e) => handleEndDateChange(e.target.value)}
             className="rounded-apple-md border border-input bg-background px-3 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-ring"
           />
         </div>
+      )}
+
+      {isCustom && rangeTooLong && (
+        <p id="range_too_long" role="alert" className="basis-full text-xs text-destructive">
+          {t('rangeTooLong', { max: MAX_RANGE_DAYS })}
+        </p>
       )}
 
       {/* 그룹 기준 */}

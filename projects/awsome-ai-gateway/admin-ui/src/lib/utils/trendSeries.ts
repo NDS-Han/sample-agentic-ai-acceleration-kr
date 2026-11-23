@@ -21,6 +21,8 @@
  *  - 합계 시리즈는 trends 값 그대로 — 팀 시리즈 합산으로 재계산하지 않는다.
  */
 
+import { MAX_RANGE_DAYS } from '@/lib/utils/period';
+
 export interface TrendPoint {
   date: string;
   cost_usd: number;
@@ -108,13 +110,17 @@ function rankTeams(trendsByTeam: TeamTrendSeries[]): RankedTeam[] {
 
 const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
 const DAY_MS = 86_400_000;
-// 가드 — 잘못된 입력(수년 범위)으로 축이 수천 칸이 되지 않게.
-const MAX_FILL_DAYS = 366;
 
 /**
  * 정렬된 날짜 목록의 첫날~마지막날 사이 빠진 날을 채운다. 모든 값이
- * YYYY-MM-DD 일 때만 — 다른 버킷 형식(월/시간)은 그대로 둔다. UTC 산술이라
- * 브라우저 TZ·DST 와 무관하다(날짜 문자열 자체가 리포팅 TZ 기준 버킷).
+ * YYYY-MM-DD 일 때만 — 다른 버킷 형식(월/시간)은 그대로 둔다.
+ *
+ * DST: 날짜 문자열 자체가 리포팅 TZ 의 달력 날짜 버킷이므로 **달력 날짜로** 센다 —
+ * 각 날짜를 UTC 자정으로 두고 UTC 로 하루씩 더한다(UTC 에는 DST 가 없어 하루 = 정확히
+ * 24h). 현지 자정에 24h 를 더하면 전환일(23h/25h)에 날짜가 건너뛰거나 겹친다.
+ *
+ * 가드: 구간이 MAX_RANGE_DAYS(API 의 custom 구간 상한과 같은 값)를 넘으면 채우지 않는다
+ * — 잘못된 입력(수년 범위)으로 축이 수천 칸이 되지 않게.
  */
 export function fillDateGaps(sorted: string[]): string[] {
   if (sorted.length < 2 || !sorted.every((d) => ISO_DAY.test(d))) return sorted;
@@ -122,7 +128,7 @@ export function fillDateGaps(sorted: string[]): string[] {
   const end = Date.parse(`${sorted[sorted.length - 1]}T00:00:00Z`);
   if (!Number.isFinite(start) || !Number.isFinite(end)) return sorted;
   const span = Math.round((end - start) / DAY_MS);
-  if (span + 1 <= sorted.length || span >= MAX_FILL_DAYS) return sorted;
+  if (span + 1 <= sorted.length || span + 1 > MAX_RANGE_DAYS) return sorted;
   return Array.from({ length: span + 1 }, (_, i) =>
     new Date(start + i * DAY_MS).toISOString().slice(0, 10),
   );
