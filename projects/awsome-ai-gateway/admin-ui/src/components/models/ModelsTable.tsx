@@ -25,9 +25,9 @@ import { Button } from '@/components/common/Button';
 import { Table, THead, TBody, Tr, Th, Td, TEmpty } from '@/components/common/Table';
 import { InfoTooltip } from '@/components/common/InfoTooltip';
 import { fmtPricePerM } from '@/lib/utils/pricing';
-import { fmtDate, fmtTokensCompact } from '@/lib/utils/format';
+import { fmtTokensCompact } from '@/lib/utils/format';
 import { modelDisplay } from '@/lib/utils/modelLabel';
-import { useReportingTz } from '@/components/common/ReportingTimezoneProvider';
+import { usePointInTime } from '@/components/common/usePointInTime';
 import { CreateModelDialog } from './CreateModelDialog';
 import { DeactivateModelDialog } from './DeactivateModelDialog';
 import { DeleteModelDialog } from './DeleteModelDialog';
@@ -85,7 +85,7 @@ function PriceCell({ hasPricing, per1k, muted }: { hasPricing: boolean; per1k: n
 export function ModelsTable({ models }: ModelsTableProps) {
   const t = useTranslations('models');
   const { toast } = useToast();
-  const tz = useReportingTz();
+  const pit = usePointInTime();
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [copiedAlias, setCopiedAlias] = useState<string | null>(null);
   // 같은 transition 이 모든 행을 pending 시키는 결함 — 활성화 중인 alias 만 추적.
@@ -430,8 +430,8 @@ export function ModelsTable({ models }: ModelsTableProps) {
                                 </div>
                                 <div className="flex items-baseline justify-between gap-4">
                                   <dt className="text-muted-foreground">{t('registered')}</dt>
-                                  <dd className="num">
-                                    {model.created_at ? fmtDate(model.created_at, tz) : '—'}
+                                  <dd className="num" title={pit.title}>
+                                    {model.created_at ? pit.stampZ(model.created_at) : '—'}
                                   </dd>
                                 </div>
                               </dl>

@@ -25,6 +25,7 @@ vi.mock('@/components/common/ToastProvider', () => ({
 
 vi.mock('@/components/common/ReportingTimezoneProvider', () => ({
   useReportingTz: () => 'Asia/Seoul',
+  useIsClient: () => true,
 }));
 
 const ACTIVE_KEY: VirtualKeyListItem = {
@@ -84,6 +85,14 @@ describe('KeysTable status / revoke 노출', () => {
   const base = { user_email: 'a@b.c', created_at: '2026-01-01T00:00:00Z' };
   const future = new Date(Date.now() + 365 * 24 * 3600 * 1000).toISOString();
   const past = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
+
+  it('생성·만료일은 리포팅 TZ 날짜 — 표 아래 캡션 한 번', () => {
+    const key = { ...base, key_id: 'k-c', key_prefix: 'sk-c', status: KeyStatus.ACTIVE, expires_at: null } as unknown as VirtualKeyListItem;
+    render(<KeysTable keys={[key]} />);
+    // 2026-01-01T00:00Z 는 Asia/Seoul 로 01-01 09:00 — 날짜 그대로.
+    expect(screen.getByText('2026-01-01')).toBeInTheDocument();
+    expect(screen.getAllByText(/^dateOnly:.*Asia\/Seoul/)).toHaveLength(1);
+  });
 
   it('EXPIRED + 만료일 미래 → 교체됨 배지 + 툴팁, Revoke 없음', () => {
     const key = { ...base, key_id: 'k-s', key_prefix: 'sk-sup', status: KeyStatus.EXPIRED, expires_at: future } as VirtualKeyListItem;

@@ -13,7 +13,8 @@
 //    텍스트만 인쇄용 진한 잉크로 바뀐다). CSS 변수 기반이라 React 재렌더 불필요.
 
 import type { ChatMessage } from './types';
-import { tzZoneText } from '@/lib/utils/timezone';
+import { fmtDateMinute } from '@/lib/utils/format';
+import { tzZoneText, withTzAbbr } from '@/lib/utils/timezone';
 
 // recharts SVG 로 렌더되는 차트 종류(table/kpi/image 는 SVG 아님 — 데이터 표로 대체).
 const SVG_CHART_KINDS = new Set(['bar', 'line', 'area', 'pie']);
@@ -261,14 +262,12 @@ export function buildReportHtml(
         .join('')}</section>`
     : '';
 
-  const when = new Date().toLocaleString('ko-KR', {
-    timeZone: reportingTz,
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-  });
+  // 생성 시각은 한 시점 — 내보낸 사람의 브라우저 TZ 로 적고 이름을 붙인다(앱의
+  // 다른 시점 표기와 같은 규칙). 본문 차트·표의 날짜 버킷은 SQL 이 리포팅 TZ 로
+  // 자른 것이라 그 기준을 따로 한 번 적는다.
+  const viewerTz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const now = new Date();
+  const when = withTzAbbr(fmtDateMinute(now.toISOString(), viewerTz), viewerTz);
 
   // R17-S4 — 다운로드한 리포트는 앱 CSP 밖(file://)에서 열린다. 문서 자체에
   // 잠금 CSP 를 박아 네트워크 참조를 전면 차단한다(인라인 SVG/style 은 태그라
@@ -286,7 +285,7 @@ export function buildReportHtml(
   <header class="report-header">
     <div class="brand"><span class="dot"></span>AWSome AI Gateway · BI Insight</div>
     <h1>${escapeHtml(title)}</h1>
-    <div class="meta">생성 ${escapeHtml(when)} ${escapeHtml(tzZoneText(reportingTz))}</div>
+    <div class="meta">생성 ${escapeHtml(when)} · 날짜 기준 ${escapeHtml(tzZoneText(reportingTz, now))}</div>
   </header>
   <main>
     ${narrative ? `<section class="narrative"><h2>분석 요약</h2>${narrative}</section>` : ''}

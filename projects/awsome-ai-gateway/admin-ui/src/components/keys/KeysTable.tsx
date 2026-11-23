@@ -15,6 +15,7 @@ import { Button } from '@/components/common/Button';
 import { InfoTooltip } from '@/components/common/InfoTooltip';
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/common/Table';
 import { useReportingTz } from '@/components/common/ReportingTimezoneProvider';
+import { ReportingTzCaption } from '@/components/common/ReportingTzCaption';
 import { fmtDate } from '@/lib/utils/format';
 import type { VirtualKeyListItem } from '@/types/entities';
 import { KeyStatus } from '@/types/enums';
@@ -46,7 +47,8 @@ function isSuperseded(key: Pick<VirtualKeyListItem, 'status' | 'expires_at'>, no
 
 function formatDate(iso: string | null, noExpiry: string, timeZone: string): string {
   if (!iso) return noExpiry;
-  // 리포팅 TZ 기준 — 만료일이 브라우저 로컬 기준 하루 어긋나 보이는 것 방지.
+  // 시각 없는 날짜(YYYY-MM-DD)라 리포팅 TZ 기준 — 표 아래 캡션으로 기준을 적는다.
+  // 브라우저 TZ 로 바꾸면 보는 사람마다 날짜가 하루씩 어긋난다.
   return fmtDate(iso, timeZone);
 }
 
@@ -188,6 +190,7 @@ export function KeysTable({ keys, onRevoked }: KeysTableProps) {
           </TBody>
         </Table>
       </div>
+      <ReportingTzCaption kind="dateOnly" className="mt-1 px-1" />
 
       {/* Revoke Confirm Dialog */}
       <ConfirmDialog

@@ -21,6 +21,7 @@ import { Table, THead, TBody, Tr, Th, Td } from '@/components/common/Table';
 import { PeriodSelector } from '@/components/dashboard/PeriodSelector';
 import { TokenMixDonutClient } from '@/components/analytics/TokenMixDonutClient';
 import { useReportingTz } from '@/components/common/ReportingTimezoneProvider';
+import { usePointInTime } from '@/components/common/usePointInTime';
 import { fmtDate, fmtUsd, fmtUsdExact, usdTitle } from '@/lib/utils/format';
 import { modelDisplay } from '@/lib/utils/modelLabel';
 import { monthsAgo } from '@/lib/utils/period';
@@ -37,6 +38,7 @@ export function ServiceAccountDetail({ data, period }: Props) {
   const t = useTranslations('serviceAccounts');
   const locale = useLocale();
   const tz = useReportingTz();
+  const pit = usePointInTime();
   const s = data.summary;
   const [trendMetric, setTrendMetric] = useState<'cost_usd' | 'tokens'>('cost_usd');
 
@@ -80,7 +82,7 @@ export function ServiceAccountDetail({ data, period }: Props) {
 
       <p className="text-xs text-muted-foreground">
         {t('attributionNote', {
-          since: fmtDate(data.attribution_since, tz),
+          since: pit.stampZ(data.attribution_since),
         })}
       </p>
 
@@ -88,8 +90,7 @@ export function ServiceAccountDetail({ data, period }: Props) {
       <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
         <KPICard
           title={t('kpiCost')}
-          value={fmtUsd(s.cost_usd)}
-          valueTitle={usdTitle(s.cost_usd)}
+          value={fmtUsd(s.cost_usd, { subCent: 'significant' })}
           icon={<DollarSign size={18} />}
           description={t('kpiCostDesc', {
             success: s.success.toLocaleString(),
@@ -125,14 +126,17 @@ export function ServiceAccountDetail({ data, period }: Props) {
           icon={<Timer size={18} />}
           description={
             s.last_request_at
-              ? t('kpiLastRequest', { at: fmtDate(s.last_request_at, tz) })
+              ? t('kpiLastRequest', { at: pit.stampZ(s.last_request_at) })
               : '—'
           }
         />
       </div>
 
       {(s.unattributed_requests > 0 || s.unattributed_cost_usd > 0) && (
-        <div className="glass rounded-apple border border-amber-500/40 p-3 text-xs text-amber-600 dark:text-amber-400">
+        <div
+          className="glass rounded-apple border border-amber-500/40 p-3 text-xs text-amber-600 dark:text-amber-400"
+          title={usdTitle(s.unattributed_cost_usd)}
+        >
           {t('unattributedNote', {
             count: s.unattributed_requests.toLocaleString(),
             cost: fmtUsd(s.unattributed_cost_usd),
@@ -148,9 +152,9 @@ export function ServiceAccountDetail({ data, period }: Props) {
             <Tr>
               <Th>{t('keyPrefix')}</Th>
               <Th>{t('keyStatusCol')}</Th>
-              <Th>{t('keyIssuedAt')}</Th>
+              <Th>{pit.header(t('keyIssuedAt'))}</Th>
               <Th>{t('keyExpiresAt')}</Th>
-              <Th>{t('keyLastRequest')}</Th>
+              <Th>{pit.header(t('keyLastRequest'))}</Th>
               <Th numeric>{t('keyRequests')}</Th>
               <Th numeric>{t('keyCost')}</Th>
             </Tr>
@@ -166,10 +170,12 @@ export function ServiceAccountDetail({ data, period }: Props) {
                     {t(`keyStatus.${k.status}` as 'keyStatus.ACTIVE' | 'keyStatus.EXPIRED' | 'keyStatus.REVOKED')}
                   </Badge>
                 </Td>
-                <Td className="text-muted-foreground">{fmtDate(k.issued_at, tz)}</Td>
+                <Td className="text-muted-foreground" title={pit.title}>
+                  {pit.stamp(k.issued_at)}
+                </Td>
                 <Td className="text-muted-foreground">{fmtDate(k.expires_at, tz)}</Td>
-                <Td className="text-muted-foreground">
-                  {k.last_request_at ? fmtDate(k.last_request_at, tz) : '—'}
+                <Td className="text-muted-foreground" title={pit.title}>
+                  {k.last_request_at ? pit.stamp(k.last_request_at) : '—'}
                 </Td>
                 <Td numeric className="text-muted-foreground">
                   {k.requests.toLocaleString()}
@@ -188,6 +194,8 @@ export function ServiceAccountDetail({ data, period }: Props) {
             )}
           </TBody>
         </Table>
+        {/* 만료일만 시각 없는 날짜(리포팅 TZ). */}
+        <ReportingTzCaption kind="dateOnly" className="mt-2" />
       </div>
 
       <div className="grid gap-6 lg:grid-cols-2">

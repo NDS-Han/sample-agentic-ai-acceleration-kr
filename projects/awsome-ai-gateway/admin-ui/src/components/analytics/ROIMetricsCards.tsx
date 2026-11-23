@@ -1,7 +1,7 @@
 // Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
 
 import { getTranslations } from 'next-intl/server';
-import { fmtUsd, usdTitle } from '@/lib/utils/format';
+import { fmtUsd } from '@/lib/utils/format';
 import { errorRateInfo } from '@/lib/utils/errorRate';
 import type { AnalyticsFilterForm } from '@/types/api';
 import { buildAnalyticsQuery, fetchAnalyticsOnce } from '@/lib/utils/analyticsQuery';
@@ -97,14 +97,14 @@ export async function ROIMetricsCards({ filter, latestMonth }: ROIMetricsCardsPr
     },
     {
       label: t('totalCost'),
-      value: fmtUsd(totalCost),
-      valueTitle: usdTitle(totalCost),
+      // KPI 카드는 값 하나가 전부라 1센트 미만도 유효숫자 2개로 보인다($0.0071) —
+      // '< $0.01' 은 목록·표·범례 전용(fmtUsd 기본 subCent:'bucket').
+      value: fmtUsd(totalCost, { subCent: 'significant' }),
       description: t('totalCostDescription'),
     },
     {
       label: t('averageCostPerUser'),
-      value: fmtUsd(avgCostPerUser),
-      valueTitle: usdTitle(avgCostPerUser),
+      value: fmtUsd(avgCostPerUser, { subCent: 'significant' }),
       description: t('activeUsersDescription', { count: summary.active_users }),
     },
   ];

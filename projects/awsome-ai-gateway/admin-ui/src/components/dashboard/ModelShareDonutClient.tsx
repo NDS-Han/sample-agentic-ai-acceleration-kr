@@ -6,7 +6,7 @@
 import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslations } from 'next-intl';
 import { Cell, Pie, PieChart } from 'recharts';
-import { fmtUsd } from '@/lib/utils/format';
+import { fmtUsd, usdTitle } from '@/lib/utils/format';
 import type { ModelShareResponse, TeamOption } from '@/lib/actions/dashboard';
 import { CATEGORICAL_PALETTE, useChartTheme } from '@/lib/utils/chartTheme';
 import { modelDisplay } from '@/lib/utils/modelLabel';
@@ -228,7 +228,9 @@ export function ModelShareDonutClient({ initialData, teams, period, client }: Pr
                   <p className="mt-0.5 text-[10px] text-muted-foreground tabular-nums">
                     {hi != null && centerItem
                       ? <Usd value={centerItem.cost_usd} />
-                      : t('topShare', { total: fmtUsd(data.total_cost_usd) })}
+                      : <span title={usdTitle(data.total_cost_usd)}>
+                          {t('topShare', { total: fmtUsd(data.total_cost_usd) })}
+                        </span>}
                   </p>
                 </div>
               );

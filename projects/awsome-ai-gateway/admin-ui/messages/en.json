@@ -75,11 +75,13 @@
     "unverifiedEmailHint": "This user's email is not verified in Cognito, so it is stored as an identifier. Set email_verified=true in Cognito, then click Sync Cognito.",
     "withZone": "{label} ({zone})",
     "viewerTzHint": "Shown in your browser time zone ({tz})",
+    "browserTzCaption": "Times in {zone} (your browser)",
     "reportingTz": {
       "dates": "Dates in {zone}",
       "hours": "Hours in {zone}",
+      "dateOnly": "Dates (YYYY-MM-DD) in {zone}",
       "period": "Month boundaries in {zone}",
-      "hint": "Aggregation buckets follow the deployment reporting time zone (REPORTING_TIMEZONE). Individual timestamps elsewhere use your browser time zone."
+      "hint": "Calendar buckets (daily/monthly charts, budget periods) and date-only values (YYYY-MM-DD, e.g. key expiry) follow the deployment reporting time zone (REPORTING_TIMEZONE). Values with a time of day are shown in your browser time zone with its name."
     }
   },
   "auth": {
@@ -965,7 +967,7 @@
     "colModel": "Model",
     "monthlyBudget": "This month's budget",
     "spent": "Spent",
-    "limit": "Limit: ${amount}",
+    "limit": "Limit: {amount}",
     "remaining": "Remaining",
     "overagePolicy": "Overage policy",
     "policyLabel": {
@@ -982,7 +984,7 @@
     "teamSharedNote": "Shared by the whole team — requests are blocked when exhausted, regardless of your personal cap",
     "teamUnset": "No team budget is set — requests may be blocked until an admin sets one",
     "noCapNoTeam": "No budget limit is set",
-    "limitTeamDefault": "Limit: ${amount} (team default)",
+    "limitTeamDefault": "Limit: {amount} (team default)",
     "kpiCostDesc": "{requests} successful requests",
     "kpiRequestsDesc": "{count} models used",
     "requestsSubline": "Total {total} · errors {errors} ({rate}%)",

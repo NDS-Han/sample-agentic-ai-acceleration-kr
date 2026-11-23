@@ -38,7 +38,7 @@ import { TopSpendTable, type TopSpendRow } from '@/components/dashboard/TopSpend
 import { PeriodSelector } from '@/components/dashboard/PeriodSelector';
 import { ClientFilter } from '@/components/dashboard/ClientFilter';
 import { reportingNowParts } from '@/lib/utils/period';
-import { fmtUsd, fmtTokensCompact, usdTitle } from '@/lib/utils/format';
+import { fmtUsd, fmtTokensCompact } from '@/lib/utils/format';
 import { teamDisplayName } from '@/lib/utils/trendSeries';
 import { isSyntheticEmail, userLabel } from '@/lib/userLabel';
 import { pageTitle } from '@/lib/pageMetadata';
@@ -117,8 +117,9 @@ async function DashboardKPIs({ period, client }: { period: string; client: strin
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
           <KPICard
             title={t('usageThisMonth')}
-            value={kpi ? fmtUsd(kpi.total_cost_usd) : '—'}
-            valueTitle={usdTitle(kpi?.total_cost_usd)}
+            // KPI 카드는 값 하나가 전부라 1센트 미만도 유효숫자 2개로 보인다($0.0071) —
+            // '< $0.01' 은 목록·표·범례 전용(fmtUsd 기본 subCent:'bucket').
+            value={kpi ? fmtUsd(kpi.total_cost_usd, { subCent: 'significant' }) : '—'}
             icon={<DollarSign size={18} aria-hidden="true" />}
             description={kpi ? t('usageThisMonthDesc') : t('fetchFailed')}
             href={`/analytics?period=${period}${clientSuffix}`}
@@ -142,20 +143,18 @@ async function DashboardKPIs({ period, client }: { period: string; client: strin
           />
           <KPICard
             title={t('avgCostPerUser')}
-            value={kpi ? fmtUsd(kpi.cost_per_user_usd) : '—'}
-            valueTitle={usdTitle(kpi?.cost_per_user_usd)}
+            value={kpi ? fmtUsd(kpi.cost_per_user_usd, { subCent: 'significant' }) : '—'}
             icon={<Users size={18} aria-hidden="true" />}
             description={kpi ? t('avgCostPerUserDesc', { count: kpi.active_users }) : t('fetchFailed')}
             href={`/analytics?period=${period}&group_by=user${clientSuffix}`}
           />
           <KPICard
             title={t('dailyAvg')}
-            value={kpi ? fmtUsd(dailyAvg) : '—'}
-            valueTitle={kpi ? usdTitle(dailyAvg) : undefined}
+            value={kpi ? fmtUsd(dailyAvg, { subCent: 'significant' }) : '—'}
             icon={<CalendarClock size={18} aria-hidden="true" />}
             description={
               projection != null
-                ? t('dailyAvgProjection', { amount: fmtUsd(projection) })
+                ? t('dailyAvgProjection', { amount: fmtUsd(projection, { subCent: 'significant' }) })
                 : t('dailyAvgDesc')
             }
             href={`/analytics?period=${period}${clientSuffix}`}

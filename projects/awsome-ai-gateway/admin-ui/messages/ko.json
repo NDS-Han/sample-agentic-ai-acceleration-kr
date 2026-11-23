@@ -75,11 +75,13 @@
     "unverifiedEmailHint": "Cognito에서 이메일이 인증되지 않아 식별자로 저장된 사용자입니다. Cognito에서 email_verified=true 처리 후 Sync Cognito를 누르세요.",
     "withZone": "{label} ({zone})",
     "viewerTzHint": "브라우저 시간대({tz}) 기준",
+    "browserTzCaption": "시각 기준: {zone} (브라우저)",
     "reportingTz": {
       "dates": "날짜 기준: {zone}",
       "hours": "시간 기준: {zone}",
+      "dateOnly": "날짜(YYYY-MM-DD) 기준: {zone}",
       "period": "월 경계 기준: {zone}",
-      "hint": "집계 구간은 배포 리포팅 시간대(REPORTING_TIMEZONE)를 따릅니다. 개별 시각은 브라우저 시간대로 표시됩니다."
+      "hint": "달력 구간(일·월 차트, 예산 기간)과 시각 없는 날짜(YYYY-MM-DD, 예: 키 만료일)는 배포 리포팅 시간대(REPORTING_TIMEZONE)를 따릅니다. 시각이 있는 값은 브라우저 시간대로 표시하고 그 이름을 함께 적습니다."
     }
   },
   "auth": {
@@ -965,7 +967,7 @@
     "colModel": "모델",
     "monthlyBudget": "이번 달 예산",
     "spent": "사용액",
-    "limit": "한도: ${amount}",
+    "limit": "한도: {amount}",
     "remaining": "잔여",
     "overagePolicy": "초과 정책",
     "policyLabel": {
@@ -982,7 +984,7 @@
     "teamSharedNote": "팀 전원이 공유하는 한도입니다 — 소진되면 개인 한도와 무관하게 요청이 차단됩니다",
     "teamUnset": "팀 예산이 설정되지 않았습니다 — 관리자가 설정할 때까지 요청이 차단될 수 있습니다",
     "noCapNoTeam": "설정된 예산 한도가 없습니다",
-    "limitTeamDefault": "한도: ${amount} (팀 기본)",
+    "limitTeamDefault": "한도: {amount} (팀 기본)",
     "kpiCostDesc": "성공 요청 {requests}회",
     "kpiRequestsDesc": "모델 {count}개 사용",
     "requestsSubline": "전체 {total} · 오류 {errors} ({rate}%)",

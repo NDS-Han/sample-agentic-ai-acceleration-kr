@@ -8,15 +8,28 @@
  *
  * 규칙(기본 precision=2):
  *  - |n| ≥ $0.01 또는 0 → 소수 2자리 + 천단위 그룹핑 ($1,234.50, $0.16)
- *  - 0 < |n| < $0.01 → '< $0.01'. 유효숫자로 펼치면 같은 화면에서 '$0.00010'·
- *    '$0.000078' 처럼 자릿수가 제각각이 된다. '$0.00' 으로 뭉개면 사용 자체가
- *    없어 보이므로 "있지만 1센트 미만"으로 표시하고, 정확한 값은 usdTitle()
- *    (또는 <Usd>) 툴팁으로 보여준다.
+ *  - 0 < |n| < $0.01 → subCent 옵션으로 정한다.
+ *    - 'bucket'(기본): '< $0.01'. 목록·표·범례용 — 유효숫자로 펼치면 같은 열에서
+ *      '$0.00010'·'$0.000078' 처럼 자릿수가 제각각이 된다. '$0.00' 으로 뭉개면
+ *      사용 자체가 없어 보이므로 "있지만 1센트 미만"으로 적고, 정확한 값은
+ *      usdTitle()(또는 <Usd>) 툴팁으로 보여 준다.
+ *    - 'significant': 유효숫자 2개($0.0071). 값 하나만 크게 보여 주는 KPI 카드용 —
+ *      거기서 '< $0.01' 은 카드의 유일한 정보를 지운다.
  * precision 을 3 이상으로 명시하면 그 자릿수 고정(채팅 버블 등 기존 호출 유지).
  */
-export function fmtUsd(n: number, precision = 2): string {
+export interface FmtUsdOptions {
+  precision?: number;
+  subCent?: 'bucket' | 'significant';
+}
+
+export function fmtUsd(n: number, opts: number | FmtUsdOptions = 2): string {
+  const { precision = 2, subCent = 'bucket' } =
+    typeof opts === 'number' ? { precision: opts } : opts;
   if (!Number.isFinite(n)) return '$0.00';
-  if (precision <= 2 && isSubCent(n)) return n < 0 ? '> -$0.01' : '< $0.01';
+  if (precision <= 2 && isSubCent(n)) {
+    if (subCent === 'significant') return smallUsd(n) as string;
+    return n < 0 ? '> -$0.01' : '< $0.01';
+  }
   return `$${n.toLocaleString('en-US', {
     minimumFractionDigits: precision,
     maximumFractionDigits: precision,
@@ -30,8 +43,7 @@ function isSubCent(n: number): boolean {
 
 /** 정확한 금액 — 1센트 미만은 유효숫자 2개($0.000078), 그 외는 fmtUsd 와 같다. */
 export function fmtUsdExact(n: number): string {
-  if (!Number.isFinite(n)) return '$0.00';
-  return (isSubCent(n) && smallUsd(n)) || fmtUsd(n);
+  return fmtUsd(n, { subCent: 'significant' });
 }
 
 /** fmtUsd 가 '< $0.01' 로 줄인 금액이면 툴팁용 정확한 값, 아니면 undefined. */
@@ -50,10 +62,11 @@ function smallUsd(n: number): string | null {
 }
 
 /**
- * 단가(per-1M 토큰 등) 포맷 — fmtUsd 와 같은 규칙에 \"단가 정밀도 보존\"만 더한다.
+ * 단가(per-1M 토큰 등) 포맷 — fmtUsd 의 ≥$0.01 규칙에 "단가 정밀도 보존"을 더한다.
  *  - ≥ $0.01: 최소 소수 2자리, 끝 0 을 지우며 최대 maxFraction 자리
  *    ($2.00, $0.10, $0.1375 — Haiku 캐시 쓰기 $0.1375/M 이 $0.14 로 잘리면 안 됨, US-19)
- *  - < $0.01: fmtUsd 와 동일하게 유효숫자 2개
+ *  - < $0.01: 유효숫자 2개($0.0071) — fmtUsd 의 subCent:'significant' 와 같다.
+ *    단가는 '< $0.01' 로 줄이지 않는다(가격표에서 단가를 지우면 의미가 없다).
  */
 export function fmtUsdRate(n: number, maxFraction = 5): string {
   if (!Number.isFinite(n)) return '$0.00';
@@ -160,6 +173,26 @@ export function fmtDate(iso: string, timeZone?: string): string {
   }).formatToParts(d);
   const map = Object.fromEntries(parts.map((p) => [p.type, p.value]));
   return `${map.year}-${map.month}-${map.day}`;
+}
+
+/**
+ * 연도까지 있는 분 단위 시각 — 'YYYY-MM-DD HH:mm'. 발급일·등록일·마지막 요청처럼
+ * 몇 달 전일 수 있는 시점용(fmtDateTime 은 연도 없이 초까지라 로그 표 전용).
+ */
+export function fmtDateMinute(iso: string, timeZone?: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(d);
+  const m = Object.fromEntries(parts.map((p) => [p.type, p.value]));
+  return `${m.year}-${m.month}-${m.day} ${m.hour}:${m.minute}`;
 }
 
 export function fmtDateTime(iso: string, locale: string, timeZone?: string): string {

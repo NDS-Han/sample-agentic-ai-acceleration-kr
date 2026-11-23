@@ -6,7 +6,7 @@ import { useMemo } from 'react';
 import { useLocale, useTranslations } from 'next-intl';
 
 import { useDisplayTz } from '@/components/common/ReportingTimezoneProvider';
-import { fmtDateTime, fmtTime } from '@/lib/utils/format';
+import { fmtDateMinute, fmtDateTime, fmtTime } from '@/lib/utils/format';
 import { tzAbbr, withTzAbbr } from '@/lib/utils/timezone';
 
 /**
@@ -16,6 +16,7 @@ import { tzAbbr, withTzAbbr } from '@/lib/utils/timezone';
  * 그린 시각이 잠깐 보이거나 하이드레이션 불일치가 생기지 않는다.
  *  - dateTimeZ/timeZ: 셀마다 TZ 이름을 붙인 문자열('11/06, 09:13:22 GMT+9').
  *  - dateTime/time + header(): 빽빽한 표는 열 제목에 한 번만('Time (GMT+9)').
+ *  - stamp/stampZ: 연도 포함 분 단위('2026-11-06 09:13') — 발급일·마지막 요청 등.
  */
 export function usePointInTime() {
   const locale = useLocale();
@@ -33,6 +34,8 @@ export function usePointInTime() {
       time,
       dateTimeZ: (iso: string, loc: string = locale) =>
         tz ? withTzAbbr(fmtDateTime(iso, loc, tz), tz, iso) : '',
+      stamp: (iso: string) => (tz ? fmtDateMinute(iso, tz) : ''),
+      stampZ: (iso: string) => (tz ? withTzAbbr(fmtDateMinute(iso, tz), tz, iso) : ''),
       timeZ: (iso: string) => (tz ? withTzAbbr(fmtTime(iso, locale, tz), tz, iso) : ''),
       /** 열 제목 + TZ — 마운트 전에는 라벨만. */
       header: (label: string) => (abbr ? tc('withZone', { label, zone: abbr }) : label),

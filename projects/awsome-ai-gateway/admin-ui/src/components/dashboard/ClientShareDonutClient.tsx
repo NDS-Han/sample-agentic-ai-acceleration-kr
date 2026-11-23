@@ -5,7 +5,7 @@
 import { memo, useMemo, useState } from 'react';
 import { useTranslations } from 'next-intl';
 import { Cell, Pie, PieChart } from 'recharts';
-import { fmtSharePct, fmtUsd, roundSharesTo100 } from '@/lib/utils/format';
+import { fmtSharePct, fmtUsd, roundSharesTo100, usdTitle } from '@/lib/utils/format';
 import type { ClientShareResponse } from '@/lib/actions/dashboard';
 import { CATEGORICAL_PALETTE } from '@/lib/utils/chartTheme';
 import { labelFor } from '@/lib/utils/modelLabel';
@@ -110,7 +110,9 @@ export function ClientShareDonutClient({ data }: Props) {
               <p className="mt-0.5 text-[10px] text-muted-foreground tabular-nums">
                 {hoverIndex != null && centerItem
                   ? <Usd value={centerItem.cost_usd} />
-                  : t('topShare', { total: fmtUsd(data.total_cost_usd) })}
+                  : <span title={usdTitle(data.total_cost_usd)}>
+                      {t('topShare', { total: fmtUsd(data.total_cost_usd) })}
+                    </span>}
               </p>
             </div>
           );

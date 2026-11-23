@@ -20,6 +20,7 @@ import {
   fmtLatencyMs,
   roundSharesTo100,
   fmtSharePct,
+  fmtDateMinute,
 } from '@/lib/utils/format';
 import { fmtPricePerM } from '@/lib/utils/pricing';
 
@@ -85,6 +86,20 @@ describe('fmtUsd — 단일 비용 포맷', () => {
   it('precision 을 명시하면 그 자릿수 고정', () => {
     expect(fmtUsd(0.12345, 4)).toBe('$0.1235');
   });
+
+  it("subCent:'significant' — KPI 카드용, 1센트 미만도 유효숫자 2개", () => {
+    const kpi = { subCent: 'significant' } as const;
+    expect(fmtUsd(0.0071, kpi)).toBe('$0.0071');
+    expect(fmtUsd(0.000078, kpi)).toBe('$0.000078');
+    // ≥ $0.01 과 0 은 기본 규칙 그대로.
+    expect(fmtUsd(0, kpi)).toBe('$0.00');
+    expect(fmtUsd(0.009996, kpi)).toBe('$0.01');
+    expect(fmtUsd(1234.5, kpi)).toBe('$1,234.50');
+    // 옵션 객체의 precision 도 숫자 인자와 같다.
+    expect(fmtUsd(0.12345, { precision: 4 })).toBe('$0.1235');
+    // 기본값은 목록용 bucket.
+    expect(fmtUsd(0.0071, { subCent: 'bucket' })).toBe('< $0.01');
+  });
 });
 
 describe('fmtPricePerM — 단가도 같은 규칙', () => {
@@ -143,5 +158,17 @@ describe('roundSharesTo100 / fmtSharePct', () => {
     expect(r.reduce((a, b) => a + b, 0)).toBeCloseTo(100, 9);
     expect(fmtSharePct(r[2], raw[2])).toBe('<0.1%');
     expect(fmtSharePct(r[0], raw[0])).toBe('100.0%');
+  });
+});
+
+describe('fmtDateMinute — 연도 포함 분 단위 시점', () => {
+  it('주입된 TZ 로 날짜 경계를 넘긴다', () => {
+    expect(fmtDateMinute('2026-10-15T15:30:00Z', 'Asia/Seoul')).toBe('2026-10-16 00:30');
+    expect(fmtDateMinute('2026-10-15T15:30:00Z', 'Asia/Kolkata')).toBe('2026-10-15 21:00');
+    expect(fmtDateMinute('2026-10-15T15:30:00Z', 'UTC')).toBe('2026-10-15 15:30');
+  });
+
+  it('파싱 불가 입력은 그대로', () => {
+    expect(fmtDateMinute('not-a-date', 'UTC')).toBe('not-a-date');
   });
 });

@@ -13,8 +13,9 @@ export function fmtPricePerM(per1k: number | string | null | undefined): string 
   if (per1k == null || per1k === '') return '—';
   const per1m = Number(per1k) * 1000;
   if (!Number.isFinite(per1m)) return '—';
-  // 앱 공용 USD 규칙(fmtUsd)과 같은 기준 — ≥$0.01 은 최소 2자리, <$0.01 은
-  // 유효숫자 2개. 예전엔 ≥$1 은 2자리, 미만은 3자리 패딩이라 $2.00/M 옆에
+  // fmtUsdRate 규칙 — ≥$0.01 은 최소 2자리, <$0.01 은 유효숫자 2개(fmtUsd 의
+  // subCent:'significant'). 목록용 fmtUsd 기본값처럼 '< $0.01' 로 줄이지 않는다
+  // — 단가를 지우면 가격표의 의미가 없다. 예전엔 ≥$1 은 2자리, 미만은 3자리 패딩이라 $2.00/M 옆에
   // $0.100/M 이 섞였다. NUMERIC(12,8) per-1K 는 per-1M 환산 시 소수 5자리까지
   // 의미가 있어 끝 0 만 지우고 5자리까지 보존한다($0.1375/M, US-19).
   return `${fmtUsdRate(per1m, 5)}/M`;

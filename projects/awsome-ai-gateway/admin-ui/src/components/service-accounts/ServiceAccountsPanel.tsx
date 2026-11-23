@@ -12,6 +12,8 @@ import { isSyntheticEmail, userLabel } from '@/lib/userLabel';
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/common/Table';
 import { useToast } from '@/components/common/ToastProvider';
 import { useReportingTz } from '@/components/common/ReportingTimezoneProvider';
+import { ReportingTzCaption } from '@/components/common/ReportingTzCaption';
+import { usePointInTime } from '@/components/common/usePointInTime';
 import { fmtDate } from '@/lib/utils/format';
 import {
   issueServiceKeyAction,
@@ -34,6 +36,7 @@ export function ServiceAccountsPanel({ accounts, maxTtlDays, serviceKeysEnabled 
   const t = useTranslations('serviceAccounts');
   const tc = useTranslations('common');
   const tz = useReportingTz();
+  const pit = usePointInTime();
   const { toast } = useToast();
 
   const [busy, setBusy] = useState<string | null>(null);
@@ -173,15 +176,16 @@ export function ServiceAccountsPanel({ accounts, maxTtlDays, serviceKeysEnabled 
       </div>
 
       {accounts.length > 0 && (
+        <>
         <Table>
           <THead>
             <Tr>
               <Th>{t('saEmail')}</Th>
               <Th>{t('saTeam')}</Th>
               <Th>{t('saKey')}</Th>
-              <Th>{t('keyIssuedAt')}</Th>
+              <Th>{pit.header(t('keyIssuedAt'))}</Th>
               <Th>{t('expiresAt')}</Th>
-              <Th>{t('saLastUsed')}</Th>
+              <Th>{pit.header(t('saLastUsed'))}</Th>
               <Th numeric>{t('saMonthRequests')}</Th>
               <Th numeric>{t('saMonthTokens')}</Th>
               <Th numeric>{t('saMonthCost')}</Th>
@@ -219,14 +223,14 @@ export function ServiceAccountsPanel({ accounts, maxTtlDays, serviceKeysEnabled 
                   )}
                   {!a.is_active && <Badge tone="neutral">{t('saInactive')}</Badge>}
                 </Td>
-                <Td className="text-muted-foreground">
-                  {a.active_key_issued_at ? fmtDate(a.active_key_issued_at, tz) : '—'}
+                <Td className="text-muted-foreground" title={pit.title}>
+                  {a.active_key_issued_at ? pit.stamp(a.active_key_issued_at) : '—'}
                 </Td>
                 <Td className="text-muted-foreground">
                   {a.active_key_expires_at ? fmtDate(a.active_key_expires_at, tz) : '—'}
                 </Td>
-                <Td className="text-muted-foreground">
-                  {a.last_request_at ? fmtDate(a.last_request_at, tz) : '—'}
+                <Td className="text-muted-foreground" title={pit.title}>
+                  {a.last_request_at ? pit.stamp(a.last_request_at) : '—'}
                 </Td>
                 <Td numeric className="text-muted-foreground">
                   {a.month_requests.toLocaleString()}
@@ -276,6 +280,9 @@ export function ServiceAccountsPanel({ accounts, maxTtlDays, serviceKeysEnabled 
             ))}
           </TBody>
         </Table>
+        {/* 만료일만 시각 없는 날짜(리포팅 TZ) — 발급·마지막 사용은 열 제목의 브라우저 TZ. */}
+        <ReportingTzCaption kind="dateOnly" className="mt-1 px-1" />
+        </>
       )}
 
       {/* 해제 확인 다이얼로그 — 활성 키 있으면 폐기 경고 포함 */}

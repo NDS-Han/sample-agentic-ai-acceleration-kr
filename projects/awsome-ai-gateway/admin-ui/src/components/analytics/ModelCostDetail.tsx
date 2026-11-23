@@ -6,7 +6,7 @@
 import { useTranslations } from 'next-intl';
 import type { ModelCostAnalyticsResponse } from '@/lib/actions/analytics-models';
 import { fmtPricePerM } from '@/lib/utils/pricing';
-import { fmtLatencyMs, fmtUsd } from '@/lib/utils/format';
+import { fmtLatencyMs, fmtUsd, usdTitle } from '@/lib/utils/format';
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/common/Table';
 import { CATEGORICAL_PALETTE } from '@/lib/utils/chartTheme';
 import { modelDisplay } from '@/lib/utils/modelLabel';
@@ -26,7 +26,7 @@ export function ModelCostDetail({ data }: { data: ModelCostAnalyticsResponse }) 
           중복이라 제거하고, 여기엔 모델 수·합계만 한 줄로 둔다. */}
       <div className="flex items-baseline justify-between flex-wrap gap-2">
         <h2 className="text-lg font-semibold">{t('detailTitle')}</h2>
-        <span className="text-xs text-muted-foreground">
+        <span className="text-xs text-muted-foreground" title={usdTitle(data.total_cost_usd)}>
           {t('summaryMeta', { count: models.length, cost: fmtUsd(data.total_cost_usd) })}
         </span>
       </div>
