@@ -26,6 +26,7 @@ import { ChatShell } from '@/components/chat/ChatShell';
 import { ReportingTimezoneProvider } from '@/components/common/ReportingTimezoneProvider';
 import { reportingTimezone } from '@/lib/utils/period';
 import { brandName } from '@/lib/branding';
+import { adminTabTitle } from '@/lib/pageMetadata';
 import type { AdminSession } from '@/types/entities';
 
 // 탭 제목·설명은 런타임 브랜드명(ADMIN_BRAND_NAME)을 따른다. 레이아웃이 cookies()
@@ -34,7 +35,7 @@ import type { AdminSession } from '@/types/entities';
 export async function generateMetadata(): Promise<Metadata> {
   const brand = brandName();
   return {
-    title: { default: `${brand} Admin`, template: `%s — ${brand} Admin` },
+    title: { default: `${brand} Admin`, template: adminTabTitle('%s') },
     description: `${brand} 관리자 대시보드 — API 키, 예산, 모델, 사용량 분석 통합 관리`,
   };
 }
