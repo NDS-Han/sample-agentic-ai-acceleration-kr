@@ -2372,6 +2372,7 @@ def main(argv=None) -> int:
             "  첫 설치:   init → bootstrap            (한 번만)\n"
             "  변경:      configure                  (마법사)  또는  gateway.yaml 편집 → apply\n"
             "  상태 확인: doctor\n"
+            "  EKS 버전:  upgrade eks --to 1.<minor>  (apply 는 버전을 바꾸지 않음)\n"
             "  삭제:      teardown\n"
             "\n"
             "상세: 각 명령 뒤에 --help (예: ./deploy apply --help)"

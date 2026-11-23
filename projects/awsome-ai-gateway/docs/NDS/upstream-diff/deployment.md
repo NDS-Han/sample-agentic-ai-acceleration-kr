@@ -10,7 +10,7 @@ upstream에 없던 전체 신규 서브시스템 (~11k LOC + 테스트 478).
 
 | 구성 | 역할 |
 |---|---|
-| `cli.py` | 명령 디스패치 — init/configure/validate/render/bootstrap/apply/doctor/teardown/client-values |
+| `cli.py` | 명령 디스패치 — init/configure/validate/render/bootstrap/apply/doctor/client-values/upgrade/teardown |
 | `schema.py` | `gateway.yaml` 스키마 — 필드 검증·경고·SchemaError 수집 |
 | `tiers.py` | `deploy.capacity_tier`(사용자 수 밴드)→ pod/task 수·용량 프리셋 전개, `deploy.sizing` 덮어쓰기 |
 | `render/` | 대상별 산출물 렌더링 — `compose.py`(docker-compose+.env+Caddyfile), `eks`(helm values), `ecs`(tfvars) |
@@ -24,6 +24,8 @@ upstream에 없던 전체 신규 서브시스템 (~11k LOC + 테스트 478).
 
 명령 수명주기: `init/configure`(yaml 작성) → `bootstrap`(신규 1회) →
 `apply`(업데이트 반복, render 내장) → `doctor`(점검) → `teardown`(삭제).
+EKS 버전은 별도 절차형 명령 `upgrade eks`가 담당(apply는 버전을 바꾸지
+않음).
 `./deploy`는 `docs/NDS/deploy.sh`로 위임하는 4줄 래퍼다.
 
 ## 2. 배포 대상 — 3 경로
@@ -65,6 +67,11 @@ environments: `gateway-ecs`, `llm-gateway-dev`, `llm-gateway-prod`.
 - **teardown**: apply 소유분만 삭제 — compose(컨테이너+네트워크,
   `--purge` 볼륨), ecs(terraform 리소스 전부, deletion protection
   티어는 해제 후), eks(helm release, `--infra`로 인프라까지)
+- **`upgrade eks`**: EKS 클러스터/매니지드 애드온 홉 단위 업그레이드 —
+  apply 가 건드리지 않는 버전의 절차형 명령. 라이브 실측→minor 한 칸씩
+  홉 분할→tfvars 기록→plan 범위 검사→apply→워크로드 재생성.
+  `infra.eks_version` 선언 필드 + capture 역생성·drift 안내 포함
+  (eks_upgrade.py)
 - **declared-off 수렴**: `merge_env`가 선언에서 빠진 관리 키를 .env에서
   제거(WEB_SEARCH_ENABLED→AGENTCORE_* 동반 수렴 등)
 - **pending-teardown 마커**: `.pending-provisioner-teardown` — teardown

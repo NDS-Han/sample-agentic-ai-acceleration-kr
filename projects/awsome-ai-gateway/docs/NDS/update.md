@@ -126,11 +126,12 @@ vi deployment/gateway.yaml        # 변경
 `doctor` 가 `.env` drift, 서비스 이상, 마이그레이션 head 불일치를 보고하면
 해당 메시지대로 조치하세요.
 
-> **eks 인프라 업그레이드는 `./deploy` 범위 밖입니다.** EKS 컨트롤플레인
-> minor·애드온(coredns/kube-proxy/vpc-cni)·Aurora 엔진은 terraform env
-> 소유라 사람이 tfvars를 편집해 `terraform apply`합니다 — 절차·버전 표·
-> 롤백 제한은 [upgrade-eks-cluster.md](upgrade-eks-cluster.md). doctor가
-> 선언↔라이브 버전 skew를 HIGH로 감지합니다.
+> **eks 클러스터 업그레이드는 `./deploy upgrade eks` 전용입니다.** EKS
+> 컨트롤플레인 minor·애드온(coredns/kube-proxy/vpc-cni)은 `apply`가 아니라
+> 이 명령이 홉 단위로 올립니다 — 절차·안전장치·롤백 제한은
+> [upgrade-eks-cluster.md](upgrade-eks-cluster.md). Aurora·ElastiCache
+> 엔진은 terraform env 수동 절차로 남아 있습니다. doctor가 선언↔라이브
+> 버전 skew를 HIGH로 감지합니다.
 
 ## 코드 업데이트 (새 버전 배포)
 

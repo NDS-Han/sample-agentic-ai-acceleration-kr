@@ -126,8 +126,10 @@ ECS 탄력은 `aws_appautoscaling` target-tracking(CPU/Memory)으로만 — 트�
 서비스(gateway-proxy×4, admin-api×2)만 열고 워커·스케줄러는 min=max 핀
 (싱글톤 계약). 탄력 상한이 Aurora 커넥션을 고갈시키는 경로는
 `ecs_db_budget` 가 validate 시점에 차단한다(worst-case 수요 > max_acu
-용량의 80% → 에러). 클러스터·애드온·DB 엔진 같은 인프라 업그레이드는
-deploy 범위 밖(env tfvars 수동 절차) — `upgrade-eks-cluster.md` 런북 참조.
+용량의 80% → 에러). EKS 클러스터·애드온 버전은 `deploy upgrade eks`
+전용 절차형 명령이 올리고(apply 는 건드리지 않음), Aurora/ElastiCache
+엔진 같은 인프라 업그레이드는 deploy 범위 밖(env tfvars 수동 절차) —
+`upgrade-eks-cluster.md` 런북 참조.
 
 ### 15. capacity_tier — 사용자 수 밴드로 replica 산수를 캡슐화
 

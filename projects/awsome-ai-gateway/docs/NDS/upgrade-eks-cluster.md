@@ -1,11 +1,68 @@
 # EKS 클러스터·의존성 업그레이드 런북
 
 > **범위**: EKS 컨트롤플레인 minor · EKS 애드온(coredns/kube-proxy/vpc-cni) ·
-> Fargate kubelet · Aurora 엔진 — **terraform env 소유**라 `./deploy apply`가
-> 하지 않습니다(앱 업데이트는 [update.md](update.md)). 사람이 env tfvars를
-> 편집하고 `terraform apply`로 올립니다.
+> Fargate kubelet · Aurora 엔진 — `./deploy apply`가 하지 않습니다
+> (앱 업데이트는 [update.md](update.md)). 클러스터+애드온은
+> **`./deploy upgrade eks`** 가 절차를 자동 수행하고(§1), Aurora·ElastiCache
+> 엔진은 terraform env 수동 절차입니다(§3).
 
-> **환경 변수** — 맨 위 블록만 채우면 아래를 그대로 붙여 씁니다.
+## 0. 규칙 — `deploy upgrade eks`가 강제하는 것들
+
+1. **minor는 한 칸씩만.** 다중 점프는 API가 거부 (1.34→1.36 = 2회 순차 홉).
+   명령이 라이브에서 목표까지 홉을 자동 분할합니다.
+2. **홉 순서 고정**: ① 컨트롤플레인 minor → ② `eks_addon_versions`를 그 버전용으로
+   갱신 → ③ **Fargate 파드 전량 재생성**(kubelet은 파드 재생성 때만 갱신).
+   홉마다 동일 순서를 반복합니다.
+3. **롤백 제한**: in-place 롤백은 업그레이드 **7일 이내 + ERROR insight 0**일
+   때만 직전 minor로 가능. 단 Fargate에서 ③까지 했으면 새 kubelet의 파드가
+   skew ERROR insight를 띄워 롤백이 막힘 — **롤백 = 계획된 다운타임**(새 파드
+   제거 필요). "7일 롤백 가능"을 "안전하고 공짜"로 읽지 말 것.
+4. **선언값=라이브 원칙**: tfvars의 `eks_cluster_version`이 라이브보다 낮으면
+   다음 terraform apply가 `InvalidParameterException`으로 죽어 그 스택 전체가
+   잠깁니다. 명령이 tfvars를 홉마다 갱신하고, 완료 시 `gateway.yaml`의
+   `infra.eks_version`도 라이브로 맞춥니다.
+5. **extended support**: 표준지원 종료 버전은 시간이 지나면 AWS가 **강제
+   업그레이드(롤백 불가)**하거나 시간당 프리미엄($0.50/hr/클러스터)을 청구.
+   최신 지원 달력은 AWS EKS 문서 "Kubernetes versions" 참조.
+
+## 1. 표준 경로 — `./deploy upgrade eks`
+
+```bash
+./deploy upgrade eks --to 1.<목표> --plan   # 홉 계획 + 애드온 버전 실측 확인
+./deploy upgrade eks --to 1.<목표>          # 확인 프롬프트 후 실행
+./deploy upgrade eks                        # 목표 생략 시 yaml infra.eks_version
+```
+
+각 홉에서 명령이 하는 일:
+
+1. env `terraform.tfvars`에 `eks_cluster_version` + `eks_addon_versions` 기록
+   — 애드온은 `describe-addon-versions`의 목표 k8s `defaultVersion` 조합,
+   단 **현재 핀이 목표와 호환이면 유지**(비호환 고핀은 다운그레이드하지
+   않고 중단). tfvars 부재 시 중단(access_entries 등 보호).
+2. `terraform plan -out` → **범위 검사**(module.eks 밖 변경·destroy/
+   replace·moved/import 발견 시 중단 — `time_sleep` 재생성은 무해라 예외)
+   → 저장된 plan만 apply.
+3. 클러스터 `ACTIVE`+버전 일치 대기 (홉당 통상 10~20분).
+4. 전체 deployment/statefulset `rollout restart` + **워크로드별
+   `rollout status` 대기** — Fargate kubelet 갱신. 파드가 전부 재생성되므로
+   `capacity_tier`/`sizing`의 minReplicas가 1이면 순간 결손 — 유지보수 창 권장.
+
+시작 전 자동 사전 점검: upgrade insights ERROR(제거 API 사용 등), kubectl
+context가 다른 클러스터를 가리키는지, `deploy.tf_env_dir` 선언 불일치.
+
+중간 실패 시 재실행하면 라이브 버전+애드온 실측으로 **남은 단계부터
+재개**됩니다(컨트롤플레인만 올라간 반쪽 홉도 복구). tfvars에는
+`.tfvars.bak` 백업이 남습니다.
+
+### kubectl context 주의
+
+파드 재생성은 `kubectl`로 수행 — context가 다른 클러스터를 가리키면
+차단됩니다. 명시하려면 `--context <ctx>`.
+
+## 2. 수동 경로 (명령이 막힐 때의 폴백)
+
+`deploy upgrade eks`를 쓸 수 없는 환경(도구 없는 머신·비표준 env)에서의
+수동 절차입니다. 기본 원칙은 동일합니다.
 
 ```bash
 export GW_REGION="<배포 리전>"
@@ -17,31 +74,9 @@ export AWS_DEFAULT_REGION="$GW_REGION" AWS_REGION="$GW_REGION"
 kc() { kubectl --context "$GW_KCTX" -n "$GW_NS" "$@"; }
 ```
 
-## 0. 규칙 — 깨면 apply가 거부되거나 롤백이 막힙니다
-
-1. **minor는 한 칸씩만.** 다중 점프는 API가 거부 (1.34→1.36 = 2회 순차 홉).
-2. **홉 순서 고정**: ① 컨트롤플레인 minor → ② `eks_addon_versions`를 그 버전용으로
-   갱신 → ③ **Fargate 파드 전량 재생성**(kubelet은 파드 재생성 때만 갱신).
-   ②를 ①보다 먼저 하면 kube-proxy가 apiserver보다 새 버전이 돼 skew 위반.
-3. **롤백 제한**: in-place 롤백은 업그레이드 **7일 이내 + ERROR insight 0**일
-   때만 직전 minor로 가능. 단 Fargate에서 ③까지 했으면 새 kubelet의 파드가
-   skew ERROR insight를 띄워 롤백이 막힘 — **롤백 = 계획된 다운타임**(새 파드
-   제거 필요). "7일 롤백 가능"을 "안전하고 공짜"로 읽지 말 것.
-4. **선언값=라이브 원칙**: tfvars의 `eks_cluster_version`이 라이브보다 낮으면
-   다음 terraform apply가 `InvalidParameterException`으로 죽어 그 스택 전체가
-   잠깁니다. 라이브가 이미 올라간 상태면 tfvars를 라이브에 맞춰 올릴 것 —
-   `./deploy doctor`가 이 skew를 HIGH로 잡습니다.
-5. **extended support**: 표준지원 종료 버전은 시간이 지나면 AWS가 **강제
-   업그레이드(롤백 불가)**하거나 시간당 프리미엄($0.50/hr/클러스터)을 청구.
-   최신 지원 달력은 AWS EKS 문서 "Kubernetes versions" 참조.
-
-## 1. 사전 점검
+### 사전 점검
 
 ```bash
-aws sts get-caller-identity                     # 대상 계정 확인
-aws eks update-kubeconfig --name "$GW_CLUSTER" --region "$GW_REGION" --alias "$GW_KCTX"
-
-# 라이브 버전 실측 — tfvars가 아니라 AWS가 정본
 aws eks describe-cluster --name "$GW_CLUSTER" --region "$GW_REGION" \
   --query 'cluster.version' --output text
 for a in coredns kube-proxy vpc-cni; do
@@ -49,19 +84,14 @@ for a in coredns kube-proxy vpc-cni; do
     --addon-name "$a" --query 'addon.{n:addonName,v:addonVersion,s:status}' \
     --output text
 done
-
-# 업그레이드 적합성 검사 (deprecated API·호환성 문제) — 통과 못한 항목만
 aws eks list-insights --cluster-name "$GW_CLUSTER" --region "$GW_REGION" \
   --query 'insights[?status!=`PASSING`].{name:name,status:status,category:category}' \
   --output table
-
-# 롤백 보험
 helm get values llm-gateway -n "$GW_NS" --kube-context "$GW_KCTX" -o yaml \
   > ~/"$GW_KCTX"-values-$(date +%Y%m%d-%H%M).yaml
 ```
 
-> **target 버전의 애드온 버전 확인** — 아래 표는 실측 기록일 뿐, 신버전은 AWS가
-> 추가/만료합니다. 홉 전에 반드시 실측 (`--kubernetes-version`은 **목표** 버전,
+> **목표 버전의 애드온 버전 실측** (`--kubernetes-version`은 **목표** 버전,
 > `compatibilities[0].defaultVersion=true`가 EKS 검증 기본값):
 >
 > ```bash
@@ -72,27 +102,13 @@ helm get values llm-gateway -n "$GW_NS" --kube-context "$GW_KCTX" -o yaml \
 >     --output text)
 >   printf '  %-11s = "%s"\n' "${a//-/_}" "$v"
 > done
-> # → coredns/kube_proxy/vpc_cni = "vX.Y.Z-eksbuild.N" — tfvars에 그대로 붙인다
 > ```
 
-| cluster | coredns | kube-proxy | vpc-cni |
-|---|---|---|---|
-| 1.32 | v1.11.4-eksbuild.51 | v1.32.13-eksbuild.24 | v1.22.4-eksbuild.3 |
-| 1.33 | v1.12.4-eksbuild.29 | v1.33.10-eksbuild.21 | (동일) |
-| 1.34 | v1.12.4-eksbuild.29 | v1.34.6-eksbuild.21 | (동일) |
-| 1.35 | v1.13.2-eksbuild.21 | v1.35.3-eksbuild.21 | (동일) |
-| 1.36 | v1.14.3-eksbuild.14 | v1.36.0-eksbuild.17 | (동일) |
-
-(실측 시점 ap-northeast-2 — 리전별 제공 버전이 다를 수 있음)
-
-## 2. 한 홉 실행 (반복 단위 — dev 먼저, prod는 검증 후)
+### 한 홉 실행
 
 ```bash
 cd "$GW_ENV_DIR"
-
-# terraform.tfvars 편집 — 선언을 목표 버전으로:
-#   eks_cluster_version = "1.<목표>"
-#   eks_addon_versions = { <§1 표/실측의 목표 버전용 값> }
+# terraform.tfvars 편집 — eks_cluster_version = "1.<목표>" + eks_addon_versions
 
 # ⚠️ managed overlay 유지 — bootstrap이 gen에 쓴 infra/feature 키가
 #    빠지면 기본값으로 되돌아간다. 파일이 있으면 반드시 같이 넘긴다:
@@ -101,20 +117,9 @@ VARGEN=""; [ -f "$GEN_TFVARS" ] && VARGEN="-var-file=$GEN_TFVARS"
 
 terraform plan  -var-file=terraform.tfvars $VARGEN
 terraform apply -var-file=terraform.tfvars $VARGEN
-# → 컨트롤플레인 ① + 애드온 ② 가 한 번에 적용 (모듈이 순서 보장)
-```
 
-③ **Fargate 파드 전량 재생성** — kubelet은 파드가 재생성될 때만 새 버전을
-얻습니다. 게이트웨이 포함 네임스페이스 전체를 굴립니다.
-전량 재생성 중 가용성은 `capacity_tier`/`sizing` 의 minReplicas 에 좌우됩니다 —
-`"500"` 밴드(min=1)면 순간 결손이 생기니 유지보수 창에서 하세요:
-
-```bash
 kubectl --context "$GW_KCTX" -n "$GW_NS" rollout restart deploy --all
-# observability 등 다른 네임스페이스도 동일하게
-kc get pods -o jsonpath='{range .items[*]}{.spec.nodeName}{"\n"}{end}' | sort -u
-# ↑ Fargate 노드(kubelet) 버전이 목표 minor로 전부 교체됐는지:
-kc get nodes 2>/dev/null || kubectl --context "$GW_KCTX" get nodes
+# observability 등 다른 네임스페이스도 동일하게 (sts 포함)
 ```
 
 검증:
@@ -124,10 +129,9 @@ aws eks describe-cluster --name "$GW_CLUSTER" --region "$GW_REGION" \
   --query 'cluster.version' --output text      # 목표 minor
 ./deploy doctor                              # version skew HIGH 사라져야 함
 ./deploy apply --plan                        # 앱 드리프트 없는지
-# 운영 중이면 smoke: deployment/scripts/smoke-test.sh --env <env>
 ```
 
-다음 minor로 갈 거면 §2를 **다시** 반복 — 한 홉씩.
+다음 minor로 갈 거면 같은 절차를 **다시** 반복 — 한 홉씩.
 
 ## 3. Aurora 엔진 (의존성 업그레이드)
 
@@ -139,7 +143,7 @@ aws eks describe-cluster --name "$GW_CLUSTER" --region "$GW_REGION" \
 aws rds create-db-cluster-snapshot --region "$GW_REGION" \
   --db-cluster-identifier <aurora 클러스터 id> \
   --db-cluster-snapshot-identifier "pre-pg<목표>-$(date +%Y%m%d-%H%M)"
-# terraform.tfvars: aurora_engine_version = "<목표>" → §2와 같은 apply
+# terraform.tfvars: aurora_engine_version = "<목표>" → terraform apply
 # ⚠️ writer 재기동 = 짧은 다운타임 — 유지보수 창에서
 ```
 
@@ -148,15 +152,15 @@ ElastiCache 엔진 교체도 terraform 변수(`elasticache_*`) 소유 — 별도
 ## 4. prod 적용 전 체크리스트
 
 - [ ] dev에서 같은 홉을 먼저 올리고 최소 수일 관찰했는가
-- [ ] prod `terraform.tfvars`의 버전이 dev가 아니라 **prod 라이브** 기준인가
+- [ ] `--plan` 출력의 홉 계획·애드온 버전이 기대와 같은가
 - [ ] helm values 백업 + (DB 건드리면) Aurora 스냅샷 찍었는가
-- [ ] `list-insights`에 UPGRADE_READINESS 실패 항목이 없는가
+- [ ] `list-insights`에 UPGRADE_READINESS 실패 항목이 없는가(명령이 자동 점검)
 - [ ] 롤백이 필요하면 "7일 이내 + 파드 재생성 전"이어야 한다는 걸 알고 창을 잡았는가
 
 ## 참고 — 자동 감지
 
+- `./deploy apply` — yaml `infra.eks_version` ≠ 라이브면 안내 출력
 - `./deploy doctor` — tfvars `eks_cluster_version` ≠ 라이브면 **HIGH**로 보고
-  ("tfvars를 라이브로 올리고 eks_addon_versions 갱신" 지시 출력)
-- 세부 규칙의 근거(다운그레이드 가드·nullable 함정·버전 표 출처)는
-  `deployment/terraform/environments/*/variables.tf`의 변수 주석이 정본 —
-  표가 낡았으면 `describe-addon-versions` 실측이 우선합니다.
+- `./deploy doctor --capture` — 라이브 버전을 `infra.eks_version`으로 역생성
+- 세부 규칙의 근거(다운그레이드 가드·nullable 함정)는
+  `deployment/terraform/environments/*/variables.tf`의 변수 주석이 정본.

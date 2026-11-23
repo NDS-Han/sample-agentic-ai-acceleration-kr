@@ -35,7 +35,9 @@ profiles 는 SQL 로 확인**하세요 — migration 0055가 샘플 크로스계
 
 - **env scaffold 주의**: 생성된 `terraform.tfvars`의 `eks_cluster_version`·
   `eks_addon_versions`·`tags`는 템플릿 기본값 — 조직에 맞게 검토한 뒤
-  재실행해야 합니다 (bootstrap이 여기서 멈춥니다). bi 챗(`enable_chat_agent`)은
+  재실행해야 합니다 (bootstrap이 여기서 멈춥니다). 설치 후 클러스터 버전
+  업그레이드는 `./deploy upgrade eks` 사용 — 수동 절차는
+  [upgrade-eks-cluster.md](upgrade-eks-cluster.md). bi 챗(`enable_chat_agent`)은
   NDS 배포 대상이 아니라 scaffold 에서 자동으로 false 로 생성됩니다.
   또한 `values-eks-fargate-<env>[.local].yaml`이 없으면 dev 파일을 복사합니다 —
   `adminBootstrap.emails`를 실제 운영자 이메일로 바꾸세요 (그대로 두면

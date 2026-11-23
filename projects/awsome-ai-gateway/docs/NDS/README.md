@@ -50,6 +50,9 @@ LLM Gateway(Claude Code · Cowork · Codex 지원)를 **어느 AWS 계정·리�
 ./deploy bootstrap --plan  # 신규 설치 단계 미리보기 — 아무것도 안 바뀜
 ./deploy apply --plan   # 변경 계획만 보기 — 아무것도 안 바뀜
 ./deploy teardown    # [위험] 배포 삭제 — 소유 범위별 (환경 이름 입력으로 확인)
+./deploy upgrade eks --to 1.<minor>  # [위험] EKS 클러스터/애드온 홉 단위
+                     # 업그레이드 — apply는 버전을 바꾸지 않음
+                     #   --plan: 홉 계획·애드온 버전만 출력
 ```
 
 `teardown`은 apply가 소유하는 것만 지웁니다 — compose는 컨테이너+네트워크
