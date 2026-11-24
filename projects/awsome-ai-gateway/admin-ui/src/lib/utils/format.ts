@@ -236,3 +236,14 @@ export function fmtTime(iso: string, locale: string, timeZone?: string): string 
   if (Number.isNaN(d.getTime())) return iso;
   return d.toLocaleTimeString(locale, { timeZone, hour12: false });
 }
+
+/**
+ * 작은 비율(예: 요청당 웹 검색 수) — null 은 '—'(분모 없음), 0 은 '0.00', 0.01 이상은
+ * 소수 2자리, 그 미만은 유효숫자 2개(3/1,818 → '0.0017'; '0.00' 은 0 처럼 읽혀 오해를 산다).
+ */
+export function fmtSmallRatio(n: number | null | undefined): string {
+  if (n == null || !Number.isFinite(n)) return '—';
+  if (n === 0) return '0.00';
+  if (Math.abs(n) < 0.01) return String(Number(n.toPrecision(2)));
+  return n.toFixed(2);
+}

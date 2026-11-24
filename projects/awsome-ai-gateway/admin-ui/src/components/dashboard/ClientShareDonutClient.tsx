@@ -27,12 +27,16 @@ interface Props {
 export const ShareDonut = memo(function ShareDonut({
   data,
   onHover,
+  size = 256,
 }: {
   data: { name: string; value: number; fill: string }[];
   onHover: (_index: number | null) => void;
+  /** 정사각 px — 감싸는 박스(h-/w-)와 반드시 같게. recharts PieChart 는 고정 크기라
+      박스가 더 작으면 옆 범례 위로 넘쳐 그린다. */
+  size?: number;
 }) {
   return (
-    <PieChart width={256} height={256}>
+    <PieChart width={size} height={size}>
       <Pie
         data={data}
         dataKey="value"

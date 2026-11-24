@@ -37,6 +37,9 @@ export interface CostBudgetView {
   modelCost: number;
   /** 기록된 웹 검색 비용(미추적 null 은 0 으로 더한다 — 합계 표시용). */
   webSearchCost: number;
+  /** 그 기간 웹 검색 비용이 기록됐는가 — false(NULL)면 합계에 웹 검색이 빠져 있으므로
+      부제는 "$0.00" 이 아니라 "Web search not tracked" 라고 말한다. */
+  webSearchTracked: boolean;
   /** 'Usage This Month' 값 — 모델 + 웹 검색(표시 규칙이 거짓이면 모델만). */
   usageCost: number;
   avgPerUser: number;
@@ -54,6 +57,7 @@ export function costBudgetView(
   const showWebSearch = webSearchVisible(kpi.web_search);
   const modelCost = kpi.total_cost_usd;
   const webSearchCost = showWebSearch ? (kpi.web_search?.cost_usd ?? 0) : 0;
+  const webSearchTracked = kpi.web_search?.cost_usd != null;
   const usageCost = modelCost + webSearchCost;
   const avgPerUser = showWebSearch
     ? kpi.active_users > 0
@@ -65,6 +69,7 @@ export function costBudgetView(
     showWebSearch,
     modelCost,
     webSearchCost,
+    webSearchTracked,
     usageCost,
     avgPerUser,
     dailyAvg,

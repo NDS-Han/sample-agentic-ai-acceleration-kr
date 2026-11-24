@@ -77,7 +77,14 @@ async def test_past_month_uses_days_in_month_and_two_decimals():
     p = await _call(_total(10, Decimal("0.07"), 3), period="2026-10")
     assert p["elapsed_days"] == 31
     assert p["avg_queries_per_day"] == 0.32         # 10 / 31
-    assert p["queries_per_request"] == 3.33         # 10 / 3
+    assert p["queries_per_request"] == 3.33333333   # 10 / 3 — 표시 자릿수는 UI
+
+
+@pytest.mark.asyncio
+async def test_small_per_request_ratio_is_not_rounded_to_zero():
+    # dev 실측: 3 검색 / 1,818 성공 요청 — 소수 2자리로 자르면 0.0 이 되어 UI 가 '0.00' 을 보였다.
+    p = await _call(_total(3, None, 1818))
+    assert p["queries_per_request"] == round(3 / 1818, 8) and p["queries_per_request"] > 0
 
 
 @pytest.mark.asyncio
