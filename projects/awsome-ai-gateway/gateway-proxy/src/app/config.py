@@ -317,6 +317,10 @@ class Settings(BaseSettings):
     #: 400s the continuation turn and loses everything billed so far. Observed: the model
     #: never asked for more than 3 in one turn.
     web_search_max_searches_per_turn: int = 3
+    #: Searches per REQUEST when no budget.web_search_policies row sets ``per_request_cap``
+    #: (migration 0059, resolved USER → TEAM → ORG → this). Replaces the old fixed
+    #: rounds × per-turn bound: the round count is derived as ceil(cap / per_turn).
+    web_search_max_searches_per_request: int = Field(default=5, ge=1, le=50)
     #: Cap on the ADMISSION-only input-token add for web-search requests (see
     #: ``conservative_admission_body``). The raw worst-case growth add is
     #: per_turn_results × max_result_chars × growth_rounds/4 — with defaults

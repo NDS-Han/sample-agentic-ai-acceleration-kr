@@ -53,6 +53,7 @@ const STICKY_THEAD =
 export function AppPolicyPanel() {
   const t = useTranslations('apps');
   const tc = useTranslations('common');
+  const tq = useTranslations('webSearchQuota');
   const { toast } = useToast();
   const router = useRouter();
   const pathname = usePathname();
@@ -533,6 +534,15 @@ export function AppPolicyPanel() {
             <div>
               <h2 className="text-sm font-semibold">{t('webSearchTitle')}</h2>
               <p className="text-xs text-muted-foreground mt-0.5">{t('webSearchHint')}</p>
+              {/* 월 검색 수 한도(사용자·팀 풀)는 예산 관리에서 — 이 스위치(앱 on/off)가 먼저다. */}
+              <Link
+                href="/budgets#web-search-quota"
+                title={tq('appPolicyLinkHint')}
+                className="mt-0.5 inline-block text-xs text-primary hover:underline"
+                data-testid="web-search-quota-link"
+              >
+                {tq('appPolicyLink')} →
+              </Link>
               {/* 미배포 안내는 관리자용 문구, 배포 담당자용 설정 키(gateway.yaml)는 툴팁으로. */}
               {shown.web_search_deployed === false && (
                 <p className="flex items-center gap-1 text-xs text-amber-500 mt-0.5">

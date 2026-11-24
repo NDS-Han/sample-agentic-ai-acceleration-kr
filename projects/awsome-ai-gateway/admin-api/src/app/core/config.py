@@ -98,6 +98,9 @@ class Settings(BaseSettings):
     #    둘 다 주입했을 때만 "배포됨". admin UI 토글 표시에만 쓰인다.
     WEB_SEARCH_ENABLED: bool = False
     AGENTCORE_GATEWAY_URL: str = ""
+    #: 웹 검색 요청당 상한의 기본값 — budget.web_search_policies 에 per_request_cap 이 없을 때.
+    #: gateway-proxy 의 web_search_max_searches_per_request 와 같아야 한다(둘 다 기본 5).
+    WEB_SEARCH_MAX_SEARCHES_PER_REQUEST: int = 5
 
     # ── Application ──
     APP_NAME: str = "llm-gateway-admin-api"

@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from pydantic import BaseModel
 
+from app.schemas.web_search_quota import WebSearchQuotaEffective
+
 
 class EffectivePolicyCell(BaseModel):
     """client × model_alias 한 칸의 판정."""
@@ -77,3 +79,6 @@ class EffectivePolicyResponse(BaseModel):
     # cells + downgrade_rules 에 등장하는 모든 별칭의 현재 output 단가 —
     # 카탈로그에 없는 규칙 별칭은 누락된다(UI 가 '—' 로 표시).
     models: list[EffectivePolicyModel] = []
+    # 웹 검색 통제(검색 수 기준, 예산과 별개) — 유효 월 한도·사용·잔여·팀 풀·요청당 상한.
+    # 라우터가 WebSearchQuotaService 로 채운다(get_for_user/get_for_team 은 건드리지 않음).
+    web_search_quota: WebSearchQuotaEffective | None = None

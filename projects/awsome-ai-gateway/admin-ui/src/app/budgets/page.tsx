@@ -3,6 +3,8 @@
 import { cookies } from 'next/headers';
 import { getTranslations } from 'next-intl/server';
 import { getWebSearchPricingAction } from '@/lib/actions/settings';
+import { fetchWebSearchQuotaOverview } from '@/lib/actions/webSearchQuota';
+import { WebSearchQuotaSection } from '@/components/budgets/WebSearchQuotaSection';
 import { adminAPI } from '@/lib/api-client';
 import { normalizeAllocation } from '@/lib/budget-allocation';
 import { currentCalendarMonth } from '@/lib/utils/period';
@@ -54,6 +56,9 @@ export default async function BudgetsPage(props: BudgetsPageProps) {
   const role =
     roleFromCookie(cookieStore.get(ADMIN_ROLE_COOKIE)?.value) ?? session?.role;
   const isAdmin = role === 'ADMIN';
+  // 웹 검색 한도 개요 — 관리자만(실패해도 섹션이 자체 실패 상태를 보인다).
+  const wsQuotaRes = isAdmin ? await fetchWebSearchQuotaOverview() : null;
+  const wsQuota = wsQuotaRes?.success ? wsQuotaRes.data : null;
 
   // 관리자·팀 리더 모두 본인 신원을 JWT 에 기대지 않는다 — OIDC 토큰에는
   // team_id 클레임이 없고 sub 도 DB user_id 와 다를 수 있어, 그대로 쓰면
@@ -221,6 +226,9 @@ export default async function BudgetsPage(props: BudgetsPageProps) {
       ) : (
         <p className="text-sm text-muted-foreground">{t('noTeamAssigned')}</p>
       )}
+
+      {/* 웹 검색 한도(검색 수 기준, 예산과 별개) — 조직 기본·팀 공용 풀·사용자 개별 지정. */}
+      {isAdmin && <WebSearchQuotaSection initial={wsQuota} />}
     </div>
   );
 }

@@ -9,7 +9,12 @@ import { getEffectivePolicyAction, getTeamEffectivePolicyAction } from '@/lib/ac
 import { DowngradeDiagram } from '@/components/common/DowngradeDiagram';
 import { CLIENTS as GATEWAY_CLIENTS } from '@/lib/constants/gateway';
 import { modelDisplay } from '@/lib/utils/modelLabel';
-import type { EffectivePolicy, EffectivePolicyCell, PolicyModelRef } from '@/types/entities';
+import type {
+  EffectivePolicy,
+  EffectivePolicyCell,
+  PolicyModelRef,
+  WebSearchQuotaEffective,
+} from '@/types/entities';
 
 interface Props {
   /** policy 를 넘기면 불필요(자체 fetch 용). 팀 뷰처럼 부모 소유 데이터면 생략. */
@@ -257,6 +262,9 @@ export function EffectivePolicyCard({ userId, teamId, policy: policyProp, loadFa
           </span>
         </div>
 
+        {/* 웹 검색 한도(검색 수 기준, 예산과 별개) — 유효 월 한도·사용·잔여·팀 풀·요청당 상한 */}
+        {policy.web_search_quota && <WebSearchQuotaRows q={policy.web_search_quota} team={policy.user_id == null} />}
+
         {/* rate limit 요약 */}
         <div className="border-t border-border/50 pt-1.5">
           <p className="text-xs font-medium mb-1">{t('rateLimits')}</p>
@@ -283,6 +291,41 @@ export function EffectivePolicyCard({ userId, teamId, policy: policyProp, loadFa
         </div>
       </div>
 
+    </div>
+  );
+}
+
+
+/** 웹 검색 한도 요약 줄 — 사용자 뷰는 개인 한도 + 팀 풀, 팀 뷰는 팀 풀만. */
+function WebSearchQuotaRows({ q, team }: { q: WebSearchQuotaEffective; team: boolean }) {
+  const t = useTranslations('webSearchQuota');
+  const row = (label: string, value: string, testId: string) => (
+    <div className="flex items-baseline justify-between gap-3 text-xs" data-testid={testId}>
+      <span className="text-muted-foreground">{label}</span>
+      <span className="font-medium text-foreground text-right">{value}</span>
+    </div>
+  );
+  const pool =
+    q.team_pool_limit != null
+      ? t('effTeamPoolValue', { used: q.team_used, limit: q.team_pool_limit, remaining: q.team_remaining ?? 0 })
+      : t('effNoPool', { used: q.team_used });
+  return (
+    <div className="border-t border-border/50 pt-1.5 space-y-1" data-testid="effective-web-search-quota">
+      <p className="text-xs font-medium">{t('effTitle')}</p>
+      {!team &&
+        row(
+          `${t('effMonthly')} (${t(`source.${q.monthly_limit_source}`)})`,
+          q.monthly_limit != null
+            ? t('effUsedRemaining', { used: q.used, limit: q.monthly_limit, remaining: q.remaining ?? 0 })
+            : t('effUnlimitedUsed', { used: q.used }),
+          'ws-quota-monthly',
+        )}
+      {row(t('effTeamPool'), pool, 'ws-quota-team')}
+      {row(
+        `${t('effCap')} (${t(`source.${q.per_request_cap_source}`)})`,
+        t('effCapValue', { cap: q.per_request_cap }),
+        'ws-quota-cap',
+      )}
     </div>
   );
 }

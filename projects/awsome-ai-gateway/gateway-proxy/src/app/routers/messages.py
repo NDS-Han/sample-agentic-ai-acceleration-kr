@@ -344,6 +344,24 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
             ),
         )
 
+    # --- 웹 검색 통제(월 검색 수 한도) — 순서: global off > app off > 월 한도 > 요청당 상한 ---
+    # 월 한도에 닿았으면 도구를 주지 않고(soft block) 모델 호출은 그대로 보낸다 — 이 판정은
+    # 어떤 경우에도 요청을 거절하지 않는다(예산·HARD_BLOCK 과 무관, services/web_search_quota).
+    # 노트는 웹서치 루프를 우회하는 모든 경로가 쓰는 req_for_bedrock 에 붙인다.
+    from app.services.web_search_quota import add_monthly_limit_notice, gate_web_search
+
+    _ws_gate = await gate_web_search(
+        state=state, redis=redis, session_factory=session_factory, auth_context=auth_context,
+        app_enabled=(
+            getattr(request.app.state, "agentcore_mcp_client", None) is not None
+            and decision.profile is not None
+            and bool(getattr(decision.profile, "web_search_enabled", False))
+        ),
+        default_cap=get_settings().web_search_max_searches_per_request,
+    )
+    if _ws_gate.monthly_limit_reached and isinstance(req_for_bedrock, dict):
+        add_monthly_limit_notice(req_for_bedrock, "anthropic")
+
     # cross-account(claude-code→374) 일 때만 Bedrock 분기에서 profile.region 으로 설정.
     # 분기 전 명시 초기화 → 아래 _rewrite 클로저가 locals() 리플렉션 없이 직접 참조(리팩터 안전).
     _region_for_rewrite = None
@@ -734,6 +752,8 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
         mcp_client is not None
         and _profile is not None
         and getattr(_profile, "web_search_enabled", False)
+        # 월 한도 소진 = soft block(도구 미주입, 위 _ws_gate).
+        and _ws_gate.enabled
     )
     # ⚠️ 회로 게이트는 웹서치가 **실제로 켜진** 경우에만 연다. 비-웹서치 요청이
     #    여기서 half-open 프로브를 먼저 잡으면 아래 폴백 루프의 재획득이 SET NX 에
@@ -780,8 +800,11 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
         #    헬퍼는 web_search_loop.conservative_admission_body — openai_compat 의
         #    /v1/responses 경로(R3-5)도 같은 함수로 같은 값을 예약한다.
         _settings_ws = get_settings()
+        # 요청당 상한(정책) → 검색 턴 수. env 의 고정 2×3 대신 ceil(cap / 턴당).
+        _ws_iterations = _ws_gate.max_iterations(
+            _settings_ws.web_search_max_searches_per_turn, _settings_ws.web_search_max_iterations)
         _admission_body = conservative_admission_body(
-            req_data, _settings_ws.web_search_max_iterations,
+            req_data, _ws_iterations,
             max_result_chars=_settings_ws.web_search_max_result_chars,
             max_searches_per_turn=_settings_ws.web_search_max_searches_per_turn,
             default_max_results=_settings_ws.web_search_max_results_default,
@@ -983,10 +1006,11 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
                 invoke_stream=_ws_invoke_stream,
                 initial_req_data=req_data if isinstance(req_data, dict) else {},
                 is_stream=is_stream,
-                mcp_client=mcp_client,
+                # 검색마다 월 한도 예약 + 요청당 상한(QuotaGuard).
+                mcp_client=_ws_gate.wrap(mcp_client, redis),
                 request=request,
                 on_usage=_ws_record,
-                max_iterations=_settings_ws.web_search_max_iterations,
+                max_iterations=_ws_iterations,
                 total_deadline_sec=_settings_ws.web_search_total_deadline_sec,
                 default_max_results=_settings_ws.web_search_max_results_default,
                 max_result_chars=_settings_ws.web_search_max_result_chars,

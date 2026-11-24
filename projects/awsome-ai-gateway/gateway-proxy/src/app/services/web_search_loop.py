@@ -90,6 +90,7 @@ from app.providers.openai_usage import extract_responses_usage
 from app.schemas.domain import TokenUsage
 from app.services.agentcore_mcp_client import AgentCoreMcpClient, AgentCoreMcpError
 from app.services.streaming import _aclose_iter, _spawn, mark_outcome, outcome_from_http
+from app.services.web_search_quota import WebSearchQuotaExceeded, WebSearchRequestCapReached
 
 logger = structlog.get_logger(__name__)
 
@@ -219,7 +220,7 @@ def conservative_admission_body(
     return body
 
 
-def _budget_sentence(budget: Optional[tuple[int, int]]) -> str:
+def _budget_sentence(budget: Optional[tuple[int, ...]]) -> str:
     """Sentence appended to the tool description telling the model its search budget.
 
     Without it the model re-verified single facts up to the cap (2026-09-16 benchmark of 14
@@ -229,12 +230,16 @@ def _budget_sentence(budget: Optional[tuple[int, int]]) -> str:
     """
     if not budget:
         return ""
-    per_turn, iterations = budget
+    per_turn, iterations = budget[0], budget[1]
+    # 3번째 원소 = 요청당 총 검색 상한(정책, web_search_quota). 0/없음 = 턴 수로만 표현.
+    total = budget[2] if len(budget) > 2 and budget[2] else 0
     parts = []
     if per_turn > 0:
         parts.append(f"up to {per_turn} searches per turn")
     if iterations > 0:
         parts.append(f"{iterations} search turn{'s' if iterations != 1 else ''} per request")
+    if total > 0:
+        parts.append(f"at most {total} search{'es' if total != 1 else ''} in total")
     if not parts:
         return ""
     return (" Budget for this request: " + " and ".join(parts)
@@ -242,7 +247,18 @@ def _budget_sentence(budget: Optional[tuple[int, int]]) -> str:
             "not spend it re-verifying facts you already have.")
 
 
-def _anthropic_tool_def(budget: Optional[tuple[int, int]] = None) -> dict:
+def _loop_budget(per_turn: int, iterations: int, mcp_client: Any) -> tuple[int, int, int]:
+    """도구 설명의 예산 문장 입력 — (턴당, 턴 수, 요청당 총 상한)."""
+    return (per_turn, iterations, _request_cap(mcp_client))
+
+
+def _request_cap(mcp_client: Any) -> int:
+    """요청당 총 검색 상한(QuotaGuard 로 감싼 경우) — 아니면 0(턴 수로만 제한)."""
+    return int(getattr(mcp_client, "per_request_cap", 0) or 0) if hasattr(
+        type(mcp_client), "remaining_request_searches") else 0
+
+
+def _anthropic_tool_def(budget: Optional[tuple[int, ...]] = None) -> dict:
     """The ``web_search`` tool as an Anthropic Messages tool definition."""
     return {
         "name": GW_WEB_SEARCH_NAME,
@@ -264,7 +280,7 @@ def _anthropic_tool_def(budget: Optional[tuple[int, int]] = None) -> dict:
     }
 
 
-def _responses_tool_def(budget: Optional[tuple[int, int]] = None) -> dict:
+def _responses_tool_def(budget: Optional[tuple[int, ...]] = None) -> dict:
     """The ``web_search`` tool as an OpenAI Responses function tool definition."""
     return {
         "type": "function",
@@ -892,6 +908,17 @@ def _exhausted_error() -> str:
                                  "or continue with your other tools")})
 
 
+def _monthly_limit_error() -> str:
+    """tool_result content for a search refused because the MONTHLY web search limit
+    (user or team pool, web_search_quota) was reached during this request. Must not invite
+    a retry — no further search will run this month."""
+    return json.dumps({"error": ("the monthly web search limit for this account or team "
+                                 "has been reached; this query was NOT run and no further "
+                                 "web search will run this month — answer from the results "
+                                 "already provided or without web search, and tell the user "
+                                 "the monthly web search limit was reached")})
+
+
 async def _run_turn_searches(
     mcp_client: AgentCoreMcpClient, inputs: list, allowance: int, deadline: float,
     default_max_results: int, max_result_chars: int, result_text_chars: int,
@@ -912,9 +939,21 @@ async def _run_turn_searches(
     results: list = [None] * len(inputs)
     todo: list[tuple[int, Any]] = []
     past_deadline = time.monotonic() > deadline
+    # 정책 상한(QuotaGuard) — 요청당 남은 검색 수로 이 턴의 허용량을 줄이고, 다 썼으면
+    # 이 요청 예산 소진과 같게 답한다. 월 한도에 이미 닿았으면 남은 검색은 월 한도 오류.
+    monthly = bool(getattr(mcp_client, "monthly_limit_reached", False)) and hasattr(
+        type(mcp_client), "remaining_request_searches")
+    if hasattr(type(mcp_client), "remaining_request_searches"):
+        left = mcp_client.remaining_request_searches()
+        if left <= 0:
+            exhausted = True
+        allowance = min(allowance, left)
     for i, inp in enumerate(inputs):
         q = inp.get("query", "") if isinstance(inp, dict) else ""
-        if exhausted:
+        if monthly:
+            results[i] = (_monthly_limit_error(), False,
+                          _trace_line(q, _trace_words("monthly")), "exhausted", None)
+        elif exhausted:
             results[i] = (_exhausted_error(), False,
                           _trace_line(q, _trace_words("exhausted")), "exhausted", None)
         elif i >= allowance:
@@ -1081,6 +1120,9 @@ def _trace_words(kind: str, **kw: Any) -> str:
     if kind == "exhausted":
         return ("실행 안 됨 (이 요청의 검색 한도 소진)" if ko
                 else "not run (search budget of this request used up)")
+    if kind == "monthly":
+        return ("실행 안 됨 (월 웹 검색 한도 도달)" if ko
+                else "not run (monthly web search limit reached)")
     if kind == "mixed":
         if ko:
             return "실행 안 됨 (클라이언트 도구와 같은 턴 — 다음 턴에 web_search 단독 호출)"
@@ -1896,6 +1938,12 @@ async def _do_search(
             n, hosts = _result_hosts(resp)
             digest = _result_digest(resp, _DIGEST_RESULTS, _digest_chars(result_text_chars))
         return (text, True, _trace_line(query, _trace_words("results", n=n, hosts=hosts)), digest)
+    except WebSearchQuotaExceeded:
+        logger.info("web_search.monthly_limit_reached_mid_request")
+        return (_monthly_limit_error(), False,
+                _trace_line(query, _trace_words("monthly")), None)
+    except WebSearchRequestCapReached:
+        return (_exhausted_error(), False, _trace_line(query, _trace_words("exhausted")), None)
     except AgentCoreMcpError as e:
         logger.warning("web_search.failed", error=str(e)[:200])
         return (json.dumps({"error": f"web search unavailable: {str(e)[:160]}"}), False,
@@ -2025,7 +2073,8 @@ async def _anthropic_stream(
                 logger.info("web_search.final_turn", mode=final_mode, attempts=search_attempts)
             turn_body = _with_web_search_tool(base_body, "anthropic", include=True,
                                               first_turn=search_attempts == 0,
-                                              budget=(max_searches_per_turn, max_iterations),
+                                              budget=_loop_budget(max_searches_per_turn,
+                                                                  max_iterations, mcp_client),
                                               final=force_final)
             turn_body = dict(turn_body)
             # The hard final turn keeps the tool (tool_choice: none) so the history's tool
@@ -2841,7 +2890,8 @@ async def _anthropic_nonstream(
                 logger.info("web_search.final_turn", mode=final_mode, attempts=search_attempts)
             turn_body = _with_web_search_tool(base_body, "anthropic", include=True,
                                               first_turn=search_attempts == 0,
-                                              budget=(max_searches_per_turn, max_iterations),
+                                              budget=_loop_budget(max_searches_per_turn,
+                                                                  max_iterations, mcp_client),
                                               final=force_final)
             turn_body = dict(turn_body)
             # Hard final turn: tool kept (tool_choice: none), answer-now instruction appended;
@@ -3132,7 +3182,8 @@ async def _responses_stream(
             force_final = search_attempts >= max_iterations or time.monotonic() > deadline
             turn_body = _with_web_search_tool(base_body, "responses", include=not force_final,
                                               first_turn=search_attempts == 0,
-                                              budget=(max_searches_per_turn, max_iterations))
+                                              budget=_loop_budget(max_searches_per_turn,
+                                                                  max_iterations, mcp_client))
             turn_body = dict(turn_body)
             # Forced-final turn: the tool is removed, so our plumbing must be rewritten as
             # text — see _strip_anthropic_web_search_plumbing for the reasoning.
@@ -3578,7 +3629,8 @@ async def _responses_nonstream(
             force_final = search_attempts >= max_iterations or time.monotonic() > deadline
             turn_body = _with_web_search_tool(base_body, "responses", include=not force_final,
                                               first_turn=search_attempts == 0,
-                                              budget=(max_searches_per_turn, max_iterations))
+                                              budget=_loop_budget(max_searches_per_turn,
+                                                                  max_iterations, mcp_client))
             turn_body = dict(turn_body)
             # Forced-final turn removes the tool, so our function_call/output items (leaked
             # ones included) are rewritten as text — see _anthropic_nonstream.

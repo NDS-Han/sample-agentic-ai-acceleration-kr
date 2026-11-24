@@ -519,6 +519,26 @@ EXCEPTION WHEN unique_violation THEN
     RAISE WARNING 'idx_downgrade_policies_unique_active: 기존 중복 데이터로 유니크 인덱스 생성 건너뜀 — 운영 remediation 필요';
 END $$;
 
+-- 웹 검색 월 검색 수 한도 + 요청당 상한 (migration 0059). 예산·HARD_BLOCK 과 별개 —
+-- 한도 초과 시 게이트웨이는 web_search 도구만 빼고 모델 호출은 그대로 보낸다(soft block).
+-- ORG(scope_id NULL) 한도 = 사용자 1인 기본, TEAM 한도 = 팀 공용 풀, USER 한도 = 개인 덮어쓰기.
+-- per_request_cap: USER → TEAM → ORG → 게이트웨이 env 기본. NULL = 상속. 월 한도 0 = 금지.
+CREATE TABLE IF NOT EXISTS budget.web_search_policies (
+    id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    scope               VARCHAR(8)  NOT NULL,
+    scope_id            UUID,
+    monthly_query_limit INTEGER,
+    per_request_cap     INTEGER,
+    updated_by          UUID REFERENCES auth.users(id),
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT ck_wsp_scope CHECK (scope IN ('ORG', 'TEAM', 'USER')),
+    CONSTRAINT ck_wsp_scope_id CHECK ((scope = 'ORG') = (scope_id IS NULL)),
+    CONSTRAINT ck_wsp_limit CHECK (monthly_query_limit IS NULL OR monthly_query_limit >= 0),
+    CONSTRAINT ck_wsp_cap CHECK (per_request_cap IS NULL OR per_request_cap BETWEEN 1 AND 50)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_web_search_policies_scope
+    ON budget.web_search_policies (scope, COALESCE(scope_id, '00000000-0000-0000-0000-000000000000'::uuid));
+
 -- ============================================================
 -- usage schema — Enums
 -- ============================================================
