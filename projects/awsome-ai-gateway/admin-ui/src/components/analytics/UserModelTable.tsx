@@ -13,6 +13,7 @@ import { ErrorState } from '@/components/common/ErrorState';
 import {
   MIX_BUCKETS,
   cellTooltip,
+  userSubline,
   cellValue,
   fmtInt,
   fmtTok,
@@ -42,8 +43,7 @@ function useTipLabels(): CellTipLabels {
     cacheRead: t('tipCacheRead'),
     cacheWrite: t('tipCacheWrite'),
     total: t('tipTotal'),
-    cost: t('tipCost'),
-    requests: t('tipRequests'),
+    requests: (count) => t('tipRequests', { count }),
   };
 }
 
@@ -253,7 +253,9 @@ export function UserModelTable({
   const t = useTranslations('analytics.userModel');
   const labels = useTipLabels();
   const max = Number(data.max_cell?.[mode]) || 0;
-  const colCount = 2 + data.top_models.length + 1 + 2;
+  // Other 에 든 모델이 없으면 'Other (0)' 열은 통째로 숨긴다(헤더·셀·colSpan).
+  const showOther = data.other_models.length > 0;
+  const colCount = 2 + data.top_models.length + (showOther ? 1 : 0) + 2;
 
   useEffect(() => {
     if (!focusUserId) return;
@@ -304,9 +306,10 @@ export function UserModelTable({
               const label = modelDisplay(m.model, m.display_name);
               return head(`model:${m.model}`, label, { tip: `${t('sortBy', { column: label })}\n${m.model}` });
             })}
-            {head('other', t('colOther', { count: data.other_models.length }), {
-              tip: data.other_models.length ? t('otherModels', { models: otherNames }) : t('otherNone'),
-            })}
+            {showOther &&
+              head('other', t('colOther', { count: data.other_models.length }), {
+                tip: t('otherModels', { models: otherNames }),
+              })}
             {head('total', t('colTotal'))}
             {head('cost', t('colCost'))}
           </tr>
@@ -322,7 +325,7 @@ export function UserModelTable({
             data.rows.map((r: UserModelRow) => {
               const name = rowName(r);
               const open = expanded.has(r.user_id);
-              const sub = [r.name?.trim() ? r.email : null, r.team_name].filter(Boolean).join(' · ');
+              const sub = userSubline(r);
               return (
                 <Fragment key={r.user_id}>
                   <tr className={cn('border-b border-[--table-divider]', open ? 'bg-muted/40' : 'hover:bg-[--table-row-hover]')}>
@@ -352,7 +355,9 @@ export function UserModelTable({
                         user={name}
                       />
                     ))}
-                    <HeatCell cell={r.other} mode={mode} max={max} model={t('colOther', { count: data.other_models.length })} user={name} />
+                    {showOther && (
+                      <HeatCell cell={r.other} mode={mode} max={max} model={t('colOther', { count: data.other_models.length })} user={name} />
+                    )}
                     <td
                       className="px-3 py-1.5 text-right font-bold num"
                       title={cellTooltip(`${t('colTotal')} · ${name}`, r.total, labels)}

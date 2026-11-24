@@ -142,12 +142,37 @@ describe('UserModelSection — 표', () => {
         'Claude Sonnet 4.6 · Kim',
         'Input 400,000 · Output 200,000',
         'Cache read 1,200,000 · Cache write 200,000',
-        'Total 2,000,000',
-        'Cost $2.00 · Requests 7',
+        'Total 2M',
+        '$2.00 · 7 requests',
       ].join('\n'),
     );
     // max_cell.total 과 같은 값 → 농도 1.
     expect((sonnet.firstChild as HTMLElement).style.background).toContain('0.460');
+    // 1센트 미만 비용은 정확값(유효숫자 2개)
+    const lee1 = within(lee).getByText('10').closest('td')!;
+    expect(lee1.getAttribute('title')!.split('\n').at(-1)).toBe('$0.000010 · 7 requests');
+  });
+
+  it("Other 에 든 모델이 있으면 'Other (n)' 열을 보이고, 없으면 열을 통째로 숨긴다", async () => {
+    await ready();
+    expect(screen.getByRole('columnheader', { name: 'Other (1)' })).toBeTruthy();
+    expect(screen.getAllByRole('columnheader')).toHaveLength(7);
+  });
+
+  it("Other 가 비면 'Other (0)' 열이 없다 — 헤더·셀 모두", async () => {
+    const noOther: UserModelResponse = {
+      ...LIST,
+      other_models: [],
+      rows: LIST.rows.map((r) => ({ ...r, other: null })),
+    };
+    fetchMock.mockImplementation(async () =>
+      new Response(JSON.stringify(noOther), { status: 200, headers: { 'content-type': 'application/json' } }),
+    );
+    await ready();
+    expect(screen.queryByRole('columnheader', { name: /Other/ })).toBeNull();
+    expect(screen.getAllByRole('columnheader')).toHaveLength(6);
+    const lee = screen.getByText('Lee').closest('tr')!;
+    expect(lee.querySelectorAll('td')).toHaveLength(6);
   });
 
   it('모드 전환은 셀 값만 바꾸고(Total 정렬일 때만 sort 파라미터가 따라감)', async () => {
@@ -213,6 +238,8 @@ describe('UserModelDrawer', () => {
     expect(dialog.getAttribute('aria-modal')).toBe('true');
     const labelledBy = dialog.getAttribute('aria-labelledby')!;
     expect(document.getElementById(labelledBy)!.textContent).toBe('Lee');
+    // 동명이인 구분 — 이름 아래 표 행과 같은 "email · team"
+    expect(within(dialog).getByTestId('user-model-drawer-sub').textContent).toBe('lee@example.com · Data');
     expect(dialog.contains(document.activeElement)).toBe(true);
 
     fireEvent.keyDown(document.activeElement!, { key: 'Escape' });
