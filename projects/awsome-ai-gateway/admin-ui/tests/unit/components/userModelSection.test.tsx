@@ -212,6 +212,23 @@ describe('UserModelSection — 표', () => {
     expect(urls().some((u) => u.pathname === `/api/analytics/user-models/${U2}` && u.searchParams.get('client') === 'codex')).toBe(true);
   });
 
+  it('행 전체가 펼침 대상 — 이름 클릭·Enter 로 펼치고, 셰브런은 한 번만 토글', async () => {
+    await ready();
+    const user = userEvent.setup();
+    const row = screen.getByText('Lee').closest('tr')!;
+    expect(row.getAttribute('tabindex')).toBe('0');
+    expect(row.className).toContain('cursor-pointer');
+    await user.click(screen.getByText('Lee'));
+    expect(row.getAttribute('aria-expanded')).toBe('true');
+    expect(document.getElementById(row.getAttribute('aria-controls')!)).toBeTruthy();
+    expect(await screen.findByText('Lee · all models (2)')).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: 'Collapse Lee' }));
+    expect(row.getAttribute('aria-expanded')).toBe('false');
+    row.focus();
+    await user.keyboard('{Enter}');
+    expect(row.getAttribute('aria-expanded')).toBe('true');
+  });
+
   it('422 는 기간 초과 안내', async () => {
     fetchMock.mockImplementation(async () =>
       new Response(JSON.stringify({ error: { code: 'date_range_too_long' } }), { status: 422 }),
@@ -269,7 +286,8 @@ describe('UserModelDrawer', () => {
     await waitFor(() => expect(listCalls().at(-1)!.searchParams.get('q')).toBe('lee@example.com'));
     const toggle = await screen.findByRole('button', { name: 'Collapse Lee' });
     expect(toggle.getAttribute('aria-expanded')).toBe('true');
-    await waitFor(() => expect(document.activeElement).toBe(toggle));
+    // 포커스는 펼친 행 자체(행이 키보드 펼침 대상)
+    await waitFor(() => expect(document.activeElement).toBe(toggle.closest('tr')));
   });
 });
 

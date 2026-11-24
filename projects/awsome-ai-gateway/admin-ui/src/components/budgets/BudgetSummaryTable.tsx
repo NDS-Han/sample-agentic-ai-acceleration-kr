@@ -16,6 +16,8 @@ import { TeamAllocationView } from './TeamAllocationView';
 import { AlertBadge, TypeBadge, UsageBar } from './budgetVisuals';
 import { Badge } from '@/components/common/Badge';
 import { fmtUsd } from '@/lib/utils/format';
+import { cn } from '@/lib/utils/cn';
+import { disclosureProps } from '@/lib/utils/disclosure';
 import { Usd } from '@/components/common/Usd';
 
 interface BudgetSummaryTableProps {
@@ -215,7 +217,7 @@ export function BudgetSummaryTable({ items, isAdmin, models, modelsLoadFailed, c
     // 개별 cap·기본 cap 둘 다 없으면 팀 예산만 적용 — '-' 대신 팀 한도/잔여를 보여준다.
     const teamOnly = user.limit == null && user.cap_source !== 'team_default';
     return (
-    <Tr key={user.target_id} className="bg-muted/10">
+    <Tr key={user.target_id} id={`budget-row-${user.target_id}`} className="bg-muted/10">
       <Td emphasis>
         <div className="flex items-center gap-2 pl-10">
           <span className="text-muted-foreground" aria-hidden="true">
@@ -355,15 +357,20 @@ export function BudgetSummaryTable({ items, isAdmin, models, modelsLoadFailed, c
                     (expanded[team.target_id] ?? false) ||
                     (memberQuery !== '' && members.length > 0);
                   const hasMembers = members.length > 0;
+                  // 행 전체가 펼침 대상 — '예산 설정'·배지 링크 등 안쪽 버튼은 제외(공용 disclosureProps).
+                  const detailId = `budget-detail-${team.target_id}`;
+                  const d = disclosureProps({
+                    expanded: isOpen,
+                    onToggle: () => toggle(team.target_id),
+                    controlsId: [...members.map((m) => `budget-row-${m.target_id}`), detailId].join(' '),
+                  });
                   return (
                     <Fragment key={team.target_id}>
-                      <Tr id={`budget-row-${team.target_id}`}>
+                      <Tr {...d.target} id={`budget-row-${team.target_id}`} className={cn(d.target.className)}>
                         <Td emphasis>
                           <div className="flex items-center gap-2">
                             <button
-                              type="button"
-                              onClick={() => toggle(team.target_id)}
-                              aria-expanded={isOpen}
+                              {...d.chevron}
                               aria-label={
                                 isOpen
                                   ? t('collapse', { name: team.target_name })
@@ -459,6 +466,7 @@ export function BudgetSummaryTable({ items, isAdmin, models, modelsLoadFailed, c
                         {isAdmin && (
                           <Td>
                             <button
+                              type="button"
                               onClick={() => handleOpenDialog(team)}
                               className="inline-flex items-center justify-center rounded-md border border-border bg-background px-3 py-1.5 text-xs font-medium hover:bg-accent transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                             >
@@ -487,7 +495,7 @@ export function BudgetSummaryTable({ items, isAdmin, models, modelsLoadFailed, c
                         </Tr>
                       )}
                       {isOpen && (
-                        <Tr className="bg-muted/10">
+                        <Tr id={detailId} className="bg-muted/10">
                           <Td colSpan={colCount}>
                             <div className="pl-10 py-2">
                               <AutoDowngradeConfig
@@ -514,15 +522,18 @@ export function BudgetSummaryTable({ items, isAdmin, models, modelsLoadFailed, c
 
                 {visibleUnassigned.length > 0 && (() => {
                   const isOpen = (expanded[UNASSIGNED_KEY] ?? false) || memberQuery !== '';
+                  const d = disclosureProps({
+                    expanded: isOpen,
+                    onToggle: () => toggle(UNASSIGNED_KEY),
+                    controlsId: visibleUnassigned.map((u) => `budget-row-${u.target_id}`).join(' '),
+                  });
                   return (
                     <Fragment key={UNASSIGNED_KEY}>
-                      <Tr id={`budget-row-${UNASSIGNED_KEY}`}>
+                      <Tr {...d.target} id={`budget-row-${UNASSIGNED_KEY}`} className={cn(d.target.className)}>
                         <Td emphasis colSpan={colCount}>
                           <div className="flex items-center gap-2">
                             <button
-                              type="button"
-                              onClick={() => toggle(UNASSIGNED_KEY)}
-                              aria-expanded={isOpen}
+                              {...d.chevron}
                               aria-label={isOpen ? t('collapseUnassigned') : t('expandUnassigned')}
                               className="flex h-5 w-5 items-center justify-center rounded hover:bg-muted text-muted-foreground"
                             >

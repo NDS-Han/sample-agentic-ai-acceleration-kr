@@ -6,6 +6,7 @@ import { Fragment, useEffect, useState } from 'react';
 import { useTranslations } from 'next-intl';
 import { ChevronDown, ChevronRight } from 'lucide-react';
 import { cn } from '@/lib/utils/cn';
+import { disclosureProps } from '@/lib/utils/disclosure';
 import { fmtLatencyMs, fmtUsd, usdTitle } from '@/lib/utils/format';
 import { modelDisplay } from '@/lib/utils/modelLabel';
 import { userLabel } from '@/lib/userLabel';
@@ -326,15 +327,23 @@ export function UserModelTable({
               const name = rowName(r);
               const open = expanded.has(r.user_id);
               const sub = userSubline(r);
+              // 행 전체가 펼침 대상(공용 disclosureProps) — 셀 툴팁·이름을 눌러도 펼친다.
+              const detailId = `user-model-detail-${r.user_id}`;
+              const d = disclosureProps({ expanded: open, onToggle: () => onToggle(r.user_id), controlsId: detailId });
               return (
                 <Fragment key={r.user_id}>
-                  <tr className={cn('border-b border-[--table-divider]', open ? 'bg-muted/40' : 'hover:bg-[--table-row-hover]')}>
+                  <tr
+                    {...d.target}
+                    data-expand-user={r.user_id}
+                    className={cn(
+                      d.target.className,
+                      'border-b border-[--table-divider]',
+                      open ? 'bg-muted/40' : 'hover:bg-[--table-row-hover]',
+                    )}
+                  >
                     <td className="px-1 py-1 align-middle">
                       <button
-                        type="button"
-                        data-expand-user={r.user_id}
-                        onClick={() => onToggle(r.user_id)}
-                        aria-expanded={open}
+                        {...d.chevron}
                         aria-label={open ? t('collapse', { name }) : t('expand', { name })}
                         className="flex h-7 w-7 items-center justify-center rounded-md border border-border text-muted-foreground hover:bg-muted focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                       >
@@ -369,7 +378,7 @@ export function UserModelTable({
                     </td>
                   </tr>
                   {open && (
-                    <tr className="border-b border-[--table-divider]">
+                    <tr id={detailId} className="border-b border-[--table-divider]">
                       <td colSpan={colCount} className="px-3 pb-3 pt-1">
                         <div className="ml-8 rounded-apple-sm border border-border bg-muted/30 p-3">
                           <DetailPanel userId={r.user_id} name={name} fetchDetail={fetchDetail} />

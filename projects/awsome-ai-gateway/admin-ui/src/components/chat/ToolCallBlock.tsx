@@ -143,9 +143,10 @@ export function ToolCallBlock({ toolCall, sessionId }: Props) {
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
-        className="w-full flex items-center gap-2 px-3 py-2 text-xs hover:bg-accent/50 transition-colors"
+        aria-expanded={open}
+        className="w-full flex items-center gap-2 px-3 py-2 text-xs hover:bg-accent/50 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
       >
-        {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+        {open ? <ChevronDown size={14} aria-hidden="true" /> : <ChevronRight size={14} aria-hidden="true" />}
         <span className="text-muted-foreground">{meta.icon}</span>
         <span className="font-medium">{meta.label}</span>
         {toolCall.status === 'running' && (

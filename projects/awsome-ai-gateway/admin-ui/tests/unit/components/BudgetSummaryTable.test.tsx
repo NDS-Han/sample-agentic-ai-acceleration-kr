@@ -74,3 +74,30 @@ describe('BudgetSummaryTable — 팀 한도 표시', () => {
     expect(within(bigRow).getByText('teamLimitFirst')).toBeInTheDocument();
   });
 });
+
+describe('BudgetSummaryTable — 팀 행 전체가 펼침 대상', () => {
+  it("팀 이름 클릭으로 펼치고, '예산 설정' 버튼은 펼치지 않으며, Enter 로 접는다", async () => {
+    const { default: userEvent } = await import('@testing-library/user-event');
+    const user = userEvent.setup();
+    render(<BudgetSummaryTable items={items} isAdmin models={[]} />);
+    const row = screen.getByText('NDS_Developers').closest('tr')!;
+    expect(row.getAttribute('aria-expanded')).toBe('false');
+    expect(row.getAttribute('tabindex')).toBe('0');
+    expect(screen.queryByText('team-only')).not.toBeInTheDocument();
+
+    await user.click(within(row).getByRole('button', { name: 'setBudget' }));
+    expect(row.getAttribute('aria-expanded')).toBe('false');
+
+    await user.click(screen.getByText('NDS_Developers'));
+    expect(row.getAttribute('aria-expanded')).toBe('true');
+    expect(screen.getByText('team-only')).toBeInTheDocument();
+    // aria-controls 는 펼친 멤버 행들 + 상세 행
+    const ids = row.getAttribute('aria-controls')!.split(' ');
+    expect(ids).toEqual(['budget-row-u-big', 'budget-row-u-team', 'budget-detail-t1']);
+    ids.forEach((id) => expect(document.getElementById(id)).not.toBeNull());
+
+    row.focus();
+    await user.keyboard('{Enter}');
+    expect(row.getAttribute('aria-expanded')).toBe('false');
+  });
+});

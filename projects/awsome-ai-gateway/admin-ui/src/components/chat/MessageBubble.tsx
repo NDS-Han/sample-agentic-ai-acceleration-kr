@@ -101,9 +101,10 @@ function ReasoningBlock({ text, live }: { text: string; live: boolean }) {
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
-        className="flex w-full items-center gap-1.5 px-2.5 py-1.5 text-xs text-muted-foreground hover:bg-accent/40 transition-colors"
+        aria-expanded={open}
+        className="flex w-full items-center gap-1.5 px-2.5 py-1.5 text-xs text-muted-foreground hover:bg-accent/40 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
       >
-        {open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+        {open ? <ChevronDown size={13} aria-hidden="true" /> : <ChevronRight size={13} aria-hidden="true" />}
         <Brain size={13} className={live ? 'animate-pulse' : ''} />
         <span>{live ? t('reasoning.live') : t('reasoning.done')}</span>
       </button>

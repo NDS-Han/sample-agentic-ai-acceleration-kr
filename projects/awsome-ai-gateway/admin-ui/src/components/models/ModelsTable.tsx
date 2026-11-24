@@ -22,6 +22,7 @@ import { activateModelAction } from '@/lib/actions/models';
 import { useToast } from '@/components/common/ToastProvider';
 import { Badge } from '@/components/common/Badge';
 import { Button } from '@/components/common/Button';
+import { disclosureProps } from '@/lib/utils/disclosure';
 import { Table, THead, TBody, Tr, Th, Td, TEmpty } from '@/components/common/Table';
 import { InfoTooltip } from '@/components/common/InfoTooltip';
 import { fmtPricePerM } from '@/lib/utils/pricing';
@@ -191,17 +192,16 @@ export function ModelsTable({ models }: ModelsTableProps) {
                       .filter((o) => o.alias !== model.alias && o.model_id === model.model_id)
                       .map((o) => o.alias)
                   : [];
+                // 행 전체가 펼침 대상 — Edit·Activate·배지 툴팁은 제외(공용 disclosureProps).
+                const d = disclosureProps({ expanded: isOpen, onToggle: () => toggle(model.alias), controlsId: detailId });
                 return (
                   <Fragment key={model.alias}>
-                    <Tr>
+                    <Tr {...d.target}>
                       {/* 모델 식별 셀 — 1행 표시명, 2행 alias(라우팅 키)·provider·앱제한 */}
                       <Td emphasis className={!model.is_active ? 'text-muted-foreground' : undefined}>
                         <div className="flex items-center gap-2 min-w-0">
                           <button
-                            type="button"
-                            onClick={() => toggle(model.alias)}
-                            aria-expanded={isOpen}
-                            aria-controls={isOpen ? detailId : undefined}
+                            {...d.chevron}
                             aria-label={
                               isOpen
                                 ? t('collapse', { name: displayName })
@@ -326,8 +326,8 @@ export function ModelsTable({ models }: ModelsTableProps) {
                     </Tr>
                     {isOpen && (
                       // 상세 행 — glass 중첩(backdrop-filter 중첩)은 무겁고 지저분해서
-                      // muted 표면만. 행 hover 틴트는 상세 행에서 끈다.
-                      <Tr id={detailId} className="bg-muted/30 hover:bg-muted/30 dark:bg-white/[0.03] dark:hover:bg-white/[0.03]">
+                      // muted 표면만(상세 행은 hover 틴트 없음 — 공용 Tr 기본).
+                      <Tr id={detailId} className="bg-muted/30 dark:bg-white/[0.03]">
                         <Td colSpan={colCount}>
                           {/* 섹션을 얇은 보더 카드로 분리 — muted 패널 위에
                               평면으로 나열하면 경계가 안 보인다는 피드백 반영.

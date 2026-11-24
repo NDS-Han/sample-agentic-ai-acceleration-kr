@@ -90,7 +90,10 @@ export const TFoot = forwardRef<HTMLTableSectionElement, HTMLAttributes<HTMLTabl
 TFoot.displayName = 'TFoot';
 
 interface TrProps extends HTMLAttributes<HTMLTableRowElement> {
-  /** 행 클릭→상세 등 인터랙티브 행. teal 틴트 hover + cursor-pointer. */
+  /** 행 클릭→상세 등 인터랙티브 행. teal 틴트 hover + cursor-pointer.
+      펼침 행은 clickable 대신 disclosureProps(lib/utils/disclosure)의 target 을 펼쳐 넣는다
+      (그쪽이 hover·포커스 링·키보드를 붙인다). 그 밖의 행은 hover 틴트가 없다 —
+      눌러도 아무 일 없는 행이 클릭할 수 있어 보이지 않게. */
   clickable?: boolean;
   /** 선택 상태. */
   selected?: boolean;
@@ -103,9 +106,7 @@ export const Tr = forwardRef<HTMLTableRowElement, TrProps>(
       data-state={selected ? 'selected' : undefined}
       className={cn(
         'border-b border-[--table-divider] transition-colors',
-        clickable
-          ? 'cursor-pointer hover:bg-primary/[0.06] dark:hover:bg-primary/[0.08]'
-          : 'hover:bg-[--table-row-hover]',
+        clickable && 'cursor-pointer hover:bg-primary/[0.06] dark:hover:bg-primary/[0.08]',
         'data-[state=selected]:bg-muted dark:data-[state=selected]:bg-white/[0.07]',
         className,
       )}
