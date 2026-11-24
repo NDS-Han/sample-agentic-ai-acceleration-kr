@@ -5,6 +5,7 @@
 
 import { useState } from 'react';
 import { useTranslations } from 'next-intl';
+import { disclosureProps } from '@/lib/utils/disclosure';
 import { Activity, ChevronDown, ChevronRight, Coins, DollarSign } from 'lucide-react';
 import {
   Area,
@@ -242,13 +243,18 @@ export function MyUsageDashboard({
                 {data.by_model.map((row) => {
                   const isOpen = expanded.has(row.model_alias);
                   const share = totalCost > 0 ? (row.cost_usd / totalCost) * 100 : null;
+                  // 행 전체가 펼침 대상(공용 disclosureProps). 이름 버튼은 셰브런 역할.
+                  const detailId = `my-usage-detail-${row.model_alias}`;
+                  const d = disclosureProps({
+                    expanded: isOpen,
+                    onToggle: () => toggleExpand(row.model_alias),
+                    controlsId: detailId,
+                  });
                   return [
-                    <Tr key={row.model_alias}>
+                    <Tr key={row.model_alias} {...d.target}>
                       <Td emphasis className="text-xs">
                         <button
-                          type="button"
-                          onClick={() => toggleExpand(row.model_alias)}
-                          aria-expanded={isOpen}
+                          {...d.chevron}
                           className="inline-flex items-center gap-1 text-left hover:text-foreground"
                         >
                           {isOpen ? (
@@ -287,7 +293,7 @@ export function MyUsageDashboard({
                       </Td>
                     </Tr>,
                     isOpen ? (
-                      <Tr key={`${row.model_alias}-detail`} className="bg-muted/30">
+                      <Tr key={`${row.model_alias}-detail`} id={detailId} className="bg-muted/30">
                         <Td colSpan={5} className="text-xs text-muted-foreground">
                           {/* 도넛 범례와 같은 표기 — compact + 점유율, 정확값은 title. */}
                           <span className="inline-flex flex-wrap gap-x-4 gap-y-1">

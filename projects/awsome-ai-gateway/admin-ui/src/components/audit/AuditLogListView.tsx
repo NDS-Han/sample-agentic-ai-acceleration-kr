@@ -4,6 +4,7 @@
 
 import { Fragment, useState, useTransition } from 'react';
 import Link from 'next/link';
+import { disclosureProps } from '@/lib/utils/disclosure';
 import { useLocale, useTranslations } from 'next-intl';
 import { ChevronDown, ChevronRight } from 'lucide-react';
 import { listAuditLogsAction } from '@/lib/actions/audit';
@@ -194,25 +195,22 @@ export function AuditLogListView({
           </Tr>
         </THead>
         <TBody>
-          {items.map((it) => (
+          {items.map((it) => {
+            // 행 전체가 펼침 대상(공용 disclosureProps) — 행 keydown 은 행 자신이 포커스일 때만
+            // 반응하므로 안쪽 대상 링크의 Enter 는 링크 몫. 링크 클릭도 토글하지 않는다.
+            const detailId = `audit-detail-${it.id}`;
+            const d = disclosureProps({ expanded: expanded.has(it.id), onToggle: () => toggle(it.id), controlsId: detailId });
+            return (
             <Fragment key={it.id}>
-              <Tr clickable onClick={() => toggle(it.id)}>
+              <Tr {...d.target}>
                 <Td className="w-6 text-muted-foreground">
-                  {/* 펼침은 행이 아니라 이 버튼이 담당 — tr 에 keydown 을 달면
-                      내부 링크의 Enter 도 가로채 버린다(버블링). 버튼의 네이티브
-                      활성화는 자기 자신만 건드린다. */}
                   <button
-                    type="button"
-                    aria-expanded={expanded.has(it.id)}
+                    {...d.chevron}
                     aria-label={
                       expanded.has(it.id)
                         ? t('collapseDetails')
                         : t('expandDetails')
                     }
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      toggle(it.id);
-                    }}
                     className="rounded p-0.5 hover:bg-primary/10 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                   >
                     {expanded.has(it.id) ? (
@@ -254,7 +252,6 @@ export function AuditLogListView({
                       resource_type: it.resource_type,
                       resource_id: it.resource_id,
                     }).toString()}`}
-                    onClick={(e) => e.stopPropagation()}
                     className="hover:underline"
                   >
                     <span className="text-muted-foreground" title={it.resource_type}>
@@ -280,14 +277,15 @@ export function AuditLogListView({
                 )}
               </Tr>
               {expanded.has(it.id) && (
-                <Tr>
+                <Tr id={detailId}>
                   <Td colSpan={colCount} className="bg-muted/30">
                     <ChangesPanel item={it} />
                   </Td>
                 </Tr>
               )}
             </Fragment>
-          ))}
+            );
+          })}
           {items.length === 0 && (
             <TEmpty colSpan={colCount}>
               <p>{t('empty')}</p>
