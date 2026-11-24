@@ -633,9 +633,11 @@ BEGIN
     END IF;
 END $$;
 
--- 일별 사용량 집계 (FR-4a.2, /v1/usage/me 의 과거 일자 breakdown 데이터 소스).
--- Granularity: (date, user_id, model_alias). 매일 KST 00:10 scheduler 잡으로 전일
--- usage_logs → 이 테이블 INSERT (idempotent, ON CONFLICT DO NOTHING).
+-- 일별 사용량 집계 (FR-4a.2 /v1/usage/me 과거 일자 + Analytics 사용자×모델 표).
+-- Granularity(0060 v2): (date, user_id, team_id, dept_id, model_alias, client, status).
+-- date 는 REPORTING_TIMEZONE 캘린더 날짜. cost-recorder-worker 가 리포팅 tz 00:10 에
+-- 최근 N일 + dirty 날짜를 날짜 단위로 DELETE+INSERT 재집계한다(daily_aggregate_days 참조).
+-- client/status 가 NULL 인 행 = 0060 이전 입도(레거시) — 재집계 시 교체된다.
 CREATE TABLE IF NOT EXISTS usage.daily_aggregates (
     id                     UUID          PRIMARY KEY DEFAULT gen_random_uuid(),
     date                   DATE          NOT NULL,
@@ -654,12 +656,90 @@ CREATE TABLE IF NOT EXISTS usage.daily_aggregates (
     total_cost_usd         NUMERIC(12,6) NOT NULL DEFAULT 0,
     request_count          BIGINT        NOT NULL DEFAULT 0,
     created_at             TIMESTAMPTZ   NOT NULL DEFAULT now(),
-    UNIQUE (date, user_id, model_alias)
+    -- 0060: COALESCE(usage_logs.client,'other') / usage_logs.status / count(*) / SUM(latency_ms)
+    client                 VARCHAR(32),
+    status                 usage.usage_status,
+    call_count             BIGINT        NOT NULL DEFAULT 0,
+    latency_ms_sum         BIGINT        NOT NULL DEFAULT 0
 );
+
+-- 0060 컬럼 수렴 — CREATE TABLE IF NOT EXISTS 는 기존 설치본에서 no-op 이라 init SQL 이
+-- alembic 보다 먼저 도는 배포에서 아래 인덱스가 없는 컬럼을 참조하지 않게 먼저 놓는다.
+-- (옛 유니크 (date,user_id,model_alias) 제거는 alembic 0060 이 한다.)
+DO $$
+DECLARE
+    c record;
+BEGIN
+    FOR c IN
+        SELECT * FROM (VALUES
+            ('client',          'VARCHAR(32)'),
+            ('status',          'usage.usage_status'),
+            ('call_count',      'BIGINT NOT NULL DEFAULT 0'),
+            ('latency_ms_sum',  'BIGINT NOT NULL DEFAULT 0')
+        ) AS v(name, def)
+    LOOP
+        BEGIN
+            IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                           WHERE table_schema = 'usage' AND table_name = 'daily_aggregates'
+                             AND column_name = c.name) THEN
+                EXECUTE format('ALTER TABLE usage.daily_aggregates ADD COLUMN %I %s',
+                               c.name, c.def);
+            END IF;
+        EXCEPTION WHEN duplicate_column THEN NULL;
+        END;
+    END LOOP;
+END $$;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_daily_aggregates_grain ON usage.daily_aggregates
+    (date, user_id, team_id, dept_id, model_alias, client, status);
 
 CREATE INDEX IF NOT EXISTS idx_daily_aggregates_user_date ON usage.daily_aggregates (user_id, date DESC);
 CREATE INDEX IF NOT EXISTS idx_daily_aggregates_team_date ON usage.daily_aggregates (team_id, date DESC);
 CREATE INDEX IF NOT EXISTS idx_daily_aggregates_date      ON usage.daily_aggregates (date DESC);
+
+-- 0060 일자 레지스트리 — admin-api 는 grain_version=2 · NOT dirty · tz=REPORTING_TIMEZONE 인
+-- 날짜만 롤업에서 읽는다(나머지는 raw). dirty 는 과거 날짜에 늦게 도착한 usage_logs 를
+-- 워커가 표시하고, 다음 야간 잡이 나이와 무관하게 재집계한다.
+CREATE TABLE IF NOT EXISTS usage.daily_aggregate_days (
+    date           DATE        PRIMARY KEY,
+    tz             VARCHAR(64),
+    grain_version  SMALLINT    NOT NULL DEFAULT 0,
+    dirty          BOOLEAN     NOT NULL DEFAULT false,
+    aggregated_at  TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_daily_aggregate_days_dirty
+    ON usage.daily_aggregate_days (date) WHERE dirty;
+
+-- 0060 월 누적 계층 — period(월 1일)부터 covered_through 까지의 일별 롤업 합(같은 입도).
+-- 긴 custom 구간은 통째 포함되는 달을 여기서 읽는다. 파생 캐시라 FK 를 두지 않는다.
+CREATE TABLE IF NOT EXISTS usage.monthly_aggregates (
+    period                 DATE          NOT NULL,
+    user_id                UUID          NOT NULL,
+    team_id                UUID          NOT NULL,
+    dept_id                UUID          NOT NULL,
+    model_alias            VARCHAR(128)  NOT NULL,
+    client                 VARCHAR(32)   NOT NULL,
+    status                 usage.usage_status NOT NULL,
+    input_tokens           BIGINT        NOT NULL DEFAULT 0,
+    output_tokens          BIGINT        NOT NULL DEFAULT 0,
+    cache_creation_tokens  BIGINT        NOT NULL DEFAULT 0,
+    cache_read_tokens      BIGINT        NOT NULL DEFAULT 0,
+    total_tokens           BIGINT        NOT NULL DEFAULT 0,
+    total_cost_usd         NUMERIC(16,6) NOT NULL DEFAULT 0,
+    call_count             BIGINT        NOT NULL DEFAULT 0,
+    request_count          BIGINT        NOT NULL DEFAULT 0,
+    latency_ms_sum         BIGINT        NOT NULL DEFAULT 0
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_monthly_aggregates_grain ON usage.monthly_aggregates
+    (period, user_id, team_id, dept_id, model_alias, client, status);
+CREATE INDEX IF NOT EXISTS idx_monthly_aggregates_user_period
+    ON usage.monthly_aggregates (user_id, period);
+CREATE TABLE IF NOT EXISTS usage.monthly_aggregate_months (
+    period           DATE        PRIMARY KEY,
+    tz               VARCHAR(64) NOT NULL,
+    covered_through  DATE        NOT NULL,
+    built_at         TIMESTAMPTZ NOT NULL
+);
 
 -- 요청별 추론/도구 추적 (observability). gateway-proxy 가 응답 본문에서 trace_extractor
 -- 로 뽑은 PII-safe 요약(thinking 요약/tool_use/redacted 카운트)을 cost:stream 에 실어

@@ -21,9 +21,12 @@ interface ExportButtonProps {
 }
 
 type ExportFormat = 'csv' | 'json';
+/** 기본 집계 외 추가 뷰 — user_model: 사용자 × 모델 한 행씩(CSV). By User 모드 전용. */
+type ExportView = 'user_model';
 
 export function ExportButton({ filter, latestMonth, disabled = false }: ExportButtonProps) {
   const t = useTranslations('common');
+  const ta = useTranslations('analytics.userModel');
   const { toast } = useToast();
   const reportingTz = useReportingTz();
   const [isOpen, setIsOpen] = useState(false);
@@ -41,7 +44,7 @@ export function ExportButton({ filter, latestMonth, disabled = false }: ExportBu
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
-  async function handleExport(format: ExportFormat) {
+  async function handleExport(format: ExportFormat, view?: ExportView) {
     setIsOpen(false);
     setIsLoading(true);
 
@@ -54,6 +57,7 @@ export function ExportButton({ filter, latestMonth, disabled = false }: ExportBu
         group_by: filter.group_by,
         format,
       };
+      if (view) exportParams.view = view;
       if (filter.scope) exportParams.scope = filter.scope;
       // R2-N-j — client 드릴다운 필터도 export 에 전달. 빠지면 화면(필터됨)과
       // CSV(전체) 수치가 달라진다.
@@ -79,7 +83,7 @@ export function ExportButton({ filter, latestMonth, disabled = false }: ExportBu
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `analytics.${format}`;
+      a.download = view ? `analytics-user-model.${format}` : `analytics.${format}`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -119,7 +123,7 @@ export function ExportButton({ filter, latestMonth, disabled = false }: ExportBu
       {isOpen && (
         <div
           role="menu"
-          className="absolute right-0 mt-1 w-36 rounded-md border border-border bg-background shadow-md z-10"
+          className="absolute right-0 mt-1 w-48 rounded-md border border-border bg-background shadow-md z-10"
         >
           {(['csv', 'json'] as ExportFormat[]).map((fmt) => (
             <button
@@ -131,6 +135,15 @@ export function ExportButton({ filter, latestMonth, disabled = false }: ExportBu
               {fmt.toUpperCase()}
             </button>
           ))}
+          {filter.group_by === 'user' && (
+            <button
+              role="menuitem"
+              onClick={() => handleExport('csv', 'user_model')}
+              className="block w-full px-4 py-2 text-left text-sm hover:bg-muted transition-colors first:rounded-t-md last:rounded-b-md"
+            >
+              {ta('exportCsv')}
+            </button>
+          )}
         </div>
       )}
     </div>

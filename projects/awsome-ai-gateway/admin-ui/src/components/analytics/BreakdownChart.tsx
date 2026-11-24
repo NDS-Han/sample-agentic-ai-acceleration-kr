@@ -8,6 +8,8 @@ import { ErrorState } from '@/components/common/ErrorState';
 import { teamDisplayName } from '@/lib/utils/trendSeries';
 import { modelDisplay } from '@/lib/utils/modelLabel';
 import { userLabel } from '@/lib/userLabel';
+import type { UserBreakdown } from '@/types/entities';
+import type { UserModelTarget } from './userModel';
 
 interface BreakdownChartProps {
   filter: AnalyticsFilterForm;
@@ -23,7 +25,7 @@ interface AnalyticsAPIResponse {
     active_users: number;
     dept_name?: string | null;
   }[];
-  by_user: { user: string; email: string; cost_usd: number; requests: number }[];
+  by_user: UserBreakdown[];
 }
 
 export async function BreakdownChart({ filter, latestMonth }: BreakdownChartProps) {
@@ -35,6 +37,8 @@ export async function BreakdownChart({ filter, latestMonth }: BreakdownChartProp
   let labels: string[] = [];
   let values: number[] = [];
   let title = t('totalCost');
+  // By User 모드에서만 — 막대 클릭이 사용자×모델 상세 드로어를 연다.
+  let userTargets: UserModelTarget[] | undefined;
 
   if (data) {
     if (filter.group_by === 'team') {
@@ -50,6 +54,11 @@ export async function BreakdownChart({ filter, latestMonth }: BreakdownChartProp
       labels = (data.by_user ?? []).map((b) => b.user || userLabel({ email: b.email }));
       values = (data.by_user ?? []).map((b) => Number(b.cost_usd));
       title = t('costByUser');
+      userTargets = (data.by_user ?? []).map((b, i) => ({
+        user_id: b.user_id ?? null,
+        email: b.email || null,
+        name: labels[i] ?? null,
+      }));
     } else {
       // 대시보드 도넛과 같은 표기 규칙 — 카탈로그 display_name 우선, 없으면 alias.
       labels = (data.by_model ?? []).map((b) => modelDisplay(b.model, b.display_name));
@@ -61,7 +70,7 @@ export async function BreakdownChart({ filter, latestMonth }: BreakdownChartProp
   return (
     <div className="glass glass-hover rounded-apple p-4">
       {data ? (
-        <LazyBreakdownChart labels={labels} values={values} title={title} />
+        <LazyBreakdownChart labels={labels} values={values} title={title} userTargets={userTargets} />
       ) : (
         <ErrorState compact />
       )}

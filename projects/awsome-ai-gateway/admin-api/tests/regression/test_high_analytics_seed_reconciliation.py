@@ -333,17 +333,25 @@ async def test_cost_usd_honours_date_even_with_a_seed(session):
 
 
 async def test_model_breakdown_is_not_inflated_by_the_seed(session):
-    """seed 에는 모델 granularity 가 없다 — 모델 표에 넣으면 데이터를 조작하는 것이다."""
-    from app.services.analytics_service import AnalyticsService
+    """seed 에는 모델 granularity 가 없다 — 모델 표에 넣으면 데이터를 조작하는 것이다.
 
-    resp = await AnalyticsService().get_usage_by_user_model(
-        session, period=PERIOD, date="2026-05-31"
-    )
-    mine = [it for it in resp.items if it.user_id == str(U_SEEDED)]
-    assert mine, "by-user-model 에 해당 사용자가 없다"
-    assert sum(it.cost_usd for it in mine) == Decimal("7.00"), (
+    (옛 /usage/by-user-model 을 대체한 사용자 × 모델 표 — user_model_usage — 로 검증.)
+    """
+    resp = await _user_models(session)
+    mine = [r for r in resp["rows"] if r["user_id"] == str(U_SEEDED)]
+    assert mine, "사용자 × 모델 표에 해당 사용자가 없다"
+    assert Decimal(str(mine[0]["total"]["cost_usd"])) == Decimal("7.00"), (
         "모델 단위 합이 실사용($7)을 넘었다 — seed 가 새어 들어갔다"
     )
+    assert str(U_SEED_ONLY) not in {r["user_id"] for r in resp["rows"]}
+
+
+async def _user_models(session):
+    from app.services import user_model_usage as umu
+
+    rng = umu.resolve_range(PERIOD, None, None)
+    payload = await umu.fetch_scope_payload(session, rng, None, None)
+    return umu.page_from_payload(payload, page_size=50)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -398,13 +406,9 @@ async def test_email_and_cache_tokens_are_exposed(session):
 
 
 async def test_by_user_model_exposes_email(session):
-    from app.services.analytics_service import AnalyticsService
-
-    resp = await AnalyticsService().get_usage_by_user_model(
-        session, period=PERIOD, date="2026-05-31"
-    )
-    mine = [it for it in resp.items if it.user_id == str(U_PLAIN)]
-    assert mine and all(it.user_email == "plain@example.com" for it in mine)
+    resp = await _user_models(session)
+    mine = [r for r in resp["rows"] if r["user_id"] == str(U_PLAIN)]
+    assert mine and mine[0]["email"] == "plain@example.com"
 
 
 # ─────────────────────────────────────────────────────────────────────────────

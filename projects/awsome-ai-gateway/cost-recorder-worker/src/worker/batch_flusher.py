@@ -16,16 +16,18 @@ from __future__ import annotations
 
 import json
 from collections import defaultdict
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import asyncpg.exceptions
 import structlog
 from sqlalchemy import text
-from sqlalchemy.exc import DBAPIError, DataError, IntegrityError
+from sqlalchemy.exc import DataError, DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from worker.config import get_settings
 from worker.schemas.cost_stream import CostStreamEntry
 from worker.web_search_pricing import DEFAULT_PRICE_PER_1K, WebSearchPricing, web_search_cost
 
@@ -240,6 +242,29 @@ _UPSERT_BUDGET_USAGE = text(
 )
 
 
+#: 과거 날짜에 늦게 도착한 로그 → 그 날짜의 롤업을 dirty 로 표시(daily_aggregator 모듈 주석).
+#: ⚠️ 이 UPDATE 는 같은 날짜를 재집계 중인 트랜잭션의 레지스트리 행 잠금을 기다린다 —
+#:    그래야 재집계 스냅샷이 못 본 행이 재집계 커밋 **뒤에** dirty 를 다시 켠다. 날짜
+#:    정렬은 여러 flush 트랜잭션이 같은 행들을 같은 순서로 잠그게 해 교착을 막는다.
+_MARK_LATE_DAYS_DIRTY = text(
+    """
+    INSERT INTO usage.daily_aggregate_days (date, dirty)
+    SELECT d, true FROM unnest(CAST(:days AS date[])) AS d ORDER BY d
+    ON CONFLICT (date) DO UPDATE SET dirty = true
+    """
+)
+
+
+def _late_days(entries: list[CostStreamEntry], tz_name: str) -> list[date]:
+    """리포팅 tz 기준 오늘 이전 날짜에 속한 entry 들의 날짜(정렬·중복 제거).
+
+    정상 경로(당일 로그)는 빈 리스트라 SQL 왕복이 없다."""
+    tz = ZoneInfo(tz_name)
+    today = datetime.now(tz).date()
+    days = {datetime.fromisoformat(e.requested_at).astimezone(tz).date() for e in entries}
+    return sorted(d for d in days if d < today)
+
+
 _ALREADY_RECORDED_SQL = text(
     "SELECT request_id FROM usage.usage_logs WHERE request_id = ANY(:ids)"
 )
@@ -374,6 +399,7 @@ class BatchFlusher:
                 #    no-op(RETURNING 없음)인데, 그 행까지 더하면 이중청구다.
                 written = [e for e in fresh if e.request_id in inserted_ids]
                 await self._upsert_budget_usages(session, written)
+                await self._mark_late_days_dirty(session, written)
                 await session.commit()
                 recorded = written
         except Exception as ie:
@@ -442,6 +468,7 @@ class BatchFlusher:
                     inserted_ids = await self._insert_usage_logs(session, [e], ws_price)
                     if e.request_id in inserted_ids:
                         await self._upsert_budget_usages(session, [e])
+                        await self._mark_late_days_dirty(session, [e])
                         written.append(e)
                     await session.commit()
             except Exception as ie:
@@ -514,6 +541,7 @@ class BatchFlusher:
                     inserted = e.request_id in inserted_ids
                     if inserted:
                         await self._upsert_budget_usages(session, [e])
+                        await self._mark_late_days_dirty(session, [e])
                     await session.commit()
                     # 실제로 커밋된 행만 written 에 센다 — commit 실패(영구
                     # 오류)면 dead_lettered 로 가므로 둘 다 세면 안 된다.
@@ -592,6 +620,19 @@ class BatchFlusher:
             if row_id is not None:
                 inserted.add(row_id)
         return inserted
+
+    async def _mark_late_days_dirty(
+        self, session: AsyncSession, entries: list[CostStreamEntry]
+    ) -> None:
+        """실제로 삽입된 행 중 과거 날짜분이 있으면 그 날짜 롤업을 dirty 로 표시한다.
+
+        usage_logs INSERT 와 **같은 트랜잭션**이어야 한다 — 따로 커밋하면 표시와 행 사이에
+        재집계가 끼어들어 표시가 지워진 뒤 행만 남는 창이 생긴다.
+        """
+        days = _late_days(entries, get_settings().reporting_timezone)
+        if days:
+            await session.execute(_MARK_LATE_DAYS_DIRTY, {"days": days})
+            logger.info("late_usage_marked_dirty", days=[str(d) for d in days])
 
     async def _upsert_budget_usages(
         self, session: AsyncSession, entries: list[CostStreamEntry]

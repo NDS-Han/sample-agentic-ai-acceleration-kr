@@ -27,8 +27,6 @@ from app.schemas.analytics import (
     TokenBreakdown,
     TrendItem,
     UsageByUserItem,
-    UsageByUserModelItem,
-    UsageByUserModelResponse,
     UsageByUserResponse,
     UserBreakdown,
 )
@@ -391,14 +389,15 @@ class AnalyticsService:
                 by_user.append(UserBreakdown(
                     user=row.name,
                     email=row.email,
+                    user_id=str(row.user_id),
                     cost_usd=(row.cost or Decimal("0")) + (extra[2] if extra else Decimal("0")),
                     requests=row.requests or 0,
                 ))
             # usage_logs 에 한 건도 없이 seed 만 있는 사용자(이관 직후) — 목록의 기준
             # 테이블이 usage_logs 라 그냥 두면 차트에서 사라진다.
-            for name, email, amount in seeded.values():
+            for seed_uid, (name, email, amount) in seeded.items():
                 by_user.append(UserBreakdown(
-                    user=name, email=email, cost_usd=amount, requests=0
+                    user=name, email=email, user_id=str(seed_uid), cost_usd=amount, requests=0
                 ))
 
             # seed 를 더한 뒤 다시 상위 50명을 고른다 — SQL 의 ORDER BY/LIMIT 은 실사용
@@ -651,96 +650,6 @@ class AnalyticsService:
             return self._to_csv(response, group_by), "text/csv"
         else:
             return response.model_dump_json(indent=2), "application/json"
-
-    async def get_usage_by_user_model(
-        self,
-        session: AsyncSession,
-        *,
-        period: str,
-        date: str,
-    ) -> UsageByUserModelResponse:
-        """User × Model 누적 (period 1일 ~ date, KST, SUCCESS only)."""
-        from sqlalchemy import func, select
-
-        from app.core.usage_filters import kst_day_range_filter
-        from app.models.auth import Department, Team, User
-        from app.models.usage import UsageLog, UsageStatus
-
-        _validate_period_date(period, date)
-
-        period_start = f"{period}-01"
-
-        stmt = (
-            select(
-                UsageLog.user_id.label("user_id"),
-                User.display_name.label("user_name"),
-                User.email.label("user_email"),
-                UsageLog.model_alias.label("model_alias"),
-                func.coalesce(func.sum(UsageLog.cost_usd), 0).label("cost_usd"),
-                func.count().label("calls"),
-                func.coalesce(func.sum(UsageLog.input_tokens), 0).label("input_tokens"),
-                func.coalesce(func.sum(UsageLog.output_tokens), 0).label("output_tokens"),
-                func.coalesce(func.sum(UsageLog.cache_read_tokens), 0).label("cache_read_tokens"),
-                func.coalesce(func.sum(UsageLog.cache_creation_tokens), 0).label(
-                    "cache_creation_tokens"
-                ),
-                func.avg(UsageLog.latency_ms).label("avg_latency_ms"),
-                Team.id.label("team_id"),
-                Team.name.label("team_name"),
-                Department.id.label("department_id"),
-                Department.name.label("department_name"),
-            )
-            .select_from(UsageLog)
-            .outerjoin(User, User.id == UsageLog.user_id)
-            .outerjoin(Team, Team.id == User.team_id)
-            .outerjoin(Department, Department.id == Team.dept_id)
-            .where(
-                UsageLog.status == UsageStatus.SUCCESS,
-                # ⚠️ `date(timezone('Asia/Seoul', requested_at)) >= date(:start)` 형태는
-                #    좌변이 컬럼에 함수를 씌운 표현식이라 requested_at 인덱스를 못 타고
-                #    usage_logs 를 전부 훑는다(월 필터를 cost_period_filter 로 고친 것과
-                #    같은 이유). 경계를 파라미터 쪽에서 UTC 반개구간으로 환산하면 컬럼이
-                #    그대로 남아 인덱스를 탄다. 집합은 동일하므로 숫자는 움직이지 않는다:
-                #    KST 일자 ∈ [start, date] ⟺ requested_at ∈ [KST start, KST date+1).
-                kst_day_range_filter(period_start, date),
-            )
-            .group_by(
-                UsageLog.user_id,
-                User.display_name,
-                User.email,
-                UsageLog.model_alias,
-                Team.id,
-                Team.name,
-                Department.id,
-                Department.name,
-            )
-            .order_by(func.sum(UsageLog.cost_usd).desc())
-        )
-
-        rows = (await session.execute(stmt)).all()
-
-        items = [
-            UsageByUserModelItem(
-                date=date,
-                user_id=str(r.user_id),
-                user_name=r.user_name,
-                user_email=r.user_email,
-                model_alias=r.model_alias,
-                cost_usd=r.cost_usd,
-                calls=r.calls,
-                input_tokens=r.input_tokens or 0,
-                output_tokens=r.output_tokens or 0,
-                cache_read_tokens=r.cache_read_tokens or 0,
-                cache_write_tokens=r.cache_creation_tokens or 0,
-                department_id=str(r.department_id) if r.department_id else None,
-                department_name=r.department_name,
-                team_id=str(r.team_id) if r.team_id else None,
-                team_name=r.team_name,
-                avg_latency_ms=round(float(r.avg_latency_ms or 0)),
-            )
-            for r in rows
-        ]
-        return UsageByUserModelResponse(period=period, date=date, items=items)
 
     async def get_usage_by_user(
         self,

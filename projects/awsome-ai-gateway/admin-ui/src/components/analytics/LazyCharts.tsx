@@ -4,6 +4,7 @@
 
 import dynamic from 'next/dynamic';
 import type { TokenBreakdownData } from './TokenMixDonutClient';
+import type { UserModelTarget } from './userModel';
 
 // ⚠️ ssr:false 는 Server Component 안의 next/dynamic 에서 쓰면
 // BAILOUT_TO_CLIENT_SIDE_RENDERING 경계가 생겨 hydration 타이밍에 따라
@@ -33,12 +34,16 @@ export function LazyBreakdownChart({
   labels,
   values,
   title,
+  userTargets,
 }: {
   labels: string[];
   values: number[];
   title: string;
+  userTargets?: UserModelTarget[];
 }) {
-  return <BreakdownChartClient labels={labels} values={values} title={title} />;
+  return (
+    <BreakdownChartClient labels={labels} values={values} title={title} userTargets={userTargets} />
+  );
 }
 
 export function LazyTokenMixDonut({ data }: { data: TokenBreakdownData }) {

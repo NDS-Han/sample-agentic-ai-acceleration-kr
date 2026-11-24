@@ -1,215 +1,190 @@
 # Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
 
-"""daily_aggregator 회귀 테스트 (F10 + R2-3).
+"""daily_aggregator 단위 테스트 (실 PG 없이 검증 가능한 부분).
 
-예전엔 ``ON CONFLICT ... DO NOTHING`` 이라, cron(KST 00:10) 이후 스트림
-백로그/재처리로 늦게 INSERT 된 어제분 usage_logs 가 재실행돼도 합산되지 않아
-daily_aggregates 에 영구 누락됐다(F10). 한동안 DELETE+재집계로 고쳤는데 그건
-멀티-replica 크론 동시 실행에서 같은 윈도우를 지우고 넣다가 유니크 키에 깨져
-매일 N-1 pod 가 UniqueViolation 을 남겼다(R2-3). 이제 윈도우 전체 재집계를
-``ON CONFLICT (date, user_id, model_alias) DO UPDATE`` 로 덮어쓴다 — 늦게 온
-행도 반영되면서 같은 키는 행 잠금으로 직렬화돼 replica 동시 실행도 안전하다.
-
-실 Postgres 없이 검증 가능한 부분:
-  * 어제 집계가 DELETE 없이 단일 UPSERT 한 번으로 끝난다
-  * DO UPDATE 가 모든 비-키 컬럼을 EXCLUDED 로 덮어쓴다(늦은 행 반영)
-  * 집계 SQL 이 충돌키 (date, user_id, model_alias) 와 같은 입도로 GROUP BY 한다
-    (team_id/dept_id 를 넣으면 팀 이동자가 자체 충돌로 조용히 유실된다)
+실 PG 의미 검증(DST 버킷, 재집계, dirty 경합, gateway 합계 불변)은
+tests/regression/test_rollup_v2_realpg.py 에 있다.
 """
 
 from __future__ import annotations
 
-import re
+from datetime import UTC, date, datetime
 from unittest.mock import AsyncMock, MagicMock
+from zoneinfo import ZoneInfo
 
 import pytest
+from sqlalchemy import text
 
-from worker.daily_aggregator import (
-    _AGG_SQL,
-    aggregate_yesterday,
-)
+import worker.daily_aggregator as da
 
 
-@pytest.mark.asyncio
-async def test_aggregate_yesterday_upserts_window():
-    """늦게 도착한 행이 반영되고 replica 동시 실행이 안전하려면 단일 UPSERT 여야 한다."""
-    session = AsyncMock()
-    calls: list[str] = []
-
-    async def _execute(stmt, params=None):
-        calls.append(str(stmt))
-        r = MagicMock()
-        r.rowcount = 3
-        return r
-
-    session.execute = AsyncMock(side_effect=_execute)
-    inserted = await aggregate_yesterday(session)
-
-    assert inserted == 3
-    assert len(calls) == 1
-    assert "INSERT INTO usage.daily_aggregates" in calls[0]
-    assert "ON CONFLICT" in calls[0] and "DO UPDATE" in calls[0]
-    assert "DELETE" not in calls[0]
-    session.commit.assert_awaited_once()
-
-
-def test_agg_sql_groups_by_conflict_key_only():
-    """GROUP BY 가 (date, user_id, model_alias) 유니크 키와 같은 입도여야 한다.
-
-    team_id/dept_id 를 GROUP BY 에 넣으면 같은 (date, user, model) 에 두 그룹이
-    생겨 유니크 제약에 자체 충돌하고 한 행이 조용히 유실된다 — 대신 array_agg …
-    ORDER BY requested_at DESC 로 그날 마지막 소속을 귀속시킨다.
-    """
-    group_by = _AGG_SQL.split("GROUP BY")[-1].split("ON CONFLICT")[0]
-    assert "team_id" not in group_by and "dept_id" not in group_by
-    assert "user_id" in group_by and "model_alias" in group_by
-    # 충돌 무시(DO NOTHING)로 되돌아가면 늦게 온 행이 다시 누락된다 — 덮어써야 한다.
-    assert "DO NOTHING" not in _AGG_SQL
-    assert "DO UPDATE" in _AGG_SQL
-    assert "array_agg(team_id ORDER BY requested_at DESC)" in _AGG_SQL
-
-
-def test_agg_sql_updates_all_non_key_columns():
-    """DO UPDATE 가 비-키 컬럼 전부를 EXCLUDED 로 덮어써야 재집계가 반영된다."""
-    conflict = _AGG_SQL.split("DO UPDATE SET")[-1]
-    for col in (
-        "team_id",
-        "dept_id",
-        "input_tokens",
-        "output_tokens",
-        "cache_creation_tokens",
-        "cache_read_tokens",
-        "total_tokens",
-        "total_cost_usd",
-        "request_count",
-    ):
-        assert re.search(rf"{col}\s*=\s*EXCLUDED\.{col}", conflict), col
-
-
-@pytest.mark.asyncio
-async def test_startup_backfill_chunks_per_day_and_commits(monkeypatch):
-    """기동 백필은 단일 거대 INSERT 가 아니라 누락 날짜별 UPSERT+commit —
-    어느 날짜에서 죽어도 진행분이 남아 다음 기동이 이어간다(R30 F3)."""
-    from datetime import date
-
-    from worker.daily_aggregator import backfill_if_empty
-
+def _settings(tz="Asia/Seoul", recent=8, lookback=30):
     s = MagicMock()
-    s.reporting_timezone = "Asia/Seoul"
-    import worker.daily_aggregator as mod
-    monkeypatch.setattr(mod, "get_settings", lambda: s)
-
-    session = AsyncMock()
-    calls: list[str] = []
-
-    async def _execute(stmt, params=None):
-        sql = str(stmt)
-        r = MagicMock()
-        if "MIN(" in sql:
-            r.scalar_one_or_none = lambda: date(2026, 3, 1)
-        elif "NOT IN" in sql:
-            r.__iter__ = lambda self=None: iter(
-                [(date(2026, 3, 1),), (date(2026, 3, 3),)]
-            )
-        else:
-            r.rowcount = 5
-        calls.append(sql)
-        return r
-
-    session.execute = AsyncMock(side_effect=_execute)
-    total = await backfill_if_empty(session)
-
-    assert total == 10
-    agg_calls = [c for c in calls if "INSERT INTO usage.daily_aggregates" in c]
-    assert len(agg_calls) == 2  # 누락 2일 각각 — 거대 단일 INSERT 아님
-    assert "DO UPDATE" in agg_calls[0]
-    assert session.commit.await_count == 2  # 날짜당 commit — 재개 안전
+    s.reporting_timezone = tz
+    s.daily_usage_agg_recent_days = recent
+    s.daily_usage_agg_backfill_lookback_days = lookback
+    return s
 
 
-@pytest.mark.asyncio
-async def test_startup_backfill_empty_history_is_noop(monkeypatch):
-    """usage_logs 가 비어 있으면 아무 INSERT 도 하지 않는다."""
-    s = MagicMock()
-    s.reporting_timezone = "Asia/Seoul"
-    import worker.daily_aggregator as mod
-    monkeypatch.setattr(mod, "get_settings", lambda: s)
-
-    from worker.daily_aggregator import backfill_if_empty
-
-    session = AsyncMock()
-    calls: list[str] = []
-
-    async def _execute(stmt, params=None):
-        calls.append(str(stmt))
-        r = MagicMock()
-        r.scalar_one_or_none = lambda: None
-        return r
-
-    session.execute = AsyncMock(side_effect=_execute)
-    total = await backfill_if_empty(session)
-    assert total == 0
-    assert not any("INSERT INTO usage.daily_aggregates" in c for c in calls)
+def test_day_window_follows_dst_in_new_york():
+    """전환일 하루는 23h/25h — 고정 오프셋·+24h 산술이면 경계가 1시간 틀어진다."""
+    ny = ZoneInfo("America/New_York")
+    s, e = da._day_window(ny, date(2026, 3, 8))
+    assert (s, e) == (
+        datetime(2026, 3, 8, 5, tzinfo=UTC),
+        datetime(2026, 3, 9, 4, tzinfo=UTC),
+    )
+    assert (e - s).total_seconds() == 23 * 3600
+    s, e = da._day_window(ny, date(2026, 11, 1))
+    assert (e - s).total_seconds() == 25 * 3600
+    s, e = da._day_window(ZoneInfo("Asia/Kolkata"), date(2026, 11, 1))
+    assert s == datetime(2026, 10, 31, 18, 30, tzinfo=UTC)
 
 
-@pytest.mark.asyncio
-async def test_backfill_missing_days_recovers_gap(monkeypatch):
-    """크론 실패로 통째로 빠진 날짜는 그대로 두면 영구 누락이다 —
-    usage_logs 에는 있고 daily_aggregates 에는 없는 날짜를 탐지해 재집계한다."""
-    from datetime import date
+def test_agg_sql_groups_by_full_grain():
+    """GROUP BY 가 v2 유니크 입도와 같아야 한다 — 어긋나면 한 날짜 INSERT 가 자체 충돌한다."""
+    group_by = da._AGG_SQL.split("GROUP BY")[-1]
+    for col in ("user_id", "team_id", "dept_id", "model_alias",
+                "COALESCE(client, 'other')", "status"):
+        assert col in group_by, col
+    # 상태를 거르지 않는다 — gateway /v1/usage/* 합계(전 status)가 그대로여야 한다.
+    assert "status =" not in da._AGG_SQL and "SUCCESS" not in da._AGG_SQL
+    assert "ON CONFLICT" not in da._AGG_SQL  # 날짜 단위 DELETE+INSERT
 
-    from worker.daily_aggregator import backfill_missing_days
 
-    s = MagicMock()
-    s.reporting_timezone = "Asia/Seoul"
-    import worker.daily_aggregator as mod
-    monkeypatch.setattr(mod, "get_settings", lambda: s)
+def test_sql_bind_params_are_declared():
+    """주석 속 `:word` 가 바인드 파라미터로 파싱되면 실 PG 실행이 깨진다(R23 r3)."""
+    expected = {
+        "_LOCK_DAY_SQL": {"day"},
+        "_DELETE_DAY_SQL": {"day"},
+        "_AGG_SQL": {"day", "start", "end"},
+        "_MARK_DAY_SQL": {"day", "tz", "grain"},
+        "_MONTH_READY_SQL": {"period", "through", "tz", "grain"},
+        "_DELETE_MONTH_SQL": {"period"},
+        "_MONTH_SQL": {"period", "through"},
+        "_MARK_MONTH_SQL": {"period", "tz", "through"},
+        "_UNTRUSTED_DAYS_SQL": {"from_day", "to_day", "today", "tz", "grain"},
+        "_EARLIEST_DAY_SQL": {"tz"},
+        "_MISSING_DATES_SQL": {"tz", "lookback_start", "lookback_start_date", "today_start"},
+    }
+    for name, binds in expected.items():
+        assert set(text(getattr(da, name))._bindparams.keys()) == binds, name
 
+
+def _recording_session(rowcount=3, month_ready=True):
     session = AsyncMock()
     calls: list[tuple[str, dict]] = []
 
     async def _execute(stmt, params=None):
         sql = str(stmt)
-        r = MagicMock()
-        if "NOT IN" in sql:
-            # 누락 날짜 탐지 쿼리 — 하루 갭을 돌려준다.
-            r.__iter__ = lambda self=None: iter([(date(2026, 4, 10),)])
-        else:
-            r.rowcount = 7
         calls.append((sql, params or {}))
-        return r
-
-    session.execute = AsyncMock(side_effect=_execute)
-    total = await backfill_missing_days(session, lookback_days=30)
-
-    assert total == 7
-    agg_calls = [c for c in calls if "INSERT INTO usage.daily_aggregates" in c[0]]
-    assert len(agg_calls) == 1
-    # 누락일 윈도우로 재집계했는지 — KST 어제가 아니라 갭 날짜 기준이어야 한다.
-    assert "DO UPDATE" in agg_calls[0][0]  # 재집계도 충돌 안전(UPSERT)
-    session.commit.assert_awaited()
-
-
-@pytest.mark.asyncio
-async def test_backfill_missing_days_no_gap_is_noop(monkeypatch):
-    """갭이 없으면 집계 INSERT 를 돌리지 않는다(매일 무해)."""
-    s = MagicMock()
-    s.reporting_timezone = "Asia/Seoul"
-    import worker.daily_aggregator as mod
-    monkeypatch.setattr(mod, "get_settings", lambda: s)
-
-    from worker.daily_aggregator import backfill_missing_days
-
-    session = AsyncMock()
-    calls: list[str] = []
-
-    async def _execute(stmt, params=None):
-        calls.append(str(stmt))
         r = MagicMock()
+        r.rowcount = rowcount
+        r.scalar = lambda: month_ready
         r.__iter__ = lambda self=None: iter([])
         return r
 
     session.execute = AsyncMock(side_effect=_execute)
-    total = await backfill_missing_days(session, lookback_days=30)
+    return session, calls
 
-    assert total == 0
-    assert not any("INSERT INTO usage.daily_aggregates" in c for c in calls)
+
+@pytest.mark.asyncio
+async def test_aggregate_day_locks_then_replaces_in_one_transaction():
+    """잠금 → DELETE → INSERT → clean 표시 → commit 1회. 순서가 바뀌면 dirty 경합 창이 생긴다."""
+    session, calls = _recording_session()
+    n = await da.aggregate_day(session, "Asia/Kolkata", date(2026, 11, 20))
+    assert n == 3
+    kinds = [c[0].split()[0] for c in calls]
+    assert kinds == ["INSERT", "DELETE", "INSERT", "UPDATE"]
+    assert "daily_aggregate_days" in calls[0][0]
+    assert "dirty = false" in calls[3][0]
+    assert calls[3][1]["tz"] == "Asia/Kolkata" and calls[3][1]["grain"] == 2
+    session.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_recompute_days_skips_today_and_rebuilds_touched_months():
+    session, calls = _recording_session()
+    today = date(2026, 12, 2)
+    await da.recompute_days(
+        session, "Asia/Seoul",
+        [date(2026, 10, 30), date(2026, 12, 1), today, date(2026, 12, 1)],
+        today_local=today,
+    )
+    aggregated = [c[1]["day"] for c in calls
+                  if c[0].startswith("\nINSERT INTO usage.daily_aggregates")]
+    assert aggregated == [date(2026, 10, 30), date(2026, 12, 1)]  # 오늘 제외·중복 제거
+    months = [c[1]["period"] for c in calls if "INSERT INTO usage.monthly_aggregates" in c[0]]
+    assert months == [date(2026, 10, 1), date(2026, 12, 1)]
+    dec = next(c[1] for c in calls if "INSERT INTO usage.monthly_aggregates" in c[0]
+               and c[1]["period"] == date(2026, 12, 1))
+    assert dec["through"] == date(2026, 12, 1)  # 이번 달은 어제까지
+
+
+@pytest.mark.asyncio
+async def test_rebuild_month_skips_when_untrusted_and_on_first_day():
+    session, calls = _recording_session(month_ready=False)
+    assert await da.rebuild_month(session, "UTC", date(2026, 11, 1), date(2026, 11, 20)) is None
+    assert not any("monthly_aggregates" in c[0] and "INSERT" in c[0] for c in calls)
+    session2, calls2 = _recording_session()
+    assert await da.rebuild_month(session2, "UTC", date(2026, 11, 1), date(2026, 11, 1)) is None
+    assert calls2 == []
+
+
+@pytest.mark.asyncio
+async def test_nightly_days_union_recent_and_untrusted(monkeypatch):
+    session = AsyncMock()
+    r = MagicMock()
+    r.__iter__ = lambda self=None: iter([(date(2026, 1, 5),), (date(2026, 11, 22),)])
+    session.execute = AsyncMock(return_value=r)
+    days = await da.nightly_days(
+        session, "UTC", date(2026, 11, 24), recent_days=2, lookback_days=30
+    )
+    assert days == [date(2026, 1, 5), date(2026, 11, 22), date(2026, 11, 23)]
+    params = session.execute.await_args.args[1]
+    assert params["from_day"] == date(2026, 10, 25) and params["to_day"] == date(2026, 11, 23)
+
+
+@pytest.mark.asyncio
+async def test_startup_backfill_takes_the_aggregation_lock(monkeypatch):
+    """기동 백필도 야간 잡·CLI 와 같은 advisory lock 아래에서만 — 못 잡으면 건너뛴다."""
+    monkeypatch.setattr(da, "get_settings", lambda: _settings())
+    ran = []
+
+    class _Lock:
+        def __init__(self, got):
+            self.got = got
+
+        async def __aenter__(self):
+            return self.got
+
+        async def __aexit__(self, *a):
+            return False
+
+    async def _backfill(session):
+        ran.append(True)
+        return 0
+
+    monkeypatch.setattr(da, "backfill_if_empty", _backfill)
+    factory = MagicMock()
+    factory.kw = {"bind": object()}
+    factory.return_value.__aenter__ = AsyncMock(return_value=AsyncMock())
+    factory.return_value.__aexit__ = AsyncMock(return_value=False)
+
+    monkeypatch.setattr(da, "aggregation_lock", lambda engine, wait_seconds=0: _Lock(False))
+    await da.run_startup_backfill(factory)
+    assert ran == []
+    monkeypatch.setattr(da, "aggregation_lock", lambda engine, wait_seconds=0: _Lock(True))
+    await da.run_startup_backfill(factory)
+    assert ran == [True]
+
+
+@pytest.mark.asyncio
+async def test_startup_backfill_empty_history_is_noop(monkeypatch):
+    monkeypatch.setattr(da, "get_settings", lambda: _settings())
+    session = AsyncMock()
+    r = MagicMock()
+    r.scalar_one_or_none = lambda: None
+    session.execute = AsyncMock(return_value=r)
+    assert await da.backfill_if_empty(session) == 0
+    assert all("daily_aggregates (" not in str(c.args[0]) for c in session.execute.await_args_list)

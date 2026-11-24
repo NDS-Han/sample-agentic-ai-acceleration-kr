@@ -42,7 +42,7 @@ class TokenBreakdown(BaseModel):
     """과금 토큰 버킷별 합계 — Analytics 토큰 분석 패널용.
 
     cache_write 는 usage_logs.cache_creation_tokens 의 UI 용어다
-    (UsageByUserModelItem.cache_write_tokens 와 같은 명명). reasoning_tokens 는
+    (사용자×모델 표 user_model_usage 의 cache_write_tokens 와 같은 명명). reasoning_tokens 는
     output_tokens 에 이미 포함(models/usage.py)이라 별도 버킷이 아니다 — 더하면 이중계산.
     """
 
@@ -75,6 +75,8 @@ class TeamBreakdown(BaseModel):
 class UserBreakdown(BaseModel):
     user: str  # display_name (PII=sso_subject 미노출)
     email: str
+    #: 사용자×모델 드로어를 차트 클릭에서 바로 여는 키(/admin/analytics/user-models/{user_id}).
+    user_id: str | None = None
     cost_usd: Decimal = Decimal("0")
     requests: int = 0
 
@@ -110,35 +112,6 @@ class AnalyticsResponse(BaseModel):
     # AgentCore 웹 검색 — **모니터링 전용**, cost_summary.total_cost_usd(모델 비용)에 포함되지
     # 않는다. 같은 기간·scope·client 격리, status 무관(실패 요청의 검색도 과금됨).
     web_search: WebSearchUsage = Field(default_factory=WebSearchUsage)
-
-
-class UsageByUserModelItem(BaseModel):
-    date: str
-    user_id: str
-    user_name: str | None = None
-    # ⚠️ display_name 은 IdP 에서 비어 오거나 동명이인이 생긴다(auto-provisioning 은
-    #    name claim 이 없으면 email 을 넣고, 그것도 없으면 <sub>@unknown 을 쓴다).
-    #    운영자가 화면에서 사람을 특정할 축이 하나뿐이면 잘못된 사용자에게 예산 조치를
-    #    하게 된다. ADMIN/TEAM_LEADER 전용 엔드포인트라 email 노출 범위는 넓어지지 않는다.
-    user_email: str | None = None
-    model_alias: str
-    cost_usd: Decimal
-    calls: int
-    input_tokens: int
-    output_tokens: int
-    cache_read_tokens: int
-    cache_write_tokens: int
-    department_id: str | None = None
-    department_name: str | None = None
-    team_id: str | None = None
-    team_name: str | None = None
-    avg_latency_ms: int
-
-
-class UsageByUserModelResponse(BaseModel):
-    period: str
-    date: str
-    items: list[UsageByUserModelItem]
 
 
 class UsageByUserItem(BaseModel):

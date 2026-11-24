@@ -19,6 +19,14 @@ from worker.batch_flusher import BatchFlusher
 from worker.schemas.cost_stream import CostStreamEntry
 
 
+@pytest.fixture(autouse=True)
+def _no_late_day_marking(monkeypatch):
+    """이 파일의 entry 는 고정 과거 날짜(2026-04-21)라 늦은 로그 dirty 표시 SQL 이 한 번 더
+    나간다 — SQL 호출 수를 세는 기존 테스트의 관심사가 아니므로 여기선 끈다.
+    dirty 표시 자체는 test_late_days_dirty.py 가 검증한다."""
+    monkeypatch.setattr("worker.batch_flusher._late_days", lambda entries, tz: [])
+
+
 def _insert_returning_exec(stmt, params=None):
     """session.execute side_effect — INSERT ... RETURNING 에 실제 삽입된
     request_id 를 돌려준다. 그 외(replay SELECT/UPSERT)는 기본 MagicMock."""

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 from typing import Literal
 
 from fastapi import APIRouter, Depends, Query, Request
@@ -65,7 +66,9 @@ async def _cache_get(request: Request, key: str):
         return None
 
 
-async def _cache_set(request: Request, key: str, value: object) -> None:
+async def _cache_set(
+    request: Request, key: str, value: object, ttl: int = _ANALYTICS_CACHE_TTL
+) -> None:
     redis = getattr(request.app.state, "redis", None)
     if redis is None:
         return
@@ -73,7 +76,7 @@ async def _cache_set(request: Request, key: str, value: object) -> None:
         # jsonable_encoder 로 pydantic 모델→dict 를 먼저 펼쳐야 한다.
         # json.dumps(model, default=str) 는 모델 통째를 str() repr 로 저장해서
         # 캐시 적중 시 응답이 JSON 객체가 아니라 문자열이 된다.
-        await redis.setex(key, _ANALYTICS_CACHE_TTL, json.dumps(jsonable_encoder(value)))
+        await redis.setex(key, ttl, json.dumps(jsonable_encoder(value)))
     except Exception as exc:  # noqa: BLE001
         logger.debug("analytics cache set failed key=%s err=%s", key, exc)
 
@@ -182,9 +185,31 @@ async def export_analytics(
     client: str | None = Query(default=None),
     start_date: str | None = Query(default=None, description="YYYY-MM-DD — custom 구간 시작(end_date 필요)"),
     end_date: str | None = Query(default=None, description="YYYY-MM-DD — custom 구간 끝(포함)"),
+    view: Literal["user_model"] | None = Query(
+        default=None, description="user_model = 사용자 × 모델 행(CSV 전용)"
+    ),
     user: CurrentUser = Depends(require_admin_or_team_leader),
     session: AsyncSession = Depends(get_db_session),
 ):
+    if view == "user_model":
+        from app.services import user_model_usage as umu
+        from app.services.analytics_service import _resolve_scope
+
+        if format != "csv":
+            from app.core.exceptions import ValidationError
+
+            raise ValidationError("view=user_model supports format=csv only")
+        rng = umu.resolve_range(period, start_date, end_date)
+        _, scope_ids = await _resolve_scope(user, scope, session)
+        content = await umu.export_csv(session, rng, scope_ids, client)
+        stamp = rng.label.replace("~", "_")
+        return Response(
+            content=content,
+            media_type="text/csv",
+            headers={
+                "Content-Disposition": f'attachment; filename="analytics_user_model_{stamp}.csv"'
+            },
+        )
     svc: AnalyticsService = request.app.state.analytics_service
     content, content_type = await svc.export_analytics(
         session,
@@ -210,21 +235,6 @@ async def export_analytics(
     )
 
 
-@router.get("/usage/by-user-model")
-async def get_usage_by_user_model(
-    request: Request,
-    period: str = Query(description="YYYY-MM format"),
-    date: str = Query(description="YYYY-MM-DD format (within period month)"),
-    admin: CurrentUser = Depends(require_admin),
-    session: AsyncSession = Depends(get_db_session),
-):
-    """User × Model 누적 (period 1일 ~ date, KST, SUCCESS only). Dashboard 메인 테이블용."""
-    from app.services.analytics_service import AnalyticsService
-
-    svc: AnalyticsService = request.app.state.analytics_service
-    return await svc.get_usage_by_user_model(session, period=period, date=date)
-
-
 @router.get("/usage/by-user")
 async def get_usage_by_user(
     request: Request,
@@ -238,3 +248,92 @@ async def get_usage_by_user(
 
     svc: AnalyticsService = request.app.state.analytics_service
     return await svc.get_usage_by_user(session, period=period, date=date)
+
+
+# ── 사용자 × 모델 토큰 사용량 (By User 모드) ───────────────────────────────────
+
+#: 사용자 × 모델 스코프 결과 캐시 TTL(초). 스코프 **전체** 결과를 캐시하므로 정렬·페이지·
+#: 검색은 캐시에서 파생된다(질의 1회 ≈ 0.6s @ 5M행/월 벤치, 이후 1분간 메모리 연산).
+_USER_MODELS_CACHE_TTL = 60
+
+
+def _user_models_cache_key(*, scope: str, start: str, end: str, client: str | None) -> str:
+    """키 = 범위 + 앱 필터 + 스코프. ADMIN·scope='all' 에만 쓰인다(아래 호출부 참조) —
+    get_analytics 와 같은 격리 규칙: TEAM_LEADER 와 team: 범위는 캐시하지 않는다."""
+    normalized_client = "all" if client in (None, "", "all") else client
+    return f"analytics:user-models:v1:{scope}:{start}~{end}:{normalized_client}"
+
+
+@router.get("/user-models")
+async def get_user_models(
+    request: Request,
+    period: str | None = Query(default=None, description="YYYY-MM (custom 구간이 없을 때)"),
+    start_date: str | None = Query(default=None, description="YYYY-MM-DD — custom 구간 시작(end_date 필요)"),
+    end_date: str | None = Query(default=None, description="YYYY-MM-DD — custom 구간 끝(포함)"),
+    scope: str = Query("all", description="all | team:{uuid}"),
+    client: str | None = Query(default=None, description="claude-code|cowork|codex|other|all"),
+    sort: str = Query("total", max_length=134,
+                      description="total|input|output|cache|cost|name|other|model:<alias>"),
+    dir: Literal["asc", "desc"] = Query("desc"),
+    page: int = Query(1, ge=1, le=100_000),
+    page_size: int = Query(10, ge=1, le=50),
+    q: str | None = Query(default=None, max_length=100, description="이름·이메일·팀 부분 일치"),
+    user: CurrentUser = Depends(require_admin_or_team_leader),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """사용자 × 모델 표 — 상위 5 모델(총 토큰) 열 + Other + 행 합계.
+
+    숫자는 Total Tokens KPI 와 같은 정의(SUCCESS·리포팅 tz 일자·앱 필터·팀 스코프)다.
+    기간 검증은 /admin/analytics 와 같다(366일 초과 422, 한쪽만 400).
+    """
+    from app.services import user_model_usage as umu
+    from app.services.analytics_service import _resolve_scope
+
+    if not period and not (start_date or end_date):
+        period = current_kst_period()
+    rng = umu.resolve_range(period, start_date, end_date)
+    if not umu.SORT_RE.fullmatch(sort):
+        from app.core.exceptions import ValidationError
+
+        raise ValidationError(
+            "sort must be total|input|output|cache|cost|name|other|model:<alias>"
+        )
+    _, scope_ids = await _resolve_scope(user, scope, session)
+
+    cache_key = None
+    payload = None
+    if user.role == UserRole.ADMIN and scope == "all":
+        cache_key = _user_models_cache_key(
+            scope=scope, start=rng.start.isoformat(), end=rng.end.isoformat(), client=client
+        )
+        payload = await _cache_get(request, cache_key)
+    if payload is None:
+        payload = await umu.fetch_scope_payload(session, rng, scope_ids, client)
+        if cache_key is not None:
+            await _cache_set(request, cache_key, payload, ttl=_USER_MODELS_CACHE_TTL)
+    return umu.page_from_payload(
+        payload, sort=sort, direction=dir, page=page, page_size=page_size, q=q
+    )
+
+
+@router.get("/user-models/{user_id}")
+async def get_user_model_detail(
+    user_id: uuid.UUID,
+    period: str | None = Query(default=None, description="YYYY-MM (custom 구간이 없을 때)"),
+    start_date: str | None = Query(default=None),
+    end_date: str | None = Query(default=None),
+    scope: str = Query("all", description="all | team:{uuid}"),
+    client: str | None = Query(default=None),
+    user: CurrentUser = Depends(require_admin_or_team_leader),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """한 사용자의 전 모델 상세(요청 수·4 토큰 버킷·합계·비용·평균 지연). 캐시하지 않는다."""
+    from app.services import user_model_usage as umu
+    from app.services.analytics_service import _resolve_scope
+
+    if not period and not (start_date or end_date):
+        period = current_kst_period()
+    rng = umu.resolve_range(period, start_date, end_date)
+    _, scope_ids = await _resolve_scope(user, scope, session)
+    return await umu.get_user_detail(session, user_id, rng, scope_ids, client)
+

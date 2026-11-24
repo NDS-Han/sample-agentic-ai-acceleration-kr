@@ -19,6 +19,8 @@ import { TokenAnalysisCard } from '@/components/analytics/TokenAnalysisCard';
 import { ExportButton } from '@/components/analytics/ExportButton';
 import { RefreshButton } from '@/components/analytics/RefreshButton';
 import { ModelCostDetail } from '@/components/analytics/ModelCostDetail';
+import { UserModelSection, UserModelSkeleton } from '@/components/analytics/UserModelSection';
+import type { UserModelFilters } from '@/components/analytics/userModel';
 import { fetchAvailablePeriods } from '@/lib/actions/dashboard';
 import { fetchModelCostAnalytics } from '@/lib/actions/analytics-models';
 import { customRangeIssue, isMonth, resolveMonth } from '@/lib/utils/period';
@@ -183,6 +185,16 @@ export default async function AnalyticsPage(props: AnalyticsPageProps) {
       ? `${filter.start_date ?? '?'} ~ ${filter.end_date ?? '?'}`
       : `${effectiveMonth} 월간`;
 
+  // 사용자 × 모델 섹션 필터 — 다른 analytics 호출(buildAnalyticsQuery/ModelCostSection)
+  // 과 같은 값: 적용 월, custom 이면 두 날짜, scope(기본 all), 'all' 이 아닌 client.
+  const userModelFilters: UserModelFilters = {
+    period: resolveMonth(filter, effectiveMonth),
+    start_date: filter.period === 'custom' ? filter.start_date : null,
+    end_date: filter.period === 'custom' ? filter.end_date : null,
+    scope: filter.scope ?? 'all',
+    client: filter.client && filter.client !== 'all' ? filter.client : null,
+  };
+
   return (
     <div className="space-y-6">
       {/* 퀵챗 화면 컨텍스트 등록(렌더 null) — 적용 월/그룹/집계 헤드라인. PII 없음.
@@ -250,6 +262,21 @@ export default async function AnalyticsPage(props: AnalyticsPageProps) {
             <Suspense key={`breakdown-${sectionKey}`} fallback={<SkeletonCard count={1} />}>
               <BreakdownChart filter={filter} latestMonth={effectiveMonth} />
             </Suspense>
+            {/* 사용자 × 모델 토큰 사용량 — By User 모드 전용, Cost by User 바로 아래 전체 폭.
+                클라이언트가 프록시로 직접 조회하므로 표 조작이 페이지를 다시 그리지 않는다. */}
+            {filter.group_by === 'user' && (
+              <div className="lg:col-span-2">
+                <Suspense
+                  key={`usermodels-${sectionKey}-${filter.scope ?? 'all'}-${filter.client ?? 'all'}`}
+                  fallback={<UserModelSkeleton />}
+                >
+                  <UserModelSection
+                    key={`usermodels-${sectionKey}-${filter.scope ?? 'all'}-${filter.client ?? 'all'}`}
+                    filters={userModelFilters}
+                  />
+                </Suspense>
+              </div>
+            )}
             {/* 토큰 버킷 비율(input/output/cache read/write) — 전체 폭 카드,
                 내부는 도넛+목록 중앙 정렬(dashboard app share 와 같은 레이아웃). */}
             <Suspense key={`token-${sectionKey}`} fallback={<SkeletonCard count={1} />}>
