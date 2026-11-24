@@ -253,6 +253,16 @@ describe('AppPolicyPanel — web search 미배포 표시 (P1-5)', () => {
     expect(screen.getByText('webSearchOn')).toBeInTheDocument();
     expect(screen.queryByText('webSearchUnavailable')).not.toBeInTheDocument();
   });
+
+  it('웹 검색 카드가 예산 관리의 월 웹 검색 한도로 링크한다', async () => {
+    getAppPolicyAction.mockImplementation(async (client: string) => ({
+      success: true,
+      data: { ...policyFor(client), web_search_enabled: true, web_search_deployed: true },
+    }));
+    render(<AppPolicyPanel />);
+    const link = (await screen.findByText('appPolicyLink →')).closest('a');
+    expect(link?.getAttribute('href')).toBe('/budgets#web-search-quota');
+  });
 });
 
 describe('AppPolicyPanel — 모델 표기·표 스크롤 (P2-7, P2-8)', () => {

@@ -398,6 +398,8 @@ export interface EffectivePolicy {
   // cells + 규칙에 등장하는 별칭의 현재 output 단가 — /admin/models 가
   // ADMIN 전용이라 비-ADMIN 소비자(/my)용으로 응답에 포함된다.
   models?: EffectivePolicyModel[];
+  /** 웹 검색 통제(검색 수 기준, 예산과 별개) — 유효 월 한도·사용·잔여·팀 풀·요청당 상한. */
+  web_search_quota?: WebSearchQuotaEffective | null;
 }
 
 // ── 서비스 계정 키 단위 사용량 (GET /admin/service-accounts/{id}/usage) ──
@@ -513,4 +515,51 @@ export interface AuditActionGroup {
 
 export interface AuditActionCatalogResponse {
   groups: AuditActionGroup[];
+}
+
+// ── 웹 검색 통제 (GET /admin/web-search-quotas, budget.web_search_policies) ──
+// 검색 수 기준 — 예산·HARD_BLOCK 과 별개. 한도에 닿으면 게이트웨이가 web_search 도구만 뺀다.
+
+export interface WebSearchQuotaEffective {
+  period: string;
+  /** 개인 월 한도(null = 무제한). 팀 뷰에서는 null. */
+  monthly_limit: number | null;
+  monthly_limit_source: 'user' | 'organization' | 'none';
+  used: number;
+  remaining: number | null;
+  /** 팀 공용 풀(null = 무제한 또는 팀 없음). */
+  team_pool_limit: number | null;
+  team_used: number;
+  team_remaining: number | null;
+  per_request_cap: number;
+  per_request_cap_source: 'user' | 'team' | 'organization' | 'default';
+}
+
+export interface WebSearchPolicyValues {
+  monthly_query_limit: number | null;
+  per_request_cap: number | null;
+}
+
+export interface WebSearchQuotaTeamItem extends WebSearchPolicyValues {
+  team_id: string;
+  team_name: string;
+  dept_name: string | null;
+  used: number;
+}
+
+export interface WebSearchQuotaUserItem extends WebSearchPolicyValues {
+  user_id: string;
+  email: string;
+  display_name: string | null;
+  team_name: string | null;
+  used: number;
+}
+
+export interface WebSearchQuotaOverview {
+  period: string;
+  default_per_request_cap: number;
+  org: (WebSearchPolicyValues & { updated_at: string | null }) | null;
+  org_used: number;
+  teams: WebSearchQuotaTeamItem[];
+  users: WebSearchQuotaUserItem[];
 }
