@@ -10,6 +10,7 @@ import type { ClientShareResponse } from '@/lib/actions/dashboard';
 import { CATEGORICAL_PALETTE } from '@/lib/utils/chartTheme';
 import { labelFor } from '@/lib/utils/modelLabel';
 import { Usd } from '@/components/common/Usd';
+import { WebSearchCostNote, WebSearchCostValue } from '@/components/common/WebSearchCost';
 
 // 항목 구분용 다색 카테고리 팔레트 (색맹 안전, 라이트/다크 공통).
 const COLORS = CATEGORICAL_PALETTE;
@@ -143,8 +144,19 @@ export function ClientShareDonutClient({ data }: Props) {
             <span className="text-muted-foreground tabular-nums text-xs text-right">
               {t('callCount', { count: c.call_count })}
             </span>
+            {/* 웹 검색 수 + 그 비용(모니터링 전용) — 오른쪽 비용·점유율은 모델 비용만이다. */}
             <span className="text-muted-foreground tabular-nums text-xs text-right">
-              {c.web_search_count > 0 ? t('webSearchCount', { count: c.web_search_count }) : ''}
+              {c.web_search_count > 0 && (
+                <span className="flex flex-col items-end leading-tight" data-testid="client-web-search">
+                  <span>{t('webSearchCount', { count: c.web_search_count })}</span>
+                  {c.web_search_cost_usd !== undefined && (
+                    <WebSearchCostValue
+                      cost={c.web_search_cost_usd}
+                      trackingSince={data.web_search?.tracking_since}
+                    />
+                  )}
+                </span>
+              )}
             </span>
             <span className="tabular-nums text-xs text-right"><Usd value={c.cost_usd} /></span>
             <span className="text-muted-foreground tabular-nums text-xs text-right">
@@ -152,6 +164,12 @@ export function ClientShareDonutClient({ data }: Props) {
             </span>
           </li>
         ))}
+        {data.web_search && data.web_search.queries > 0 && (
+          <li className="flex items-center gap-1 pt-1 text-[11px] text-muted-foreground">
+            {t('webSearchCostSeparate')}
+            <WebSearchCostNote ws={data.web_search} align="left" side="top" />
+          </li>
+        )}
       </ul>
     </div>
   );

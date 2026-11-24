@@ -28,6 +28,7 @@ export function MyBudgetCard({
   basisMismatch?: boolean;
 }) {
   const t = useTranslations('my');
+  const tw = useTranslations('webSearchCost');
   const b = data.budget;
   const team = data.team;
 
@@ -154,6 +155,10 @@ export function MyBudgetCard({
           </div>
         )}
       </div>
+      {/* 예산은 모델 비용만 — 웹 검색 비용은 모니터링 전용이라 사용액·한도에 들어가지 않는다. */}
+      <p className="mt-4 text-[11px] text-muted-foreground" data-testid="budget-model-cost-only">
+        {tw('budgetModelCostOnly')}
+      </p>
     </div>
   );
 }

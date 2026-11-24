@@ -6,6 +6,7 @@
 import { adminAPI } from '@/lib/api-client';
 import { withRetry } from '@/lib/utils/retry';
 import { currentCalendarMonth, monthsAgo } from '@/lib/utils/period';
+import type { WebSearchUsage } from '@/types/entities';
 
 export interface DashboardSummary {
   period: string;
@@ -37,13 +38,19 @@ export interface ClientShareItem {
   cost_usd: number;
   share_pct: number;
   call_count: number;
-  web_search_count: number;   // server-side AgentCore web searches (attribution metric)
+  web_search_count: number;   // server-side AgentCore web searches (all request statuses)
+  /** 모니터링 전용 웹 검색 비용 — cost_usd(모델 비용)·share_pct 와 별개. null = 미추적. */
+  web_search_cost_usd?: number | null;
+  /** 비용 추적 이전(NULL) 행의 검색 수. */
+  web_search_untracked_count?: number;
 }
 
 export interface ClientShareResponse {
   period: string;
+  /** 모델 비용 합계 — 웹 검색 미포함. */
   total_cost_usd: number;
   clients: ClientShareItem[];
+  web_search?: WebSearchUsage;
 }
 
 export interface TeamOption {
@@ -112,6 +119,8 @@ export interface DashboardKPI {
   budget_utilization_pct: number | null;
   active_keys: number;
   active_models: number;
+  /** 모니터링 전용 — total_cost_usd·budget_* 에 포함되지 않는다(배포 전 백엔드는 없음). */
+  web_search?: WebSearchUsage;
 }
 
 /**

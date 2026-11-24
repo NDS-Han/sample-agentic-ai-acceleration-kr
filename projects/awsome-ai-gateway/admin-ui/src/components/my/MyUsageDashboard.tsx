@@ -24,6 +24,7 @@ import { KPICard } from '@/components/common/KPICard';
 import { errorRateInfo } from '@/lib/utils/errorRate';
 import { AlertLevel } from '@/types/enums';
 import { MyBudgetCard } from '@/components/my/MyBudgetCard';
+import { WebSearchCostNote, WebSearchInline } from '@/components/common/WebSearchCost';
 import { ErrorState } from '@/components/common/ErrorState';
 import { Usd } from '@/components/common/Usd';
 import { ReportingTzCaption } from '@/components/common/ReportingTzCaption';
@@ -349,8 +350,21 @@ export function MyUsageDashboard({
               {s.reasoning_tokens > 0 &&
                 t('tokReasoning', { n: s.reasoning_tokens.toLocaleString() })}
               {s.reasoning_tokens > 0 && s.web_search_count > 0 && ' · '}
+              {/* 웹 검색 수 + 비용(모니터링 전용, 예산 제외). 구 백엔드(web_search 없음)는 수만. */}
               {s.web_search_count > 0 &&
-                t('tokWebSearch', { n: s.web_search_count.toLocaleString() })}
+                (data.web_search ? (
+                  <span className="inline-flex items-center gap-1">
+                    <WebSearchInline
+                      queries={data.web_search.queries}
+                      cost={data.web_search.cost_usd}
+                      untracked={data.web_search.untracked_queries}
+                      trackingSince={data.web_search.tracking_since}
+                    />
+                    <WebSearchCostNote ws={data.web_search} align="left" side="top" />
+                  </span>
+                ) : (
+                  t('tokWebSearch', { n: s.web_search_count.toLocaleString() })
+                ))}
             </p>
           )}
         </div>

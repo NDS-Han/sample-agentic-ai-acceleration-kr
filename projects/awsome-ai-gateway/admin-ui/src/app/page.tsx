@@ -15,6 +15,7 @@ import {
   Coins,
   Users,
   CalendarClock,
+  Globe,
 } from 'lucide-react';
 import { Suspense } from 'react';
 import { getTranslations } from 'next-intl/server';
@@ -38,7 +39,8 @@ import { TopSpendTable, type TopSpendRow } from '@/components/dashboard/TopSpend
 import { PeriodSelector } from '@/components/dashboard/PeriodSelector';
 import { ClientFilter } from '@/components/dashboard/ClientFilter';
 import { reportingNowParts } from '@/lib/utils/period';
-import { fmtUsd, fmtTokensCompact } from '@/lib/utils/format';
+import { fmtUsd, fmtTokensCompact, usdTitle } from '@/lib/utils/format';
+import { WebSearchCostNote } from '@/components/common/WebSearchCost';
 import { teamDisplayName } from '@/lib/utils/trendSeries';
 import { isSyntheticEmail, userLabel } from '@/lib/userLabel';
 import { pageTitle } from '@/lib/pageMetadata';
@@ -82,6 +84,7 @@ function computeDailyAvg(period: string, totalCost: number): {
 async function DashboardKPIs({ period, client }: { period: string; client: string }) {
   const t = await getTranslations('dashboard');
   const tb = await getTranslations('budgets');
+  const tw = await getTranslations('webSearchCost');
 
   // 카드 전체가 단일 엔드포인트에서 온다. 예전에는 4개를 Promise.allSettled 로 동시에
   // 불렀고 그중 /admin/budgets/summary 가 예산 config 하나당 Redis GET + SQL SUM 을
@@ -114,7 +117,7 @@ async function DashboardKPIs({ period, client }: { period: string; client: strin
         <h2 className="px-1 text-xs font-bold uppercase tracking-[0.12em] text-muted-foreground">
           {t('costAndBudget')}
         </h2>
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
           <KPICard
             title={t('usageThisMonth')}
             // KPI 카드는 값 하나가 전부라 1센트 미만도 유효숫자 2개로 보인다($0.0071) —
@@ -159,7 +162,37 @@ async function DashboardKPIs({ period, client }: { period: string; client: strin
             }
             href={`/analytics?period=${period}${clientSuffix}`}
           />
+          {(() => {
+            // 웹 검색 — 모니터링 전용(모델 비용·예산 KPI 와 별개 카드). null 비용은 "미추적"
+            // 이지 $0 이 아니다. web_search 가 없으면(구 백엔드) 값을 모른다 → '—'.
+            const ws = kpi?.web_search;
+            const cost = ws?.cost_usd ?? null;
+            return (
+              <KPICard
+                title={tw('title')}
+                value={!ws ? '—' : cost == null ? tw('notTracked') : fmtUsd(cost, { subCent: 'significant' })}
+                valueTitle={ws && cost == null ? tw('notTrackedHint', { since: 'none' }) : usdTitle(cost)}
+                icon={<Globe size={18} aria-hidden="true" />}
+                description={
+                  !kpi
+                    ? t('fetchFailed')
+                    : !ws
+                      ? tw('excludedFromBudgets')
+                      : ws.untracked_queries > 0 && cost != null
+                        ? `${tw('kpiDesc', { count: ws.queries })} · ${tw('untrackedPart', { count: ws.untracked_queries })}`
+                        : tw('kpiDesc', { count: ws.queries })
+                }
+                href={`/analytics?period=${period}${clientSuffix}`}
+              />
+            );
+          })()}
         </div>
+        {/* 정가 계산·조직 공유 무료분·예산 제외 안내 — 웹 검색 카드의 각주. */}
+        {kpi?.web_search && (
+          <div className="px-1">
+            <WebSearchCostNote ws={kpi.web_search} inline />
+          </div>
+        )}
       </section>
 
       {/* ── 사용량 & 시스템 ── */}

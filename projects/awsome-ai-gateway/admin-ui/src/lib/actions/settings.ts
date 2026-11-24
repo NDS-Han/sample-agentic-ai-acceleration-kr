@@ -14,6 +14,7 @@ import { z } from 'zod';
 
 import { adminAPI } from '@/lib/api-client';
 import { APIError, withRetry } from '@/lib/utils/retry';
+import { isValidWebSearchPrice } from '@/lib/utils/webSearchPrice';
 
 import type { ActionResult } from './types';
 
@@ -53,6 +54,53 @@ export async function setBodyLoggingAction(
       enabled: parsed,
     });
     revalidatePath('/monitoring');
+    return { success: true, data };
+  } catch (err) {
+    return { success: false, error: toErrorMessage(err) };
+  }
+}
+
+// ─── AgentCore 웹 검색 단가 (모니터링 전용) ─────────────────────────────────────
+
+export interface WebSearchPricingSetting {
+  /** USD / 1,000 queries — 백엔드 Decimal 이 문자열로 온다("7.00"). */
+  price_per_1k_queries: string;
+  default_price_per_1k_queries: string;
+  is_default: boolean;
+  updated_at: string | null;
+  /** 워커가 처음 비용을 기록한 시각 — 이전 사용분은 "미추적". */
+  tracking_since: string | null;
+}
+
+// ⚠️ 'use server' 파일은 async 함수만 export 할 수 있다 — 검증 규칙은 utils 에서 가져온다.
+const WebSearchPriceInput = z
+  .string()
+  .trim()
+  .refine(isValidWebSearchPrice, 'invalid web search price');
+
+export async function getWebSearchPricingAction(): Promise<ActionResult<WebSearchPricingSetting>> {
+  try {
+    const data = await withRetry(() =>
+      adminAPI.get<WebSearchPricingSetting>('/admin/settings/web-search-pricing')
+    );
+    return { success: true, data };
+  } catch (err) {
+    return { success: false, error: toErrorMessage(err) };
+  }
+}
+
+export async function setWebSearchPricingAction(
+  price: string
+): Promise<ActionResult<WebSearchPricingSetting>> {
+  try {
+    const parsed = WebSearchPriceInput.parse(price);
+    // 재시도 없음 — 성공마다 감사 로그 행이 남는 쓰기다(setBodyLoggingAction 과 같은 이유).
+    // 문자열로 보낸다 — 부동소수 왕복 없이 Decimal 로 저장된다.
+    const data = await adminAPI.put<WebSearchPricingSetting>(
+      '/admin/settings/web-search-pricing',
+      { price_per_1k_queries: parsed }
+    );
+    revalidatePath('/models');
     return { success: true, data };
   } catch (err) {
     return { success: false, error: toErrorMessage(err) };

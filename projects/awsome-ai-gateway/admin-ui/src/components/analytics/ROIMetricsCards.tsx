@@ -1,7 +1,9 @@
 // Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
 
 import { getTranslations } from 'next-intl/server';
-import { fmtUsd } from '@/lib/utils/format';
+import { fmtUsd, usdTitle } from '@/lib/utils/format';
+import type { WebSearchUsage } from '@/types/entities';
+import { WebSearchCostNote } from '@/components/common/WebSearchCost';
 import { errorRateInfo } from '@/lib/utils/errorRate';
 import type { AnalyticsFilterForm } from '@/types/api';
 import { buildAnalyticsQuery, fetchAnalyticsOnce } from '@/lib/utils/analyticsQuery';
@@ -26,6 +28,8 @@ interface AnalyticsAPIResponse {
   by_model: { model: string; requests: number; cost_usd: number }[];
   by_team: { team: string; team_id: string; cost_usd: number; active_users: number }[];
   trends: { date: string; cost_usd: number; requests: number }[];
+  /** 모니터링 전용 — cost_summary.total_cost_usd(모델 비용)에 포함되지 않는다. */
+  web_search?: WebSearchUsage;
 }
 
 interface MetricCardProps {
@@ -58,6 +62,7 @@ function MetricCard({ label, value, valueTitle, description, warn }: MetricCardP
 
 export async function ROIMetricsCards({ filter, latestMonth }: ROIMetricsCardsProps) {
   const t = await getTranslations('analytics');
+  const tw = await getTranslations('webSearchCost');
   const data = await fetchAnalyticsOnce<AnalyticsAPIResponse>(
     JSON.stringify(buildAnalyticsQuery(filter, latestMonth)),
   ).catch(() => null);
@@ -109,11 +114,35 @@ export async function ROIMetricsCards({ filter, latestMonth }: ROIMetricsCardsPr
     },
   ];
 
+  // 웹 검색 — 모델 비용 카드와 별개(예산 제외). null 비용은 "미추적" 이지 $0 이 아니다.
+  const ws = data.web_search;
+  if (ws) {
+    const cost = ws.cost_usd;
+    metrics.push({
+      label: tw('title'),
+      value: cost == null ? tw('notTracked') : fmtUsd(cost, { subCent: 'significant' }),
+      valueTitle: cost == null ? tw('notTrackedHint', { since: 'none' }) : usdTitle(cost),
+      description:
+        ws.untracked_queries > 0 && cost != null
+          ? `${tw('kpiDesc', { count: ws.queries })} · ${tw('untrackedPart', { count: ws.untracked_queries })}`
+          : tw('kpiDesc', { count: ws.queries }),
+    });
+  }
+
   return (
-    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-      {metrics.map((metric) => (
-        <MetricCard key={metric.label} {...metric} />
-      ))}
+    <div className="space-y-2">
+      <div
+        className={`grid grid-cols-1 sm:grid-cols-2 gap-4 ${ws ? 'lg:grid-cols-3 xl:grid-cols-5' : 'lg:grid-cols-4'}`}
+      >
+        {metrics.map((metric) => (
+          <MetricCard key={metric.label} {...metric} />
+        ))}
+      </div>
+      {ws && (
+        <div className="px-1">
+          <WebSearchCostNote ws={ws} inline />
+        </div>
+      )}
     </div>
   );
 }

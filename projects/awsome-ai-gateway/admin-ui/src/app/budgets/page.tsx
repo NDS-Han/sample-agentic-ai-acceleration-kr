@@ -30,6 +30,7 @@ export const generateMetadata = pageTitle('nav', 'budgets');
 export default async function BudgetsPage(props: BudgetsPageProps) {
   const searchParams = await props.searchParams;
   const t = await getTranslations('budgets');
+  const tw = await getTranslations('webSearchCost');
   const focusTeam = searchParams.team && UUID_RE.test(searchParams.team) ? searchParams.team : undefined;
   const focusUser = searchParams.user && UUID_RE.test(searchParams.user) ? searchParams.user : undefined;
   const cookieStore = await cookies();
@@ -184,6 +185,10 @@ export default async function BudgetsPage(props: BudgetsPageProps) {
         <h1 className="text-2xl font-bold">{t('title')}</h1>
         {/* 예산 기간(월)·사용액 집계 경계는 리포팅 TZ(배포 리전) 기준. */}
         <ReportingTzCaption kind="period" className="mt-1" />
+        {/* 예산 사용액은 모델 비용만 — 웹 검색 비용(모니터링 전용)은 들어가지 않는다. */}
+        <p className="mt-1 text-xs text-muted-foreground" data-testid="budget-model-cost-only">
+          {tw('budgetModelCostOnly')}
+        </p>
       </div>
 
       {isAdmin ? (

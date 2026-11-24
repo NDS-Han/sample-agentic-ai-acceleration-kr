@@ -3,7 +3,8 @@
 // Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
 
 import { useTranslations } from 'next-intl';
-import { fmtUsd } from '@/lib/utils/format';
+import { fmtUsd, usdTitle } from '@/lib/utils/format';
+import { WebSearchCostNote } from '@/components/common/WebSearchCost';
 import { usePointInTime } from '@/components/common/usePointInTime';
 import type { MonitoringOverviewResponse } from '@/lib/actions/monitoring';
 
@@ -29,8 +30,10 @@ function StatCard({
 
 export function MonitoringOverview({ data }: { data: MonitoringOverviewResponse }) {
   const t = useTranslations('monitoring');
+  const tw = useTranslations('webSearchCost');
   const pit = usePointInTime();
   const h = data.last_1h;
+  const ws = h.web_search;
 
   return (
     <div className="space-y-4">
@@ -43,7 +46,9 @@ export function MonitoringOverview({ data }: { data: MonitoringOverviewResponse 
           {pit.tz ? t('asOf', { time: pit.dateTime(data.timestamp), tz: pit.zoneAt(data.timestamp) }) : '\u00a0'}
         </span>
       </div>
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4">
+      <div
+        className={`grid grid-cols-2 sm:grid-cols-3 gap-4 ${ws ? 'lg:grid-cols-4 xl:grid-cols-7' : 'lg:grid-cols-6'}`}
+      >
         <StatCard label={t('totalRequests')} value={h.total_requests.toLocaleString()} />
         <StatCard
           label={t('errors')}
@@ -63,9 +68,29 @@ export function MonitoringOverview({ data }: { data: MonitoringOverviewResponse 
           label={t('totalCost')}
           // 단일 값 카드 — 1센트 미만도 유효숫자 2개($0.0071).
           value={fmtUsd(h.total_cost_usd, { subCent: 'significant' })}
+          valueTitle={usdTitle(h.total_cost_usd)}
+          sub={ws ? tw('modelCost') : undefined}
         />
+        {ws && (
+          // 웹 검색 — 모델 비용 카드와 별개(예산 제외). null = 미추적, $0 이 아니다.
+          <StatCard
+            label={tw('title')}
+            value={
+              ws.cost_usd == null ? tw('notTracked') : fmtUsd(ws.cost_usd, { subCent: 'significant' })
+            }
+            valueTitle={
+              ws.cost_usd == null ? tw('notTrackedHint', { since: 'none' }) : usdTitle(ws.cost_usd)
+            }
+            sub={
+              ws.untracked_queries > 0 && ws.cost_usd != null
+                ? `${tw('queries', { count: ws.queries })} · ${tw('untrackedPart', { count: ws.untracked_queries })}`
+                : tw('queries', { count: ws.queries })
+            }
+          />
+        )}
         <StatCard label={t('activeModels')} value={String(data.active_models)} />
       </div>
+      {ws && <WebSearchCostNote ws={ws} inline />}
     </div>
   );
 }

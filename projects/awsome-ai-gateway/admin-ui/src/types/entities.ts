@@ -449,6 +449,23 @@ export interface ServiceAccountUsageResponse {
     cost_share: number;
   }[];
   daily: { date: string; requests: number; tokens: number; cost_usd: number }[];
+  /** 모니터링 전용 웹 검색 — summary.cost_usd(모델 비용)·예산과 별개. 구 캐시 응답엔 없을 수 있다. */
+  web_search?: WebSearchUsage;
+}
+
+/**
+ * AgentCore 웹 검색 사용량(admin-api ``web_search``). **모니터링 전용** — 모델 비용
+ * (``cost_usd``·``total_cost_usd``)과 예산·요청 한도 어디에도 포함되지 않는다.
+ *
+ * ``cost_usd === null`` 은 "미추적"(비용 추적 이전 사용분) — $0(무료)으로 그리면 안 된다.
+ * ``untracked_queries > 0`` 이면 ``cost_usd`` 는 추적된 부분만의 합계다.
+ */
+export interface WebSearchUsage {
+  queries: number;
+  cost_usd: number | null;
+  untracked_queries: number;
+  /** ISO — 워커가 처음 비용을 기록한 시각. 아직 없으면 null. */
+  tracking_since: string | null;
 }
 
 // ── 감사 로그 (GET /admin/audit/logs) ──

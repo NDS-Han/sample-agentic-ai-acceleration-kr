@@ -5,7 +5,7 @@
 
 import { adminAPI } from '@/lib/api-client';
 import { withRetry } from '@/lib/utils/retry';
-import type { EffectivePolicy } from '@/types/entities';
+import type { EffectivePolicy, WebSearchUsage } from '@/types/entities';
 
 export interface MyBudgetResponse {
   user_id: string;
@@ -66,13 +66,17 @@ export interface MyUsageSummary {
   cache_read_tokens: number;
   /** output 에 이미 포함된 비청구 표시 지표 — total 에 더하면 이중계산. */
   reasoning_tokens: number;
+  /** 웹 검색 수(요청 상태 무관 — 실패 요청의 검색도 과금됨). */
   web_search_count: number;
 }
 
 export interface MyUsageResponse {
   user_id: string;
   period: string;
+  /** cost_usd = 모델 비용(웹 검색 미포함). */
   summary: MyUsageSummary;
+  /** 모니터링 전용 웹 검색 — 예산에 포함되지 않는다(배포 전 백엔드는 없음). */
+  web_search?: WebSearchUsage;
   daily_usage: DailyUsage[];
   by_model: ModelUsage[];
 }
