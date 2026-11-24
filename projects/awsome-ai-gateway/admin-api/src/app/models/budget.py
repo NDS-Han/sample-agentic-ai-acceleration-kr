@@ -140,3 +140,30 @@ class DowngradePolicy(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
+
+
+# ── WebSearchPolicy (migration 0059) ──
+
+
+class WebSearchPolicy(Base):
+    """웹 검색 월 검색 수 한도 + 요청당 상한 — **검색 수 기준**, 예산·HARD_BLOCK 과 별개.
+
+    ORG(scope_id NULL) 한도 = 사용자 1인 기본, TEAM 한도 = 팀 공용 풀, USER 한도 = 개인
+    덮어쓰기. per_request_cap 은 USER → TEAM → ORG → 기본(5). NULL = 상속, 월 한도 0 = 금지.
+    gateway-proxy(services/web_search_quota)가 읽고 여기서 관리한다.
+    """
+
+    __tablename__ = "web_search_policies"
+    __table_args__ = {"schema": "budget"}
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    scope: Mapped[str] = mapped_column(String(8), nullable=False)
+    scope_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    monthly_query_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    per_request_cap: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    updated_by: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("auth.users.id"), nullable=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )

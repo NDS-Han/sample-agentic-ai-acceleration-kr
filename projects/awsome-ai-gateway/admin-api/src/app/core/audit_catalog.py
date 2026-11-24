@@ -82,6 +82,9 @@ ACTION_GROUPS: dict[str, tuple[str, ...]] = {
         "DELETE_AUTO_DOWNGRADE",
         "SET_RATE_LIMIT",
         "DELETE_RATE_LIMIT",
+        "SET_WEB_SEARCH_QUOTA",
+        "SET_WEB_SEARCH_REQUEST_CAP",
+        "CLEAR_WEB_SEARCH_QUOTA",
     ),
     "system": (
         "SET_BODY_LOGGING",

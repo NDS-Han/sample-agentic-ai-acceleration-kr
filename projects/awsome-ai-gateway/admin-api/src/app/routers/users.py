@@ -791,9 +791,15 @@ async def get_user_effective_policy(
     4개 축(user→app, user/team→model, model→app)의 판정 매트릭스 + 예산·
     rate limit·downgrade·web search 설정을 한 번에 반환한다.
     """
+    from app.core.usage_filters import current_kst_period
     from app.services.effective_policy_service import EffectivePolicyService
+    from app.services.web_search_quota_service import WebSearchQuotaService
 
-    return await EffectivePolicyService(session).get_for_user(user_id)
+    policy = await EffectivePolicyService(session).get_for_user(user_id)
+    # 웹 검색 통제(검색 수 기준) — 유효 월 한도·사용·잔여·팀 풀·요청당 상한.
+    policy.web_search_quota = await WebSearchQuotaService(session).effective_for_user(
+        user_id, uuid.UUID(policy.team_id) if policy.team_id else None, current_kst_period())
+    return policy
 
 
 @router.get("/teams/{team_id}/effective-policy")
@@ -808,6 +814,12 @@ async def get_team_effective_policy(
     models: team→none, rate limit: GLOBAL+TEAM, downgrade: TEAM).
     user effective-policy 와 같은 ADMIN 전용.
     """
+    from app.core.usage_filters import current_kst_period
     from app.services.effective_policy_service import EffectivePolicyService
+    from app.services.web_search_quota_service import WebSearchQuotaService
 
-    return await EffectivePolicyService(session).get_for_team(team_id)
+    policy = await EffectivePolicyService(session).get_for_team(team_id)
+    # 팀 공용 풀·사용·잔여·요청당 상한(팀→조직→기본).
+    policy.web_search_quota = await WebSearchQuotaService(session).effective_for_team(
+        team_id, current_kst_period())
+    return policy

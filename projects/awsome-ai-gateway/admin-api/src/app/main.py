@@ -683,7 +683,7 @@ def create_app() -> FastAPI:
     register_exception_handlers(app)
 
     # ── Register routers ──
-    from app.routers import analytics, apps, body_logs, budgets, cli, dashboard, internal, keys, models, monitoring, my, productivity, rate_limits, routing, service_accounts, service_tokens, settings as settings_router, users
+    from app.routers import analytics, apps, body_logs, budgets, cli, dashboard, internal, keys, models, monitoring, my, productivity, rate_limits, routing, service_accounts, service_tokens, settings as settings_router, users, web_search_quota
 
     app.include_router(keys.router)
     app.include_router(budgets.router)
@@ -692,6 +692,7 @@ def create_app() -> FastAPI:
     app.include_router(routing.router)
     app.include_router(apps.router)
     app.include_router(settings_router.router)
+    app.include_router(web_search_quota.router)
     app.include_router(users.router)
     app.include_router(analytics.router)
     app.include_router(dashboard.router)

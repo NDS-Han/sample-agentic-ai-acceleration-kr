@@ -102,19 +102,36 @@ async def test_my_effective_policy_uses_caller_identity(developer_user, monkeypa
 
         async def get_for_user(self, user_id):
             captured["user_id"] = user_id
-            return {"user_id": str(user_id), "cells": []}
+            from types import SimpleNamespace
+
+            return SimpleNamespace(user_id=str(user_id), team_id=None, cells=[],
+                                   web_search_quota=None)
+
+    class _Quota:
+        def __init__(self, session):
+            pass
+
+        async def effective_for_user(self, user_id, team_id, period):
+            # 웹 검색 통제도 호출자 본인 기준이어야 한다.
+            captured["quota_user_id"] = user_id
+            return "quota"
 
     import app.services.effective_policy_service as eps
 
     monkeypatch.setattr(
         "app.services.effective_policy_service.EffectivePolicyService", _Svc
     )
+    monkeypatch.setattr(
+        "app.services.web_search_quota_service.WebSearchQuotaService", _Quota
+    )
     session = MagicMock()
     body = await get_my_effective_policy(developer_user, session)
 
     assert captured["session"] is session
     assert captured["user_id"] == developer_user.user_id
-    assert body["user_id"] == str(developer_user.user_id)
+    assert captured["quota_user_id"] == developer_user.user_id
+    assert body.web_search_quota == "quota"
+    assert body.user_id == str(developer_user.user_id)
 
 
 @pytest.mark.asyncio

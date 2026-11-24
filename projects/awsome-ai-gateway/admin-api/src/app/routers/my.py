@@ -164,9 +164,17 @@ async def get_my_effective_policy(
     보여주기 위한 경로. 인증만 요구한다 — 자기 자신의 정책을 돌려줄 뿐이라
     역할 제한은 없다(/admin/my/profile 과 같은 게이트).
     """
-    from app.services.effective_policy_service import EffectivePolicyService
+    import uuid as _uuid
 
-    return await EffectivePolicyService(session).get_for_user(user.user_id)
+    from app.services.effective_policy_service import EffectivePolicyService
+    from app.services.web_search_quota_service import WebSearchQuotaService
+
+    policy = await EffectivePolicyService(session).get_for_user(user.user_id)
+    # 본인 웹 검색 통제(검색 수 기준) — 월 한도·사용·잔여·팀 풀·요청당 상한.
+    policy.web_search_quota = await WebSearchQuotaService(session).effective_for_user(
+        user.user_id, _uuid.UUID(policy.team_id) if policy.team_id else None,
+        current_kst_period())
+    return policy
 
 
 @router.get("/periods")
