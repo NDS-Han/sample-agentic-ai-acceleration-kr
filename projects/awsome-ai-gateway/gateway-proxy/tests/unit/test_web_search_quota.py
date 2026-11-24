@@ -607,3 +607,63 @@ async def test_responses_runs_loop_with_guard_when_under_limit(monkeypatch, redi
     assert isinstance(loop_calls[0]["mcp_client"], q.QuotaGuard)
     assert loop_calls[0]["max_iterations"] == 3      # ceil(7 / 3)
     assert "web_search_notice" not in state
+
+
+# ── 실 PG: 게이트웨이의 정책·합계 SQL 이 실제 스키마에서 돈다 ──────────────────────
+_PROOF_DSN = __import__("os").environ.get("PROOF_DSN")
+
+
+@pytest.mark.skipif(not _PROOF_DSN, reason="PROOF_DSN not set (needs a real PostgreSQL)")
+async def test_real_pg_policy_and_counter_rebuild(redis):
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+
+    from app.periods import current_kst_period
+
+    user = "00000000-0000-4000-a000-000000000010"
+    team = "00000000-0000-4000-a000-000000000003"
+    period = current_kst_period()
+    engine = create_async_engine(_PROOF_DSN)
+    try:
+        async with engine.connect() as conn:
+            trans = await conn.begin()
+
+            class _SF:
+                def __call__(self):
+                    return self
+
+                async def __aenter__(self):
+                    return AsyncSession(bind=conn, join_transaction_mode="create_savepoint")
+
+                async def __aexit__(self, *a):
+                    return False
+
+            sf = _SF()
+            async with sf() as s:
+                await s.execute(text("DELETE FROM budget.web_search_policies"))
+                await s.execute(text(
+                    "INSERT INTO budget.web_search_policies(scope, monthly_query_limit, "
+                    "per_request_cap) VALUES ('ORG', 50, 4)"))
+                await s.execute(text(
+                    "INSERT INTO budget.web_search_policies(scope, scope_id, monthly_query_limit) "
+                    "VALUES ('TEAM', CAST(:t AS uuid), 9)"), {"t": team})
+                await s.execute(text(
+                    "INSERT INTO budget.web_search_policies(scope, scope_id, per_request_cap) "
+                    "VALUES ('USER', CAST(:u AS uuid), 2)"), {"u": user})
+                await s.execute(text(
+                    "INSERT INTO usage.usage_logs (request_id, user_id, team_id, dept_id, "
+                    "model_alias, provider, input_tokens, output_tokens, web_search_count, "
+                    "cost_usd, latency_ms, status, requested_at, completed_at) VALUES "
+                    "('gwq-1', CAST(:u AS uuid), CAST(:t AS uuid), "
+                    "'00000000-0000-4000-a000-000000000002', 'm', 'BEDROCK', 1, 1, 6, 0, 1, "
+                    "'SUCCESS', now() - interval '1 minute', now())"), {"u": user, "t": team})
+            policy = await q.PolicyLoader().load(sf, user, team, 5)
+            assert policy == q.WebSearchPolicy(user_limit=50, team_limit=9, per_request_cap=2)
+            used = await q.ensure_counter(redis, q.user_key(user, period), sf, q._SUM_USER_SQL,
+                                          user, period)
+            team_used = await q.ensure_counter(redis, q.team_key(team, period), sf,
+                                               q._SUM_TEAM_SQL, team, period)
+            assert used >= 6 and team_used >= 6
+            await trans.rollback()
+    finally:
+        await engine.dispose()
