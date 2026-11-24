@@ -25,6 +25,7 @@ import { EffectivePolicySummary } from './EffectivePolicySummary';
 import { KpiCard, KpiSkeleton, PolicyRow, Section } from './parts';
 import { appsSummary, budgetSummary, modelsSummary, rateSummary, webSearchSummary } from './policyRows';
 import { RateLimitDialog } from './RateLimitDialog';
+import { RateLimitUsageCard } from './RateLimitUsageCard';
 import { EMPTY_CELL, useActivity, useCatalog, useCurrentPeriod, usePolicy, useTeamUsage, useUserUsage } from './useDetailData';
 import { usePolicyText } from './usePolicyText';
 
@@ -243,6 +244,8 @@ export function UserDetail({
           </>
         )}
       </Section>
+
+      <RateLimitUsageCard scope="user" id={node.id} rate={rate} />
 
       <Section title={t('effective.title')} aside={t('effective.aside')} testId="user-effective">
         {policy.status === 'failed' ? (

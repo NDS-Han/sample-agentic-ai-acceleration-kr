@@ -14,6 +14,7 @@ import { useEffect, useId, useState } from 'react';
 import { useTranslations } from 'next-intl';
 
 import { deleteRateLimitAction, getRateLimitStatusAction, setRateLimitAction } from '@/lib/actions/rate-limits';
+import { fetchRateLimitTrend, trendPeaks, type TrendPeaks } from '@/lib/utils/rateLimitUsage';
 import { EditPolicyDialog } from './EditPolicyDialog';
 import { RATE_KEYS, type RateKey, type RateValues } from './policyRows';
 
@@ -39,6 +40,13 @@ function toFields(v: RateValues | null): Fields {
     cpm: v.cpm?.toString() ?? '',
     cph: v.cph?.toString() ?? '',
   };
+}
+
+/** 최근 24시간 최대 사용량 값 — RPM·TPM 은 올림한 정수, 비용은 $ 와 유효숫자 2개(1 이상은 소수 2자리). */
+export function fmtPeak(key: RateKey, v: number): string {
+  if (key === 'rpm' || key === 'tpm') return Math.ceil(v).toLocaleString('en-US');
+  if (v === 0) return '$0';
+  return v >= 1 ? `$${v.toFixed(2)}` : `$${Number(v.toPrecision(2))}`;
 }
 
 export function RateLimitDialog({
@@ -68,6 +76,25 @@ export function RateLimitDialog({
   const [hasOwn, setHasOwn] = useState(false);
   const [base, setBase] = useState<Fields>({ ...EMPTY });
   const [fields, setFields] = useState<Fields>({ ...EMPTY });
+  // 최근 24시간 실제 사용 최대치 — 한도를 정하는 동안 참고(읽기 전용). undefined = 조회 중·조회 불가.
+  const [peaks, setPeaks] = useState<TrendPeaks | null | undefined>(undefined);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    let alive = true;
+    setPeaks(undefined);
+    fetchRateLimitTrend(scope.toUpperCase(), id, '24h').then(
+      (tr) => {
+        if (alive) setPeaks(tr.available ? trendPeaks(tr) : undefined);
+      },
+      () => {
+        if (alive) setPeaks(undefined);
+      },
+    );
+    return () => {
+      alive = false;
+    };
+  }, [isOpen, scope, id]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -173,6 +200,18 @@ export function RateLimitDialog({
                       {t(`${k}.label`)}
                     </label>
                     <span className="block text-xs text-muted-foreground">{t(`${k}.desc`)}</span>
+                    {peaks !== undefined && (
+                      <span className="mt-0.5 block text-[11px] text-muted-foreground" data-testid={`peak-${k}`}>
+                        {peaks == null || peaks[k] === 0
+                          ? t('peakNone')
+                          : t('peak', {
+                              value:
+                                k === 'rpm' || k === 'tpm'
+                                  ? `${fmtPeak(k, peaks[k])} ${t(`${k}.unit`)}`
+                                  : `${fmtPeak(k, peaks[k])}${t(`${k}.per`)}`,
+                            })}
+                      </span>
+                    )}
                   </td>
                   <td className="py-2.5 pr-3 align-middle">
                     <div className="relative w-44">

@@ -1063,13 +1063,17 @@
       "cpm": {
         "label": "CPM",
         "desc": "Cost per minute",
-        "unit": "$/min"
+        "unit": "$/min",
+        "per": "/min"
       },
       "cph": {
         "label": "CPH",
         "desc": "Cost per hour",
-        "unit": "$/hour"
-      }
+        "unit": "$/hour",
+        "per": "/hour"
+      },
+      "peak": "Peak 24h: {value}",
+      "peakNone": "No usage in the last 24h"
     },
     "leader": {
       "title": "Change leader",
@@ -1108,6 +1112,10 @@
       "budgetNoTeam": "No team budget",
       "downgradeNone": "None",
       "downgradeStep": "{pct}% → {model}"
+    },
+    "rateUsage": {
+      "title": "Rate limit usage",
+      "aside": "Live · refreshes every 10 s"
     }
   },
   "analytics": {

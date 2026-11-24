@@ -1063,13 +1063,17 @@
       "cpm": {
         "label": "CPM",
         "desc": "분당 비용",
-        "unit": "$/분"
+        "unit": "$/분",
+        "per": "/분"
       },
       "cph": {
         "label": "CPH",
         "desc": "시간당 비용",
-        "unit": "$/시간"
-      }
+        "unit": "$/시간",
+        "per": "/시간"
+      },
+      "peak": "최근 24시간 최대: {value}",
+      "peakNone": "최근 24시간 사용 없음"
     },
     "leader": {
       "title": "팀장 변경",
@@ -1108,6 +1112,10 @@
       "budgetNoTeam": "팀 예산 없음",
       "downgradeNone": "없음",
       "downgradeStep": "{pct}% → {model}"
+    },
+    "rateUsage": {
+      "title": "Rate limit 사용량",
+      "aside": "실시간 · 10초마다 갱신"
     }
   },
   "analytics": {

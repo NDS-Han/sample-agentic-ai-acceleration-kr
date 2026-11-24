@@ -36,6 +36,7 @@ import {
   webSearchSummary,
 } from './policyRows';
 import { RateLimitDialog } from './RateLimitDialog';
+import { RateLimitUsageCard } from './RateLimitUsageCard';
 import { EMPTY_CELL, useActivity, useCatalog, useCurrentPeriod, usePolicy, useTeamUsage } from './useDetailData';
 import { usePolicyText } from './usePolicyText';
 
@@ -259,6 +260,8 @@ export function TeamDetail({
           </>
         )}
       </Section>
+
+      <RateLimitUsageCard scope="team" id={node.id} rate={rate} />
 
       {/* 구성원 */}
       <Section
