@@ -98,6 +98,29 @@ export function isRangeTooLong(start: string | null | undefined, end: string | n
   return days !== null && days > MAX_RANGE_DAYS;
 }
 
+/** custom 구간이 조회 불가한 이유 — incomplete(한쪽·둘 다 없음/형식 아님), reversed(시작>끝), tooLong. */
+export type CustomRangeIssue = 'incomplete' | 'reversed' | 'tooLong';
+
+function isCalendarDay(day: string | null | undefined): day is string {
+  // 형식 + 실제 달력 날짜(2026-02-30 거부) — UTC 왕복으로 확인.
+  return !!day && ISO_DAY_RE.test(day) && addDaysIso(day, 0) === day;
+}
+
+/**
+ * custom 구간 검사 — null 이면 조회 가능. 두 날짜가 모두 있고 유효하며 시작<=끝이고
+ * MAX_RANGE_DAYS 이내일 때만 null. 그 전에는 **조회하지 않는다**: 한쪽만 있는 상태를
+ * 월 집계나 빈 구간으로 조회하면 "사용량 0" 처럼 보여 실제 0 과 구분되지 않는다.
+ */
+export function customRangeIssue(
+  start: string | null | undefined,
+  end: string | null | undefined,
+): CustomRangeIssue | null {
+  if (!isCalendarDay(start) || !isCalendarDay(end)) return 'incomplete';
+  if (start > end) return 'reversed';
+  if (isRangeTooLong(start, end)) return 'tooLong';
+  return null;
+}
+
 /** 문자열이 'YYYY-MM' 월 형식인지. */
 export function isMonth(value: string | null | undefined): value is string {
   return !!value && /^\d{4}-\d{2}$/.test(value);

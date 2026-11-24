@@ -16,11 +16,13 @@ interface ExportButtonProps {
   filter: AnalyticsFilterForm;
   /** 화면 차트와 동일하게 환산된 적용 월 (YYYY-MM). */
   latestMonth?: string;
+  /** custom 구간이 유효하지 않을 때 — 내보낼 구간이 없다. */
+  disabled?: boolean;
 }
 
 type ExportFormat = 'csv' | 'json';
 
-export function ExportButton({ filter, latestMonth }: ExportButtonProps) {
+export function ExportButton({ filter, latestMonth, disabled = false }: ExportButtonProps) {
   const t = useTranslations('common');
   const { toast } = useToast();
   const reportingTz = useReportingTz();
@@ -95,7 +97,7 @@ export function ExportButton({ filter, latestMonth }: ExportButtonProps) {
     <div className="relative" ref={menuRef}>
       <button
         onClick={() => setIsOpen((prev) => !prev)}
-        disabled={isLoading}
+        disabled={isLoading || disabled}
         aria-haspopup="true"
         aria-expanded={isOpen}
         className={[
