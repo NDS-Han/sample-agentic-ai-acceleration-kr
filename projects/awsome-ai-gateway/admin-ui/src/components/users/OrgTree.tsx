@@ -2,6 +2,7 @@
 
 import { Building2, FolderOpen, Folder, Users, User, ChevronRight, ChevronDown } from 'lucide-react';
 import type { OrgTreeNode } from '@/types/entities';
+import { userNameParts } from '@/lib/userLabel';
 import type { OrgNodeType } from '@/types/enums';
 
 interface OrgTreeProps {
@@ -19,6 +20,8 @@ interface OrgTreeProps {
     /** 개별 정책(앱/모델 override)을 가진 사용자 점의 설명. */
     customPolicy: string;
     leader: string;
+    /** 이름도 실제 이메일도 없는 사용자(합성 이메일만)의 첫 줄. */
+    unnamed?: string;
     memberCount: (_n: number) => string;
     expand: (_name: string) => string;
     collapse: (_name: string) => string;
@@ -48,12 +51,14 @@ function visibleRowButtons(): HTMLElement[] {
   return Array.from(document.querySelectorAll('[role="tree"] [data-tree-row]'));
 }
 
-/** 트리 한 행의 두 줄 라벨 — 사용자는 이름 + 이메일(이름이 없으면 이메일만), 팀은 짧은 이름 + 전체 이름. */
-export function rowLabels(node: OrgTreeNode): { primary: string; secondary: string | null } {
+/**
+ * 트리 한 행의 두 줄 라벨 — 사용자는 이름 + 이메일(이름이 없으면 이메일만), 팀은 짧은 이름 + 전체 이름.
+ * 합성 이메일(`<sub>@unknown`)은 보이지 않는다 — 이름만, 이름도 없으면 unnamed.
+ */
+export function rowLabels(node: OrgTreeNode, unnamed = ''): { primary: string; secondary: string | null } {
   if (node.type === 'USER') {
-    const email = node.meta.email ?? null;
-    const hasName = !!node.name && node.name !== email;
-    return { primary: hasName ? node.name : (email ?? node.name), secondary: hasName ? email : null };
+    const u = userNameParts(node.name, node.meta.email, unnamed);
+    return { primary: u.primary, secondary: u.name ? u.email : null };
   }
   if (node.type === 'TEAM') {
     const full = node.meta.team_display_name;
@@ -73,7 +78,7 @@ export function OrgTree({ node, selectedNodeId, expandedNodes, onSelect, onToggl
   const hasChildren = node.children && node.children.length > 0;
   const isExpandable = EXPANDABLE_TYPES.includes(node.type) && hasChildren;
   const isExpanded = expandedNodes.has(node.id);
-  const { primary, secondary } = rowLabels(node);
+  const { primary, secondary } = rowLabels(node, labels.unnamed);
   const isLeader = node.type === 'USER' && node.meta.role === 'TEAM_LEADER';
   const count = node.type === 'TEAM' || node.type === 'DEPARTMENT' || node.type === 'ORGANIZATION' ? node.meta.member_count : null;
 

@@ -142,6 +142,7 @@ export function AllowedModelsDialog({
       title={t('title')}
       target={target}
       wide
+      fillHeight
       info={scope === 'user' ? (inheriting ? t('infoUserInheriting') : t('infoUserOwn')) : t('infoTeam')}
       warning={scope === 'user' && inheriting ? t('copyWarning') : undefined}
       summary={
@@ -187,7 +188,7 @@ export function AllowedModelsDialog({
           ))}
         </div>
       </div>
-      <div className="max-h-[min(26rem,calc(100vh-22rem))] space-y-4 overflow-y-auto pr-1" data-testid="model-groups">
+      <div className="max-h-[26rem] min-h-[6rem] flex-1 space-y-4 overflow-y-auto pr-1" data-testid="model-groups">
         {groups.length === 0 && <p className="py-6 text-center text-sm text-muted-foreground">{t('noMatch')}</p>}
         {groups.map((g) => {
           const on = g.all.filter((m) => checked.has(m.alias)).length;

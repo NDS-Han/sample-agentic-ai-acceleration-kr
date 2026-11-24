@@ -34,6 +34,9 @@ const COLORS = CATEGORICAL_PALETTE;
 const EMPTY_RING = [{ name: '', value: 1, fill: 'hsl(var(--muted))' }];
 /** 도넛 정사각 px — 이 카드는 세 칸이 한 줄이라 앱/모델 점유 도넛(256)보다 작게. */
 const DONUT_PX = 152;
+// 가운데 글자 상자 — 구멍 지름(innerRadius 62% × 반지름 76 = 47px → 94px)보다 좁게.
+// 두 줄(숫자 아래 ±12px)에서도 링에 닿지 않는 폭: 2·√(47²−12²) ≈ 91px → 여유 두고 72px.
+const DONUT_TEXT_PX = 72;
 
 function Stat({ label, value, testId }: { label: string; value: string; testId: string }) {
   return (
@@ -121,13 +124,15 @@ export function WebSearchSection({
               data-testid="web-search-donut"
             >
               <ShareDonut data={data.queries > 0 ? pieData : EMPTY_RING} onHover={setHoverIndex} size={DONUT_PX} />
-              <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center px-5 text-center">
-                <p className="text-xl font-bold leading-none tabular-nums" data-testid="web-search-center">
-                  {(hovered ? hovered.queries : data.queries).toLocaleString('en-US')}
-                </p>
-                <p className="mt-1 text-[11px] text-muted-foreground">
-                  {hovered ? labelFor(hovered.client, otherLabel) : t('queriesThisMonth')}
-                </p>
+              <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+                <div className="flex flex-col items-center text-center" style={{ width: DONUT_TEXT_PX }}>
+                  <p className="text-xl font-bold leading-none tabular-nums" data-testid="web-search-center">
+                    {(hovered ? hovered.queries : data.queries).toLocaleString('en-US')}
+                  </p>
+                  <p className="mt-1 line-clamp-2 break-words text-[11px] leading-tight text-muted-foreground" data-testid="web-search-center-label">
+                    {hovered ? labelFor(hovered.client, otherLabel) : t('queriesThisMonth')}
+                  </p>
+                </div>
               </div>
             </div>
             <ul className="w-full min-w-0 space-y-1.5 text-sm sm:w-auto sm:min-w-[11rem] sm:flex-1" data-testid="web-search-legend">

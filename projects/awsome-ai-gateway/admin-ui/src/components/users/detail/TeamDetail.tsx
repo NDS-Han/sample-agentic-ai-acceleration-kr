@@ -18,9 +18,11 @@ import { SpinnerButton } from '@/components/common/SpinnerButton';
 import { useToast } from '@/components/common/ToastProvider';
 import { Table, TBody, Td, TEmpty, THead, Th, Tr } from '@/components/common/Table';
 import { useReportingTz } from '@/components/common/ReportingTimezoneProvider';
+import { UnverifiedEmailBadge } from '@/components/common/UnverifiedEmailBadge';
+import { usePointInTime } from '@/components/common/usePointInTime';
 import { forceReauthTeamAction } from '@/lib/actions/users';
-import { fmtDateMinute, fmtTokensCompact, fmtUsd } from '@/lib/utils/format';
-import { userLabel } from '@/lib/userLabel';
+import { fmtTokensCount, fmtUsd } from '@/lib/utils/format';
+import { userLabel, userNameParts } from '@/lib/userLabel';
 import type { OrgTreeNode } from '@/types/entities';
 
 import { AllowedModelsDialog } from './AllowedModelsDialog';
@@ -62,6 +64,8 @@ export function TeamDetail({
   const t = useTranslations('usersDetail');
   const tu = useTranslations('users');
   const tz = useReportingTz();
+  const pit = usePointInTime();
+  const tc = useTranslations('common');
   const period = useCurrentPeriod();
   const [dialog, setDialog] = useState<DialogKind>(null);
   const [usageGen, setUsageGen] = useState(0);
@@ -164,7 +168,7 @@ export function TeamDetail({
                   : t('kpi.noTeamBudget')
               }
             />
-            <KpiCard label={t('kpi.tokens')} value={u ? fmtTokensCompact(total.total_tokens) : '—'} sub={t('kpi.tokensSub')} />
+            <KpiCard label={t('kpi.tokens')} value={u ? fmtTokensCount(total.total_tokens) : '—'} sub={t('kpi.tokensSub')} />
             <KpiCard label={t('kpi.requests')} value={u ? total.requests.toLocaleString('en-US') : '—'} sub={t('kpi.thisMonth')} />
             <KpiCard
               label={t('kpi.webSearches')}
@@ -279,7 +283,7 @@ export function TeamDetail({
                 <Th numeric>{t('members.requests')}</Th>
                 <Th numeric>{t('members.webSearches')}</Th>
                 <Th>{t('members.ownPolicy')}</Th>
-                <Th>{t('members.lastUsed')}</Th>
+                <Th>{pit.header(t('members.lastUsed'))}</Th>
               </Tr>
             </THead>
             <TBody>
@@ -287,8 +291,9 @@ export function TeamDetail({
                 <TEmpty colSpan={7}>{t('members.empty')}</TEmpty>
               ) : (
                 rows.map(({ m, c }) => {
-                  const hasName = !!m.name && m.name !== m.meta.email;
-                  const primary = hasName ? m.name : (m.meta.email ?? m.name);
+                  // 합성 이메일(<sub>@unknown)은 보이지 않는다 — 이름 + 미인증 배지.
+                  const who = userNameParts(m.name, m.meta.email, tc('unnamedUser'));
+                  const primary = who.primary;
                   const role = m.meta.role ? tu(`roleLabel.${m.meta.role}` as 'roleLabel.ADMIN') : null;
                   const act = activity.status === 'ready' ? activity.data.get(m.id) : undefined;
                   const open = () => onOpenUser(m.id);
@@ -313,12 +318,15 @@ export function TeamDetail({
                           <span className="truncate font-medium" title={primary}>{primary}</span>
                           {m.meta.role === 'TEAM_LEADER' && <span className="badge badge-sky whitespace-nowrap">{t('members.leaderBadge')}</span>}
                         </div>
-                        <div className="truncate text-xs text-muted-foreground" title={hasName ? m.meta.email ?? '' : ''}>
-                          {[hasName ? m.meta.email : null, role].filter(Boolean).join(' · ')}
+                        <div className="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
+                          <span className="truncate" title={who.name ? who.email ?? '' : ''}>
+                            {[who.name ? who.email : null, role].filter(Boolean).join(' · ')}
+                          </span>
+                          {who.unverified && <UnverifiedEmailBadge />}
                         </div>
                       </Td>
                       <Td numeric>{u ? fmtUsd(Number(c.cost_usd)) : '—'}</Td>
-                      <Td numeric>{u ? fmtTokensCompact(c.total_tokens) : '—'}</Td>
+                      <Td numeric>{u ? fmtTokensCount(c.total_tokens) : '—'}</Td>
                       <Td numeric>{u ? c.requests.toLocaleString('en-US') : '—'}</Td>
                       <Td numeric>{act ? act.web_searches.toLocaleString('en-US') : '—'}</Td>
                       <Td>
@@ -328,8 +336,8 @@ export function TeamDetail({
                           <span className="text-xs text-muted-foreground">—</span>
                         )}
                       </Td>
-                      <Td className="whitespace-nowrap text-xs text-muted-foreground tabular-nums">
-                        {act?.last_used_at ? fmtDateMinute(act.last_used_at, tz) : '—'}
+                      <Td className="whitespace-nowrap text-xs text-muted-foreground tabular-nums" title={pit.cellTitle(act?.last_used_at)}>
+                        {act?.last_used_at ? pit.stamp(act.last_used_at) : '—'}
                       </Td>
                     </Tr>
                   );

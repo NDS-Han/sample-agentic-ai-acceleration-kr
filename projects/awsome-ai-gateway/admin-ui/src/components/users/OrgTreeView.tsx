@@ -26,6 +26,7 @@ const EXPANDED_NODES_STORAGE_KEY = 'users:orgtree:expandedNodes';
 
 export function OrgTreeView({ root }: OrgTreeViewProps) {
   const t = useTranslations('users');
+  const tCommon = useTranslations('common');
   const { toast } = useToast();
   // "빈 팀 표시" 토글이 켜지면 include_empty 트리로 교체한다 — 라우트
   // 네비게이션 없이 서버 액션으로 재조회해 선택·dirty 상태를 보존한다.
@@ -433,6 +434,7 @@ export function OrgTreeView({ root }: OrgTreeViewProps) {
                 emptyTeam: t('emptyTeamBadge'),
                 customPolicy: t('customBadge'),
                 leader: t('leaderBadge'),
+                unnamed: tCommon('unnamedUser'),
                 memberCount: (n) => t('memberCountShort', { count: n }),
                 expand: (name) => t('treeExpand', { name }),
                 collapse: (name) => t('treeCollapse', { name }),

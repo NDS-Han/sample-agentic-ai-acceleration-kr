@@ -32,7 +32,11 @@ export function usePolicyText(catalog: ModelListItem[]) {
       model,
       apps(s: AppsSummary): string {
         if (s.allowed == null) return t('appsAll', { count: CLIENTS.length });
-        if (CLIENTS.every((c) => s.allowed?.includes(c))) return t('appsAllExplicit', { count: CLIENTS.length });
+        if (CLIENTS.every((c) => s.allowed?.includes(c))) {
+          // 명시 목록이 세 앱 전부 — 출처를 붙여 "상속" 배지와 모순되어 보이지 않게.
+          const key = s.source === 'team' ? 'appsAllTeam' : s.source === 'org' ? 'appsAllOrg' : 'appsAllExplicit';
+          return t(key, { count: CLIENTS.length });
+        }
         return t('appsSome', { apps: s.allowed.map((c) => labelFor(c, c)).join(' · ') });
       },
       models(s: ModelsSummary): { value: string; sub: string | null } {

@@ -214,7 +214,7 @@ export function RateLimitDialog({
                     )}
                   </td>
                   <td className="py-2.5 pr-3 align-middle">
-                    <div className="relative w-44">
+                    <div className="relative w-56">
                       <input
                         id={`${uid}-${k}`}
                         inputMode={INT_KEYS.includes(k) ? 'numeric' : 'decimal'}
@@ -223,7 +223,7 @@ export function RateLimitDialog({
                         placeholder={t('inheritPlaceholder')}
                         aria-invalid={err || undefined}
                         aria-describedby={`${uid}-${k}-inh`}
-                        className="w-full rounded-md border border-input bg-background py-1.5 pl-3 pr-16 text-sm tabular-nums focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring aria-[invalid=true]:border-destructive"
+                        className="w-full rounded-md border border-input bg-background py-1.5 pl-3 pr-[5.5rem] text-sm tabular-nums focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring aria-[invalid=true]:border-destructive"
                       />
                       <span className="pointer-events-none absolute inset-y-0 right-2.5 flex items-center text-xs text-muted-foreground">
                         {t(`${k}.unit`)}

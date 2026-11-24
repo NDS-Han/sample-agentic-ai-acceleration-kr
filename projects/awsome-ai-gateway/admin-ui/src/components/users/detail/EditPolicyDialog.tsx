@@ -37,6 +37,11 @@ export interface EditPolicyDialogProps {
   loading?: boolean;
   loadFailed?: boolean;
   wide?: boolean;
+  /**
+   * 긴 목록 대화상자 — 모달은 스크롤하지 않고 본문의 `flex-1 min-h-0 overflow-y-auto` 목록만
+   * 스크롤한다(스크롤바 두 개 방지). 목록 요소는 이 모드에서 남은 높이를 채운다.
+   */
+  fillHeight?: boolean;
   onSave: () => Promise<{ ok: true } | { ok: false; error: string }>;
   /** 없으면 '상속으로 되돌리기'를 숨긴다. */
   onRevert?: () => Promise<{ ok: true } | { ok: false; error: string }>;
@@ -60,6 +65,7 @@ export function EditPolicyDialog({
   loading,
   loadFailed,
   wide,
+  fillHeight,
   onSave,
   onRevert,
   revertLabel,
@@ -96,9 +102,10 @@ export function EditPolicyDialog({
       title={title}
       description={t('target', { target })}
       wide={wide}
+      contentClassName={fillHeight ? 'flex flex-col overflow-hidden' : undefined}
     >
       <form
-        className="mt-4 space-y-4"
+        className={fillHeight ? 'mt-4 flex min-h-0 flex-1 flex-col gap-4' : 'mt-4 space-y-4'}
         onSubmit={(e) => {
           e.preventDefault();
           if (dirty && !invalid && !busy && !loading) void run('save', onSave);

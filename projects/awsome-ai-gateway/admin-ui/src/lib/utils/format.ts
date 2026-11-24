@@ -231,6 +231,11 @@ export function fmtTokensCompact(n: number | null | undefined): string {
   return `${n}`;
 }
 
+/** fmtTokensCompact 와 같되 실제 0 은 '0' — 같은 표의 요청 수·검색 수 0 과 맞춘다. 값 없음(null)은 '—'. */
+export function fmtTokensCount(n: number | null | undefined): string {
+  return n === 0 ? '0' : fmtTokensCompact(n);
+}
+
 export function fmtTime(iso: string, locale: string, timeZone?: string): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
