@@ -19,12 +19,21 @@ from app.core.usage_filters import (
     cost_period_filter,
     current_kst_period,
     kst_month_expr,
+    reporting_tz_sql,
 )
 from app.models.auth import Department, KeyStatus, Team, User, VirtualKey
 from app.models.budget import BudgetConfig, BudgetScope, BudgetUsage
 from app.models.model import ModelAlias, ModelStatus
 from app.models.usage import UsageLog, UsageStatus
-from app.services.web_search_cost import WebSearchUsage, ws_columns, ws_from_row
+from app.services.web_search_cost import (
+    WebSearchUsage,
+    elapsed_days,
+    get_price,
+    reporting_today,
+    web_search_deployed,
+    ws_columns,
+    ws_from_row,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -237,7 +246,6 @@ async def client_share(
 
     client_col = client_coalesce_expr().label("client")
     _success = UsageLog.status == UsageStatus.SUCCESS
-    _ws_queries, _ws_cost, _ws_untracked, _ws_since = ws_columns()
     stmt = (
         select(
             client_col,
@@ -246,7 +254,7 @@ async def client_share(
             # 실행·과금됐으므로 ERROR/TIMEOUT 행의 검색까지 센다(services/web_search_cost).
             func.coalesce(func.sum(UsageLog.cost_usd).filter(_success), 0).label("cost_usd"),
             func.count().filter(_success).label("call_count"),
-            _ws_queries, _ws_cost, _ws_untracked, _ws_since,
+            *ws_columns(),
         )
         .where(cost_period_filter(period, success_only=False))
         .group_by(client_col)
@@ -287,6 +295,8 @@ async def client_share(
         ),
         untracked_queries=sum(c["web_search_untracked_count"] for c in clients),
         tracking_since=ws_from_row(rows[0]).tracking_since if rows else None,
+        deployed=web_search_deployed(),
+        **({"price_per_1k_queries": ws_from_row(rows[0]).price_per_1k_queries} if rows else {}),
     )
     return {
         "period": period,
@@ -621,6 +631,95 @@ async def dashboard_kpi(
         "active_models": active_models or 0,
         # 모니터링 전용 — total_cost_usd·budget_* 에 포함되지 않는다(예산 제외).
         "web_search": ws_from_row(usage_row).model_dump(mode="json"),
+    }
+    await _cache_set(request, cache_key, payload)
+    return payload
+
+
+@router.get("/web-search")
+async def dashboard_web_search(
+    request: Request,
+    period: str = Query(default=None, description="YYYY-MM (리포팅 TZ). 미지정 시 현재 월"),
+    client: str = Query(default=None, description="claude-code|cowork|codex|other|all"),
+    _admin: CurrentUser = Depends(require_admin),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """대시보드 'WEB SEARCH · AGENTCORE' 섹션 — 앱별 검색 수, 일별 검색 수, 비용, 일평균,
+    요청당 검색 수. **모니터링 전용**(예산·한도와 무관).
+
+    - 검색 수·비용은 status 무관(실패 요청의 검색도 과금 — services/web_search_cost).
+    - ``queries_per_request`` = 검색 수 / **성공** 요청 수(KPI 의 total_requests 와 같은 모집단).
+    - ``avg_queries_per_day`` = 검색 수 / 경과일(리포팅 TZ; 당월은 오늘까지, 지난 달은 그 달 일수).
+    - ``daily`` 는 검색이 있었던 날만 — 빈 날·미래 날 채우기는 UI(비용 추이와 같은 규칙).
+    """
+    if not period:
+        period = current_kst_period()
+    cache_key = _cache_key("web-search", period=period, client=client)
+    if (cached := await _cache_get(request, cache_key)) is not None:
+        return cached
+
+    where = [cost_period_filter(period, success_only=False)]
+    if (cf := client_filter(client)) is not None:
+        where.append(cf)
+    _success = UsageLog.status == UsageStatus.SUCCESS
+
+    total_row = (
+        await session.execute(
+            select(*ws_columns(), func.count().filter(_success).label("successful_requests"))
+            .where(*where)
+        )
+    ).one()
+    ws = ws_from_row(total_row)
+
+    client_col = client_coalesce_expr().label("client")
+    by_client_rows = (
+        await session.execute(
+            select(
+                client_col,
+                func.coalesce(func.sum(UsageLog.web_search_count), 0).label("queries"),
+                func.sum(UsageLog.web_search_cost_usd).label("cost"),
+            )
+            .where(*where)
+            .group_by(client_col)
+            .having(func.coalesce(func.sum(UsageLog.web_search_count), 0) > 0)
+            .order_by(func.sum(UsageLog.web_search_count).desc(), client_col)
+        )
+    ).all()
+
+    day = func.date(func.timezone(reporting_tz_sql(), UsageLog.requested_at))
+    daily_rows = (
+        await session.execute(
+            select(day.label("day"), func.coalesce(func.sum(UsageLog.web_search_count), 0).label("q"))
+            .where(*where, UsageLog.web_search_count > 0)
+            .group_by(day)
+            .order_by(day)
+        )
+    ).all()
+
+    price, _is_default, _row = await get_price(session)
+    days = elapsed_days(period, reporting_today())
+    successful = int(total_row.successful_requests or 0)
+    payload = {
+        "period": period,
+        "deployed": ws.deployed,
+        # 현재 단가(부제 "<N> queries × $<price> per 1,000" 용). 행별 비용은 기록 시점 단가.
+        "price_per_1k_queries": str(price),
+        "queries": ws.queries,
+        "cost_usd": ws.cost_usd,
+        "untracked_queries": ws.untracked_queries,
+        "successful_requests": successful,
+        "elapsed_days": days,
+        "avg_queries_per_day": round(ws.queries / days, 2) if days > 0 else None,
+        "queries_per_request": round(ws.queries / successful, 2) if successful > 0 else None,
+        "by_client": [
+            {
+                "client": r.client,
+                "queries": int(r.queries or 0),
+                "cost_usd": round(float(r.cost), 6) if r.cost is not None else None,
+            }
+            for r in by_client_rows
+        ],
+        "daily": [{"date": str(r.day), "queries": int(r.q or 0)} for r in daily_rows],
     }
     await _cache_set(request, cache_key, payload)
     return payload

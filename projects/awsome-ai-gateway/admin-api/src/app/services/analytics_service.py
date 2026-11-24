@@ -17,7 +17,7 @@ from app.core.usage_filters import client_filter, reporting_tz_sql
 from app.models.auth import UserRole
 from app.models.usage import ROIScope
 from app.repositories.analytics_repository import AnalyticsRepository
-from app.services.web_search_cost import ws_columns, ws_from_row
+from app.services.web_search_cost import web_search_visible, ws_columns, ws_from_row
 from app.schemas.analytics import (
     AnalyticsResponse,
     CostSummary,
@@ -965,19 +965,17 @@ class AnalyticsService:
                 ])
         # 웹 검색 — 위 표의 cost_usd(모델 비용)와 **별개** 구획. 행 단위 열로 섞으면 스프레드시트
         # 합계가 모델+검색을 섞어 예산 수치와 어긋난다. 비용 공란 = 미추적(무료 아님).
+        # 화면과 같은 표시 규칙: 배포됐거나 기록 비용 > 0 일 때만 구획을 넣는다.
         ws = data.web_search
-        writer.writerow([])
-        writer.writerow([
-            "period", "web_search_queries", "web_search_cost_usd",
-            "web_search_untracked_queries", "web_search_cost_tracking_since", "note",
-        ])
-        writer.writerow([
-            data.period, ws.queries,
-            "" if ws.cost_usd is None else f"{ws.cost_usd:.6f}",
-            ws.untracked_queries,
-            ws.tracking_since.isoformat() if ws.tracking_since else "",
-            "AgentCore Web Search at list price; not included in cost_usd or budgets; "
-            "5,000 free queries/month (shared across the AWS organization) may lower the "
-            "actual bill",
-        ])
+        if web_search_visible(ws):
+            writer.writerow([])
+            writer.writerow([
+                "period", "web_search_queries", "web_search_cost_usd",
+                "web_search_untracked_queries",
+            ])
+            writer.writerow([
+                data.period, ws.queries,
+                "" if ws.cost_usd is None else f"{ws.cost_usd:.6f}",
+                ws.untracked_queries,
+            ])
         return output.getvalue()

@@ -25,8 +25,10 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+import calendar
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
+from zoneinfo import ZoneInfo
 from typing import Any
 
 from pydantic import BaseModel
@@ -56,9 +58,44 @@ class WebSearchUsage(BaseModel):
     untracked_queries: int = 0
     #: 비용 추적 시작 시각(워커가 처음 비용을 기록한 시점). 아직 없으면 None.
     tracking_since: datetime | None = None
+    #: 이 배포에 웹 검색이 켜져 있는가(features.web_search — WEB_SEARCH_ENABLED +
+    #: AGENTCORE_GATEWAY_URL). UI 표시 규칙: deployed 이거나 기록된 비용 > 0 일 때만 보인다.
+    deployed: bool = False
+    #: 현재 단가(USD / 1,000 queries) — 정보 툴팁("정가 $X/1,000 기준")용. 행별 비용은 기록 시점 단가.
+    price_per_1k_queries: Decimal = DEFAULT_PRICE_PER_1K
 
 
-def ws_columns() -> tuple[Any, Any, Any, Any]:
+def web_search_deployed() -> bool:
+    """features.web_search 배포 여부 — /admin/apps 의 web_search_deployed 와 같은 판정."""
+    from app.core.config import get_settings
+
+    s = get_settings()
+    return bool(s.WEB_SEARCH_ENABLED and s.AGENTCORE_GATEWAY_URL)
+
+
+def web_search_visible(ws: "WebSearchUsage") -> bool:
+    """표시 규칙 — 배포돼 있거나, 그 기간에 기록된 비용이 0 보다 크면 보인다."""
+    return ws.deployed or (ws.cost_usd or 0) > 0
+
+
+def reporting_today() -> date:
+    from app.core.usage_filters import reporting_timezone
+
+    return datetime.now(ZoneInfo(reporting_timezone())).date()
+
+
+def elapsed_days(period: str, today: date) -> int:
+    """'YYYY-MM' 의 경과일(리포팅 TZ) — 당월은 오늘까지(오늘 포함), 지난 달은 그 달 일수,
+    미래 달은 0. 대시보드 일평균(computeDailyAvg)과 같은 규칙."""
+    y, m = (int(x) for x in period.split("-"))
+    if (y, m) == (today.year, today.month):
+        return today.day
+    if (y, m) < (today.year, today.month):
+        return calendar.monthrange(y, m)[1]
+    return 0
+
+
+def ws_columns() -> tuple[Any, ...]:
     """집계 SELECT 에 넣을 (queries, cost, untracked, since) — status 필터 없음(모듈 docstring).
 
     추적 시작 시각은 스칼라 서브쿼리(PK 조회)로 같은 SELECT 에 싣는다 — 화면마다
@@ -73,6 +110,10 @@ def ws_columns() -> tuple[Any, Any, Any, Any]:
             0,
         ).label("ws_untracked"),
         tracking_since_subquery().label("ws_since"),
+        select(SystemSetting.value)
+        .where(SystemSetting.key == PRICING_KEY)
+        .scalar_subquery()
+        .label("ws_price"),
     )
 
 
@@ -87,11 +128,14 @@ def tracking_since_subquery() -> Any:
 def ws_from_row(row: Any) -> WebSearchUsage:
     """``ws_columns()`` 를 담은 행 → 응답 객체."""
     cost = row.ws_cost
+    price = parse_price(getattr(row, "ws_price", None))
     return WebSearchUsage(
         queries=int(row.ws_queries or 0),
         cost_usd=round(float(cost), 6) if cost is not None else None,
         untracked_queries=int(row.ws_untracked or 0),
         tracking_since=_parse_since(row.ws_since),
+        deployed=web_search_deployed(),
+        price_per_1k_queries=price if price is not None else DEFAULT_PRICE_PER_1K,
     )
 
 

@@ -54,7 +54,7 @@ async def _snapshot(with_web_search: bool) -> dict:
     from app.core.auth import CurrentUser
     from app.core.usage_filters import current_kst_period
     from app.models.auth import UserRole
-    from app.routers.dashboard import client_share, dashboard_kpi
+    from app.routers.dashboard import client_share, dashboard_kpi, dashboard_web_search
     from app.routers.monitoring import monitoring_overview
     from app.routers.my import get_my_budget, get_my_usage
     from app.services.analytics_service import AnalyticsService
@@ -112,6 +112,8 @@ async def _snapshot(with_web_search: bool) -> dict:
             snap = {
                 "kpi": await dashboard_kpi(req, period, None, admin, session),
                 "share": await client_share(period, admin, session),
+                # 웹 검색 섹션 — 전부 웹 검색 값이라 A/B 비교에서는 뺀다(아래 _strip).
+                "web_search_section": await dashboard_web_search(req, period, None, admin, session),
                 "mon": await monitoring_overview(req, admin, session),
                 "my_budget": await get_my_budget(req, admin, session),
                 "my_usage": await get_my_usage(req, period, admin, session),
@@ -159,3 +161,11 @@ async def test_budget_limit_and_model_cost_identical_with_and_without_web_search
     cc = next(c for c in searched["share"]["clients"] if c["client"] == "claude-code")
     assert cc["web_search_count"] >= 8 and cc["web_search_untracked_count"] >= 5
     assert cc["web_search_cost_usd"] >= 0.021 - 1e-9
+
+    # 대시보드 웹 검색 섹션 — 앱별·일별 검색 수와 요청당 검색 수.
+    sec = searched["web_search_section"]
+    assert sec["queries"] >= 8 and sec["successful_requests"] >= 3
+    assert next(c for c in sec["by_client"] if c["client"] == "claude-code")["queries"] >= 8
+    assert sum(d["queries"] for d in sec["daily"]) == sec["queries"]
+    assert sec["queries_per_request"] == round(sec["queries"] / sec["successful_requests"], 2)
+    assert plain["web_search_section"]["queries"] == sec["queries"] - 8

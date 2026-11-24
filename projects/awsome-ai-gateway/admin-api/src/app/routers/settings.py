@@ -33,6 +33,7 @@ from app.services.web_search_cost import (
     PRICING_KEY,
     get_price,
     get_tracking_since,
+    web_search_deployed,
 )
 
 router = APIRouter(prefix="/admin/settings", tags=["System Settings"])
@@ -119,6 +120,7 @@ async def _web_search_pricing(session: AsyncSession) -> WebSearchPricingSetting:
         is_default=is_default,
         updated_at=row.updated_at if row is not None else None,
         tracking_since=await get_tracking_since(session),
+        deployed=web_search_deployed(),
     )
 
 

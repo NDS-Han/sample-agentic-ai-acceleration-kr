@@ -31,6 +31,8 @@ class WebSearchPricingSetting(BaseModel):
     updated_at: datetime | None = None
     #: 워커가 처음으로 비용을 기록한 시각 — 그 이전 사용량은 "미추적".
     tracking_since: datetime | None = None
+    #: features.web_search 배포 여부 — UI 표시 규칙과 "현재 미배포" 배지용.
+    deployed: bool = False
 
 
 class WebSearchPricingUpdateRequest(BaseModel):

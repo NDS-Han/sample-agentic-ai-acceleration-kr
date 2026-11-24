@@ -190,24 +190,72 @@ def _resp(ws: WebSearchUsage) -> AnalyticsResponse:
 
 
 def test_csv_web_search_section_is_separate_from_model_cost():
-    rows = list(csv.reader(io.StringIO(AnalyticsService._to_csv(
-        _resp(WebSearchUsage(queries=4, cost_usd=0.028, untracked_queries=0,
+    text = AnalyticsService._to_csv(
+        _resp(WebSearchUsage(queries=4, cost_usd=0.028, untracked_queries=0, deployed=True,
                              tracking_since=datetime(2026, 11, 24, tzinfo=timezone.utc))),
         "model",
-    ))))
+    )
+    rows = list(csv.reader(io.StringIO(text)))
     assert rows[0] == ["period", "model", "display_name", "requests", "cost_usd"]
     assert rows[1][-1] == "1.5"  # 모델 비용 행은 그대로
     assert rows[2] == []
-    header, values = rows[3], rows[4]
-    assert header[:5] == ["period", "web_search_queries", "web_search_cost_usd",
-                          "web_search_untracked_queries", "web_search_cost_tracking_since"]
-    assert values[:5] == ["2026-11", "4", "0.028000", "0", "2026-11-24T00:00:00+00:00"]
-    assert "not included in cost_usd or budgets" in values[5]
-    assert "5,000 free queries/month" in values[5]
+    assert rows[3] == ["period", "web_search_queries", "web_search_cost_usd",
+                       "web_search_untracked_queries"]
+    assert rows[4] == ["2026-11", "4", "0.028000", "0"]
+    # 추적 시작·무료분 문구는 내보내지 않는다.
+    assert "tracking" not in text and "free" not in text
 
 
 def test_csv_untracked_cost_is_blank_not_zero():
     rows = list(csv.reader(io.StringIO(AnalyticsService._to_csv(
-        _resp(WebSearchUsage(queries=3, cost_usd=None, untracked_queries=3)), "team",
+        _resp(WebSearchUsage(queries=3, cost_usd=None, untracked_queries=3, deployed=True)), "team",
     ))))
     assert rows[-1][1:4] == ["3", "", "3"]
+
+
+@pytest.mark.parametrize(
+    ("deployed", "cost", "shown"),
+    [(True, 0.0, True), (True, None, True), (False, 0.5, True), (False, 0.0, False),
+     (False, None, False)],
+)
+def test_csv_section_follows_visibility_rule(deployed, cost, shown):
+    text = AnalyticsService._to_csv(
+        _resp(WebSearchUsage(queries=0, cost_usd=cost, deployed=deployed)), "model")
+    assert ("web_search_queries" in text) is shown
+
+
+# ── 표시 규칙·배포 플래그·경과일 ─────────────────────────────────────────────────
+@pytest.mark.parametrize(
+    ("enabled", "url", "expected"),
+    [(True, "https://gw", True), (True, "", False), (False, "https://gw", False)],
+)
+def test_deployed_flag_matches_features_web_search(enabled, url, expected):
+    from app.services import web_search_cost as m
+
+    with patch("app.core.config.get_settings",
+               return_value=SimpleNamespace(WEB_SEARCH_ENABLED=enabled, AGENTCORE_GATEWAY_URL=url)):
+        assert m.web_search_deployed() is expected
+        assert ws_from_row(_row(0, None, 0)).deployed is expected
+
+
+@pytest.mark.parametrize(
+    ("deployed", "cost", "visible"),
+    [(True, 0.0, True), (True, None, True), (False, 0.01, True), (False, 0.0, False),
+     (False, None, False)],
+)
+def test_visibility_rule(deployed, cost, visible):
+    from app.services.web_search_cost import web_search_visible
+
+    assert web_search_visible(WebSearchUsage(cost_usd=cost, deployed=deployed)) is visible
+
+
+def test_elapsed_days_reporting_calendar():
+    from datetime import date
+
+    from app.services.web_search_cost import elapsed_days
+
+    today = date(2026, 11, 24)
+    assert elapsed_days("2026-11", today) == 24   # 당월 — 오늘 포함
+    assert elapsed_days("2026-10", today) == 31   # 지난 달 — 그 달 일수
+    assert elapsed_days("2026-02", today) == 28
+    assert elapsed_days("2026-12", today) == 0    # 미래 달

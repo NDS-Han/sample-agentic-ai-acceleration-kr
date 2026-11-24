@@ -30,6 +30,7 @@ from app.core.config import get_settings
 from app.core.db import get_db_session
 from app.models.auth import User
 from app.models.usage import UsageLog, UsageStatus
+from app.services.web_search_cost import web_search_deployed
 from app.services.body_log_store import (
     BodyLogBatchResult,
     BodyLogLookupError,
@@ -107,6 +108,8 @@ def _web_search_fields(row) -> dict:
     return {
         "web_search_count": int(row.web_search_count or 0),
         "web_search_cost_usd": float(cost) if cost is not None else None,
+        # UI 표시 규칙(배포됐거나 기록 비용 > 0 일 때만 웹 검색 비용 표시)의 입력.
+        "web_search_deployed": web_search_deployed(),
     }
 
 
