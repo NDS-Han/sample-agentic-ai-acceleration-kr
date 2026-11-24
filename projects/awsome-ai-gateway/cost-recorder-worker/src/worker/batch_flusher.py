@@ -27,6 +27,7 @@ from sqlalchemy.exc import DBAPIError, DataError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from worker.schemas.cost_stream import CostStreamEntry
+from worker.web_search_pricing import DEFAULT_PRICE_PER_1K, WebSearchPricing, web_search_cost
 
 logger = structlog.get_logger(__name__)
 
@@ -36,7 +37,7 @@ _INSERT_USAGE_LOGS = text(
     INSERT INTO usage.usage_logs (
         id, request_id, user_id, team_id, dept_id, model_alias, provider,
         input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
-        reasoning_tokens, web_search_count,
+        reasoning_tokens, web_search_count, web_search_cost_usd,
         cost_usd, latency_ms, ttft_ms, status, requested_at, completed_at,
         is_streaming, estimated_usage, downgraded_from, availability_fallback_from,
         sso_subject, bedrock_request_id, client, context_tier, key_prefix,
@@ -55,6 +56,7 @@ _INSERT_USAGE_LOGS = text(
         :cache_read_tokens,
         :reasoning_tokens,
         :web_search_count,
+        :web_search_cost_usd,
         :cost_usd,
         :latency_ms,
         :ttft_ms,
@@ -307,10 +309,20 @@ class BatchFlusher:
         session_factory: async_sessionmaker[AsyncSession],
         redis: Any,
         metrics: Any = None,
+        web_search_pricing: WebSearchPricing | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._redis = redis
         self._metrics = metrics
+        #: AgentCore Web Search 단가 스냅샷(모니터링 전용 web_search_cost_usd). None 이면
+        #: 정가 고정 — 운영 배선(main.py)은 system_settings 를 읽는 공급자를 넘긴다.
+        self._ws_pricing = web_search_pricing
+
+    async def _web_search_price(self) -> Decimal:
+        """이번 flush 의 단가 스냅샷. 배치 안 모든 행이 같은 단가로 고정된다."""
+        if self._ws_pricing is None:
+            return DEFAULT_PRICE_PER_1K
+        return await self._ws_pricing.price_per_1k()
 
     async def flush(self, entries: list[CostStreamEntry]) -> None:
         """배치 entry를 DB + Redis에 반영. 성공 시 None, 실패 시 예외.
@@ -330,6 +342,10 @@ class BatchFlusher:
         #    entries(재처리 포함)로 돌려서, spool 재발행/XAUTOCLAIM 겹침 등 부분
         #    replay 시 usage:daily:* 가 이중 계상되고 임계 메일이 재발송됐다.
         recorded: list[CostStreamEntry]
+
+        # 웹 검색 단가 — 트랜잭션 **밖**에서 읽는다(별도 세션). 조회 실패가 usage/예산
+        # 트랜잭션을 abort 시키면 안 된다. 실패 시 마지막 값/정가로 계속 기록한다.
+        ws_price = await self._web_search_price()
 
         # 1. DB 쓰기 — 단일 트랜잭션. FK 위반 시 per-row fallback.
         try:
@@ -352,7 +368,7 @@ class BatchFlusher:
                     logger.info("batch_all_replays_skipped", batch_size=len(entries))
                     await session.commit()
                     return
-                inserted_ids = await self._insert_usage_logs(session, fresh)
+                inserted_ids = await self._insert_usage_logs(session, fresh, ws_price)
                 # ⚠️ 가산 UPSERT 는 INSERT 가 **실제로 성공한** 행만 — SELECT-then-INSERT
                 #    창에서 다른 소비자가 먼저 같은 request_id 를 커밋했으면 우리 INSERT 는
                 #    no-op(RETURNING 없음)인데, 그 행까지 더하면 이중청구다.
@@ -371,7 +387,13 @@ class BatchFlusher:
                 batch_size=len(entries),
                 error=str(ie)[:200],
             )
-            recorded = await self._flush_per_row(entries)
+            recorded = await self._flush_per_row(entries, ws_price)
+
+        # 웹 검색 비용 추적 시작 표지(1회, best-effort) — UI 가 이 시점 이전을 "미추적" 으로 표시.
+        if recorded and self._ws_pricing is not None:
+            await self._ws_pricing.mark_tracking_since(
+                min(datetime.fromisoformat(e.requested_at) for e in recorded)
+            )
 
         # 2. Redis 당일 카운터 (best-effort, 실패해도 DB는 이미 커밋됨)
         try:
@@ -397,7 +419,7 @@ class BatchFlusher:
         )
 
     async def _flush_per_row(
-        self, entries: list[CostStreamEntry]
+        self, entries: list[CostStreamEntry], ws_price: Decimal = DEFAULT_PRICE_PER_1K
     ) -> list[CostStreamEntry]:
         """Per-row fallback: FK 위반/기타 integrity 문제가 있는 row만 스킵.
 
@@ -417,7 +439,7 @@ class BatchFlusher:
                     if not await _filter_replays(session, [e]):
                         await session.commit()
                         continue
-                    inserted_ids = await self._insert_usage_logs(session, [e])
+                    inserted_ids = await self._insert_usage_logs(session, [e], ws_price)
                     if e.request_id in inserted_ids:
                         await self._upsert_budget_usages(session, [e])
                         written.append(e)
@@ -480,6 +502,7 @@ class BatchFlusher:
         """
         written = 0
         dead_lettered = 0
+        ws_price = await self._web_search_price()
         for e in entries:
             try:
                 async with self._session_factory() as session:
@@ -487,7 +510,7 @@ class BatchFlusher:
                     if not await _filter_replays(session, [e]):
                         await session.commit()
                         continue
-                    inserted_ids = await self._insert_usage_logs(session, [e])
+                    inserted_ids = await self._insert_usage_logs(session, [e], ws_price)
                     inserted = e.request_id in inserted_ids
                     if inserted:
                         await self._upsert_budget_usages(session, [e])
@@ -512,7 +535,10 @@ class BatchFlusher:
         return written, dead_lettered
 
     async def _insert_usage_logs(
-        self, session: AsyncSession, entries: list[CostStreamEntry]
+        self,
+        session: AsyncSession,
+        entries: list[CostStreamEntry],
+        ws_price: Decimal = DEFAULT_PRICE_PER_1K,
     ) -> set[str]:
         """usage_logs INSERT 후 **실제로 삽입된** request_id 집합을 반환.
 
@@ -536,6 +562,9 @@ class BatchFlusher:
                 "cache_read_tokens": e.cache_read_tokens,
                 "reasoning_tokens": e.reasoning_tokens,
                 "web_search_count": e.web_search_count,
+                # 모니터링 전용 — cost_usd·budget_usages 와 별개(예산·한도 무관).
+                # 0 = 추적 중·검색 없음(NULL 은 이 기능 이전 행에만 남는다).
+                "web_search_cost_usd": str(web_search_cost(e.web_search_count, ws_price)),
                 "cost_usd": str(e.cost_usd),
                 "latency_ms": e.latency_ms,
                 "ttft_ms": e.ttft_ms,
