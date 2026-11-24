@@ -197,7 +197,7 @@ def test_aggregation_sql_has_only_declared_bind_params():
     from worker import daily_aggregator as da
 
     expected = {
-        "AGG": {"tz", "start", "end"},
+        "AGG": {"day", "start", "end"},
         "EARLIEST": {"tz"},
         "MISSING": {"tz", "lookback_start", "lookback_start_date", "today_start"},
     }
