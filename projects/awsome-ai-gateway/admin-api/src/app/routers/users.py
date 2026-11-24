@@ -6,6 +6,7 @@ import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.audit import audit_logger
@@ -32,6 +33,8 @@ from app.schemas.users import (
     TeamListResponse,
     TeamResponse,
     TransferUserRequest,
+    UserActivityItem,
+    UserActivityResponse,
     UserListResponse,
     UserResponse,
     UserSearchResponse,
@@ -192,6 +195,74 @@ async def get_users_tree(
 
     svc: UserTeamService = request.app.state.user_team_service
     return await svc.get_org_tree(session, include_empty=include_empty)
+
+
+#: /users/activity 한 번에 받는 사용자 수 상한 — 팀 구성원 표 한 장 분량.
+USER_ACTIVITY_MAX_IDS = 200
+
+_LAST_USED_SQL = text(
+    """
+    SELECT u.id,
+           (SELECT l.requested_at FROM usage.usage_logs l
+             WHERE l.user_id = u.id
+             ORDER BY l.requested_at DESC
+             LIMIT 1) AS last_used_at
+    FROM unnest(CAST(:ids AS uuid[])) AS u(id)
+    """
+)
+
+
+@router.get("/users/activity", response_model=UserActivityResponse)
+async def get_users_activity(
+    user_id: list[uuid.UUID] = Query(..., min_length=1),
+    period: str | None = Query(default=None, pattern=r"^\d{4}-(0[1-9]|1[0-2])$"),
+    admin: CurrentUser = Depends(require_admin),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """사용자별 마지막 사용 시각 + 그 기간 웹 검색 수 — /users 팀 구성원 표·사용자 상세용.
+
+    - ``last_used_at``: 전 기간 마지막 요청(상태 무관). (user_id, requested_at DESC)
+      인덱스로 사용자당 1행만 읽는다(LIMIT 1 서브쿼리) — 사용자 전체 행을 그룹 집계하지 않는다.
+    - ``web_searches``: 리포팅 TZ 월(``period``, 기본 이번 달)의 web_search_count 합.
+      상태 무관 — 웹 검색 한도(web_search_quota)와 같은 모집단.
+    - 한 번에 최대 200명. 요청한 id 마다 정확히 한 행(사용 기록이 없으면 None / 0).
+
+    ⚠️ ``/users/{user_id}/...`` 보다 먼저 선언되어야 한다(``/users/search`` 와 같은 이유).
+    """
+    from sqlalchemy import func, select
+
+    from app.core.usage_filters import cost_period_filter, current_kst_period
+    from app.models.usage import UsageLog
+
+    ids = list(dict.fromkeys(user_id))
+    if len(ids) > USER_ACTIVITY_MAX_IDS:
+        raise HTTPException(status_code=422, detail=f"at most {USER_ACTIVITY_MAX_IDS} user_id values")
+    p = period or current_kst_period()
+
+    last = {
+        row[0]: row[1]
+        for row in (await session.execute(_LAST_USED_SQL, {"ids": ids})).all()
+    }
+    ws = dict(
+        (
+            await session.execute(
+                select(UsageLog.user_id, func.coalesce(func.sum(UsageLog.web_search_count), 0))
+                .where(UsageLog.user_id.in_(ids), cost_period_filter(p, success_only=False))
+                .group_by(UsageLog.user_id)
+            )
+        ).all()
+    )
+    return UserActivityResponse(
+        period=p,
+        items=[
+            UserActivityItem(
+                user_id=str(uid),
+                last_used_at=last.get(uid),
+                web_searches=int(ws.get(uid) or 0),
+            )
+            for uid in ids
+        ],
+    )
 
 
 @router.get("/users/search", response_model=UserSearchResponse)
