@@ -29,6 +29,7 @@ from worker.db import create_db_engine, create_session_factory
 from worker.observability import WorkerMetrics, init_otel, shutdown_otel
 from worker.redis_client import create_redis_client
 from worker.stream_consumer import StreamConsumer
+from worker.web_search_pricing import WebSearchPricing
 from worker.worker import TaskSupervisor
 
 logger = structlog.get_logger(__name__)
@@ -89,7 +90,12 @@ async def main() -> None:
     metrics = WorkerMetrics()
 
     # 6. BatchFlusher + StreamConsumer
-    flusher = BatchFlusher(session_factory=session_factory, redis=redis, metrics=metrics)
+    flusher = BatchFlusher(
+        session_factory=session_factory,
+        redis=redis,
+        metrics=metrics,
+        web_search_pricing=WebSearchPricing(session_factory),
+    )
     consumer = StreamConsumer(
         redis=redis, flusher=flusher, settings=settings, metrics=metrics
     )

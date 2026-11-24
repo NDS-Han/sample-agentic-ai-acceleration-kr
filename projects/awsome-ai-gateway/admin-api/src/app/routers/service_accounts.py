@@ -50,6 +50,7 @@ from app.schemas.keys import (
     ServiceAccountUsageSummary,
 )
 from app.services.key_service import VK_KIND_SERVICE
+from app.services.web_search_cost import ws_columns, ws_from_row
 
 logger = structlog.get_logger()
 
@@ -625,10 +626,11 @@ async def service_account_usage(
                 func.sum(UsageLog.cache_creation_tokens).filter(success),
                 func.sum(UsageLog.cache_read_tokens).filter(success),
                 func.sum(UsageLog.reasoning_tokens).filter(success),
-                func.sum(UsageLog.web_search_count).filter(success),
                 func.sum(UsageLog.cost_usd).filter(success),
                 func.avg(UsageLog.latency_ms).filter(success),
                 func.max(UsageLog.requested_at),
+                # 웹 검색 — status 무관(실패 요청의 검색도 이미 과금됨), 모델 비용과 별개.
+                *ws_columns(),
             ).where(*usage_conds)
         )
     ).one()
@@ -688,11 +690,12 @@ async def service_account_usage(
         cc_tok,
         cr_tok,
         rsn_tok,
-        ws_cnt,
         cost_sum,
         avg_lat,
         last_req,
+        *_ws_cols,
     ) = summary_row
+    web_search = ws_from_row(summary_row)
 
     total_cost = float(cost_sum or 0)
     by_model = [
@@ -748,7 +751,7 @@ async def service_account_usage(
             cache_creation_tokens=cc_tok or 0,
             cache_read_tokens=cr_tok or 0,
             reasoning_tokens=rsn_tok or 0,
-            web_search_count=ws_cnt or 0,
+            web_search_count=web_search.queries,
             cost_usd=total_cost,
             avg_latency_ms=float(avg_lat) if avg_lat is not None else None,
             last_request_at=last_req,
@@ -763,6 +766,7 @@ async def service_account_usage(
         ),
         by_model=by_model,
         daily=daily,
+        web_search=web_search,
     )
     # 과거 월은 데이터가 불변이므로 더 길게 캐시한다.
     ttl = 30 if period == current_kst_period() else 600

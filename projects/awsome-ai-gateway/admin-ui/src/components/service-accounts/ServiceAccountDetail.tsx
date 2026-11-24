@@ -28,6 +28,8 @@ import { monthsAgo } from '@/lib/utils/period';
 import type { ServiceAccountUsageResponse } from '@/types/entities';
 import { Usd } from '@/components/common/Usd';
 import { ReportingTzCaption } from '@/components/common/ReportingTzCaption';
+import { WebSearchInline } from '@/components/common/WebSearchCost';
+import { webSearchVisible } from '@/lib/utils/webSearchVisibility';
 
 interface Props {
   data: ServiceAccountUsageResponse;
@@ -335,8 +337,17 @@ export function ServiceAccountDetail({ data, period }: Props) {
             {s.reasoning_tokens > 0 &&
               t('tokReasoning', { n: s.reasoning_tokens.toLocaleString() })}
             {s.reasoning_tokens > 0 && s.web_search_count > 0 && ' · '}
+            {/* 웹 검색 수 + 비용(모니터링 전용, 예산 제외). 구 백엔드(web_search 없음)는 수만. */}
             {s.web_search_count > 0 &&
-              t('tokWebSearch', { n: s.web_search_count.toLocaleString() })}
+              (data.web_search && webSearchVisible(data.web_search) ? (
+                  <WebSearchInline
+                    queries={data.web_search.queries}
+                    cost={data.web_search.cost_usd}
+                    untracked={data.web_search.untracked_queries}
+                  />
+                ) : (
+                  t('tokWebSearch', { n: s.web_search_count.toLocaleString() })
+                ))}
           </p>
         )}
       </div>

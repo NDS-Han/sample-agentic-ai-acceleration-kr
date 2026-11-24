@@ -10,6 +10,8 @@ import type { ClientShareResponse } from '@/lib/actions/dashboard';
 import { CATEGORICAL_PALETTE } from '@/lib/utils/chartTheme';
 import { labelFor } from '@/lib/utils/modelLabel';
 import { Usd } from '@/components/common/Usd';
+import { WebSearchCostValue } from '@/components/common/WebSearchCost';
+import { webSearchVisible } from '@/lib/utils/webSearchVisibility';
 
 // 항목 구분용 다색 카테고리 팔레트 (색맹 안전, 라이트/다크 공통).
 const COLORS = CATEGORICAL_PALETTE;
@@ -22,7 +24,7 @@ interface Props {
 // Pie props 가 새 참조로 보이면 recharts 애니메이션이 도중에 멈춰 도넛이
 // 반만 채워진 채 얼어붙는다. data/onHover 가 안정적이면 memo 가 호버
 // 리렌더에서 이 서브트리를 건너뛰어 애니메이션이 끝까지 돈다.
-const Donut = memo(function Donut({
+export const ShareDonut = memo(function ShareDonut({
   data,
   onHover,
 }: {
@@ -55,6 +57,8 @@ const Donut = memo(function Donut({
 
 export function ClientShareDonutClient({ data }: Props) {
   const t = useTranslations('dashboard');
+  // 표시 규칙 — 배포됐거나 기록 비용 > 0 일 때만 앱별 웹 검색 칩. 아니면 종전과 같이 비운다.
+  const showWs = webSearchVisible(data.web_search);
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
   const otherLabel = t('clientOther');
   const pieData = useMemo(
@@ -86,7 +90,7 @@ export function ClientShareDonutClient({ data }: Props) {
     // 도넛 고정폭 + 목록 컴팩트 컬럼을 중앙 정렬로 묶는다.
     <div className="flex flex-col md:flex-row items-center justify-center gap-6 md:gap-10">
       <div className="relative h-64 w-64 shrink-0">
-        <Donut data={pieData} onHover={setHoverIndex} />
+        <ShareDonut data={pieData} onHover={setHoverIndex} />
         {/* 가운데: 기본은 점유율 1위(clients 는 비용 desc 정렬, [0]=1위),
             조각 호버 시에는 그 조각의 수치로 바뀐다 — 툴팁을 대체. */}
         {(() => {
@@ -124,7 +128,7 @@ export function ClientShareDonutClient({ data }: Props) {
             key={c.client}
             // 이름 + 고정폭 우측정렬 수치 컬럼 — justify-between 은 이름과 수치가
             // 양끝으로 벌어지고 행마다 수치 위치가 들쭉날쭉해 산만해 보였다.
-            className={`grid grid-cols-[minmax(0,1fr)_5rem_6.5rem_5rem_3.5rem] items-baseline gap-2 text-sm rounded-apple-sm px-2 py-0.5 -mx-2 transition-colors ${i === hoverIndex ? 'bg-accent' : ''}`}
+            className={`grid grid-cols-[minmax(0,1fr)_5rem_minmax(6.5rem,auto)_5rem_3.5rem] items-baseline gap-2 text-sm rounded-apple-sm px-2 py-0.5 -mx-2 transition-colors ${i === hoverIndex ? 'bg-accent' : ''}`}
           >
             <div className="flex items-start gap-2 min-w-0">
               <span
@@ -143,8 +147,15 @@ export function ClientShareDonutClient({ data }: Props) {
             <span className="text-muted-foreground tabular-nums text-xs text-right">
               {t('callCount', { count: c.call_count })}
             </span>
-            <span className="text-muted-foreground tabular-nums text-xs text-right">
-              {c.web_search_count > 0 ? t('webSearchCount', { count: c.web_search_count }) : ''}
+            {/* 웹 검색 수 · 그 비용(모니터링 전용) — 오른쪽 비용·점유율은 모델 비용만이다. */}
+            <span className="text-muted-foreground tabular-nums text-xs text-right whitespace-nowrap">
+              {showWs && c.web_search_count > 0 && (
+                <span data-testid="client-web-search">
+                  {t('webSearchCount', { count: c.web_search_count })}
+                  {' · '}
+                  <WebSearchCostValue cost={c.web_search_cost_usd ?? null} />
+                </span>
+              )}
             </span>
             <span className="tabular-nums text-xs text-right"><Usd value={c.cost_usd} /></span>
             <span className="text-muted-foreground tabular-nums text-xs text-right">

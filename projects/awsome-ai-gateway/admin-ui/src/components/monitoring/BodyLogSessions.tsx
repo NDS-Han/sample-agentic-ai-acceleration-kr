@@ -74,6 +74,9 @@ function toBodyLogResponse(
     cache_read_tokens: item.cache_read_tokens,
     cache_write_tokens: item.cache_write_tokens,
     reasoning_tokens: item.reasoning_tokens,
+    web_search_count: item.web_search_count,
+    web_search_cost_usd: item.web_search_cost_usd,
+    web_search_deployed: item.web_search_deployed,
   };
 }
 

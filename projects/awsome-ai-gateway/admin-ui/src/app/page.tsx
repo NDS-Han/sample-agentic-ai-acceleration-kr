@@ -3,18 +3,13 @@
 import { KPICard } from '@/components/common/KPICard';
 import { ErrorState } from '@/components/common/ErrorState';
 import { SkeletonCard } from '@/components/common/SkeletonCard';
-import { alertLevelOf } from '@/lib/utils/alertLevel';
 import { errorRateInfo } from '@/lib/utils/errorRate';
 import { AlertLevel } from '@/types/enums';
 import {
-  DollarSign,
   Key,
   Cpu,
-  BarChart3,
   Activity,
   Coins,
-  Users,
-  CalendarClock,
 } from 'lucide-react';
 import { Suspense } from 'react';
 import { getTranslations } from 'next-intl/server';
@@ -28,6 +23,7 @@ import {
   fetchTopTeams,
   fetchAvailablePeriods,
   fetchClientShare,
+  fetchDashboardWebSearch,
   type ClientShareResponse,
 } from '@/lib/actions/dashboard';
 import { ModelShareDonutClient } from '@/components/dashboard/ModelShareDonutClient';
@@ -37,8 +33,9 @@ import { monthRange } from '@/lib/utils/trendSeries';
 import { TopSpendTable, type TopSpendRow } from '@/components/dashboard/TopSpendTable';
 import { PeriodSelector } from '@/components/dashboard/PeriodSelector';
 import { ClientFilter } from '@/components/dashboard/ClientFilter';
-import { reportingNowParts } from '@/lib/utils/period';
-import { fmtUsd, fmtTokensCompact } from '@/lib/utils/format';
+import { fmtTokensCompact } from '@/lib/utils/format';
+import { CostBudgetCards } from '@/components/dashboard/CostBudgetCards';
+import { WebSearchSection } from '@/components/dashboard/WebSearchSection';
 import { teamDisplayName } from '@/lib/utils/trendSeries';
 import { isSyntheticEmail, userLabel } from '@/lib/userLabel';
 import { pageTitle } from '@/lib/pageMetadata';
@@ -52,36 +49,8 @@ import { pageTitle } from '@/lib/pageMetadata';
 // 토큰 포맷의 단일 출처는 lib/utils/format 의 fmtTokensCompact — 로컬 구현을
 // 두면 같은 토큰 수가 페이지마다 다른 단위(1050M vs 1.1B)로 표시된다.
 
-/**
- * 일 평균 소비 + (당월이면) 월말 예상.
- * 실데이터: dashboard summary 의 total_cost_usd 를 경과일로 나눔.
- * - 당월: 오늘까지 경과일로 나눠 일평균 → 그 달 총일수 곱해 월말 예상(선형 추정).
- * - 과거월: 그 달 총일수로 나눔(예상 없음, 이미 확정).
- */
-function computeDailyAvg(period: string, totalCost: number): {
-  dailyAvg: number;
-  projection: number | null;
-} {
-  const [y, m] = period.split('-').map(Number);
-  // 달력 일수는 TZ 와 무관한 순수 계산이지만, 로컬 Date 생성자(실행환경 TZ)를
-  // 피해 UTC 산술로 둔다 — 파일 전체의 TZ-free 규칙과 일치시키기 위함.
-  const daysInMonth = new Date(Date.UTC(y, m, 0)).getUTCDate();
-  // ⚠️ "지금" 은 리포팅 TZ 로 구한다. 분자(summary.total_cost_usd)는 백엔드에서
-  //    REPORTING_TIMEZONE 버킷으로 집계되는데 분모를 pod 의 UTC 시계로 나누면
-  //    리포팅 TZ 의 새벽(UTC 자정~TZ 자정) 사이에 경과일이 하루 적어 일평균이
-  //    과대계상되고, 매월 1일 그 구간엔 isCurrentMonth 가 false 가 되어 월말 예상이
-  //    아무 설명 없이 사라진다.
-  const now = reportingNowParts();
-  const isCurrentMonth = y === now.y && m === now.m;
-  const elapsedDays = isCurrentMonth ? now.d : daysInMonth;
-  const dailyAvg = elapsedDays > 0 ? totalCost / elapsedDays : 0;
-  const projection = isCurrentMonth ? dailyAvg * daysInMonth : null;
-  return { dailyAvg, projection };
-}
-
 async function DashboardKPIs({ period, client }: { period: string; client: string }) {
   const t = await getTranslations('dashboard');
-  const tb = await getTranslations('budgets');
 
   // 카드 전체가 단일 엔드포인트에서 온다. 예전에는 4개를 Promise.allSettled 로 동시에
   // 불렀고 그중 /admin/budgets/summary 가 예산 config 하나당 Redis GET + SQL SUM 을
@@ -90,16 +59,11 @@ async function DashboardKPIs({ period, client }: { period: string; client: strin
   // ⚠️ 단일 호출은 "한 번 실패하면 카드가 전부 빈다" 는 대가가 있다. 예전 구조는 카드별
   //    degradation 이 가능했다. 그래서 실패를 0 으로 접지 않고 **전부 '—' + fetchFailed**
   //    로 렌더한다 — 부분적으로 그럴듯한 화면보다 "지금 값을 모른다" 가 정확하다.
-  const kpi = await fetchDashboardKPI(period, client).catch(() => null);
-
-  const budgetUtilization = kpi?.budget_utilization_pct ?? null;
-  // 한도 합계가 0 이면 비율이 정의되지 않는다(백엔드가 null 을 준다). 0% 로 접으면
-  // "예산을 하나도 안 썼다" 는 거짓 사실이 되므로 경고 등급도 매기지 않는다.
-  const alertLevel = budgetUtilization != null ? alertLevelOf(budgetUtilization) : undefined;
-
-  const { dailyAvg, projection } = kpi
-    ? computeDailyAvg(period, kpi.total_cost_usd)
-    : { dailyAvg: 0, projection: null };
+  const [kpi, webSearch] = await Promise.all([
+    fetchDashboardKPI(period, client).catch(() => null),
+    // 웹 검색 섹션 — 실패해도 KPI 는 그린다(섹션만 숨김). 표시 규칙은 섹션이 판단.
+    fetchDashboardWebSearch(period, client).catch(() => null),
+  ]);
 
   // 앱 필터를 드릴다운 링크로 보존한다 — 없으면 KPI 카드를 눌러 이동한
   // /analytics 가 전체 앱 데이터를 보여 화면 간 수치가 어긋난다(R25-N-UI4).
@@ -114,52 +78,7 @@ async function DashboardKPIs({ period, client }: { period: string; client: strin
         <h2 className="px-1 text-xs font-bold uppercase tracking-[0.12em] text-muted-foreground">
           {t('costAndBudget')}
         </h2>
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
-          <KPICard
-            title={t('usageThisMonth')}
-            // KPI 카드는 값 하나가 전부라 1센트 미만도 유효숫자 2개로 보인다($0.0071) —
-            // '< $0.01' 은 목록·표·범례 전용(fmtUsd 기본 subCent:'bucket').
-            value={kpi ? fmtUsd(kpi.total_cost_usd, { subCent: 'significant' }) : '—'}
-            icon={<DollarSign size={18} aria-hidden="true" />}
-            description={kpi ? t('usageThisMonthDesc') : t('fetchFailed')}
-            href={`/analytics?period=${period}${clientSuffix}`}
-          />
-          <KPICard
-            title={t('budgetUtilization')}
-            value={budgetUtilization != null ? `${budgetUtilization.toFixed(1)}%` : '—'}
-            icon={<BarChart3 size={18} aria-hidden="true" />}
-            alertLevel={alertLevel}
-            alertLabel={alertLevel ? tb(`alertLevels.${alertLevel}`) : undefined}
-            // R25-N-UI3 — kpi 는 왔는데 utilization 만 null 이면 "한도 미설정"
-            // (계약상 정상) 이다. fetchFailed 로 뭉개면 정상 상태가 장애처럼 보인다.
-            description={
-              !kpi
-                ? t('fetchFailed')
-                : budgetUtilization != null
-                  ? t('budgetUtilizationDesc')
-                  : t('budgetNotConfigured')
-            }
-            href="/budgets"
-          />
-          <KPICard
-            title={t('avgCostPerUser')}
-            value={kpi ? fmtUsd(kpi.cost_per_user_usd, { subCent: 'significant' }) : '—'}
-            icon={<Users size={18} aria-hidden="true" />}
-            description={kpi ? t('avgCostPerUserDesc', { count: kpi.active_users }) : t('fetchFailed')}
-            href={`/analytics?period=${period}&group_by=user${clientSuffix}`}
-          />
-          <KPICard
-            title={t('dailyAvg')}
-            value={kpi ? fmtUsd(dailyAvg, { subCent: 'significant' }) : '—'}
-            icon={<CalendarClock size={18} aria-hidden="true" />}
-            description={
-              projection != null
-                ? t('dailyAvgProjection', { amount: fmtUsd(projection, { subCent: 'significant' }) })
-                : t('dailyAvgDesc')
-            }
-            href={`/analytics?period=${period}${clientSuffix}`}
-          />
-        </div>
+        <CostBudgetCards kpi={kpi} period={period} client={client} />
       </section>
 
       {/* ── 사용량 & 시스템 ── */}
@@ -220,6 +139,9 @@ async function DashboardKPIs({ period, client }: { period: string; client: strin
           />
         </div>
       </section>
+
+      {/* ── 웹 검색 · AgentCore ── (표시 규칙이 거짓이면 섹션 자체를 그리지 않는다) */}
+      {webSearch && <WebSearchSection data={webSearch} period={period} />}
     </div>
   );
 }

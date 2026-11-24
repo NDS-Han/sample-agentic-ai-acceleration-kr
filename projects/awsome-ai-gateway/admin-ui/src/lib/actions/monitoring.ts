@@ -5,6 +5,7 @@
 
 import { adminAPI } from '@/lib/api-client';
 import { withRetry } from '@/lib/utils/retry';
+import type { WebSearchUsage } from '@/types/entities';
 
 export interface MonitoringOverviewResponse {
   timestamp: string;
@@ -15,7 +16,10 @@ export interface MonitoringOverviewResponse {
     error_rate_pct: number;
     avg_latency_ms: number;
     p95_latency_ms: number;
+    /** 모델 비용 — 웹 검색 미포함. */
     total_cost_usd: number;
+    /** 모니터링 전용 웹 검색(배포 전 백엔드는 없음). */
+    web_search?: WebSearchUsage;
   };
 }
 

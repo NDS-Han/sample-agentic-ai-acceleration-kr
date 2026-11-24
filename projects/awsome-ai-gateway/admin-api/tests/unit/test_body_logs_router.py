@@ -70,6 +70,8 @@ def _usage_row(requested_at: datetime | None = None) -> SimpleNamespace:
         cache_creation_tokens=1200,
         reasoning_tokens=0,
         ttft_ms=200,
+        web_search_count=0,
+        web_search_cost_usd=None,
     )
 
 
@@ -377,6 +379,8 @@ def _sess_row(
         cache_creation_tokens=0,
         reasoning_tokens=0,
         ttft_ms=50,
+        web_search_count=0,
+        web_search_cost_usd=None,
         cnt=cnt,
     )
 
@@ -883,6 +887,32 @@ async def test_single_response_includes_cost_token_meta(settings, audit, store_c
     assert payload["ttft_ms"] == 200
     assert payload["client"] == "other"
     assert payload["latency_ms"] == 1200
+    # 비용 추적 이전 행 — 웹 검색 비용은 None(미추적)이지 0 이 아니다.
+    assert payload["web_search_count"] == 0
+    assert payload["web_search_cost_usd"] is None
+
+
+@pytest.mark.asyncio
+async def test_single_response_web_search_cost_is_separate_from_model_cost(
+    settings, audit, store_cls
+):
+    """웹 검색 수·비용은 별도 필드 — 모델 비용 cost_usd 에 섞이지 않는다."""
+    store_cls.return_value.fetch = AsyncMock(
+        return_value=BodyLogFetchResult(
+            record={"request_id": REQ}, source="firehose", key="k"
+        )
+    )
+    row = _usage_row()
+    row.cost_usd = Decimal("0.050000")
+    row.web_search_count = 3
+    row.web_search_cost_usd = Decimal("0.021000")
+    resp = await get_body_log(_request(), REQ, _admin(), _session(row))
+    import json as _json
+
+    payload = _json.loads(resp.body)
+    assert payload["cost_usd"] == 0.05
+    assert payload["web_search_count"] == 3
+    assert payload["web_search_cost_usd"] == 0.021
 
 
 @pytest.mark.asyncio

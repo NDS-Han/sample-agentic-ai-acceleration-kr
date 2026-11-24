@@ -30,6 +30,7 @@ from app.core.config import get_settings
 from app.core.db import get_db_session
 from app.models.auth import User
 from app.models.usage import UsageLog, UsageStatus
+from app.services.web_search_cost import web_search_deployed
 from app.services.body_log_store import (
     BodyLogBatchResult,
     BodyLogLookupError,
@@ -100,6 +101,18 @@ def _status_str(status) -> str | None:
     return str(getattr(status, "value", status))
 
 
+def _web_search_fields(row) -> dict:
+    """요청 1건의 웹 검색 — 모델 비용(cost_usd)과 별개, 예산 제외.
+    web_search_cost_usd=None 은 "미추적"(비용 추적 이전 행)이지 $0 이 아니다."""
+    cost = row.web_search_cost_usd
+    return {
+        "web_search_count": int(row.web_search_count or 0),
+        "web_search_cost_usd": float(cost) if cost is not None else None,
+        # UI 표시 규칙(배포됐거나 기록 비용 > 0 일 때만 웹 검색 비용 표시)의 입력.
+        "web_search_deployed": web_search_deployed(),
+    }
+
+
 def _usage_lookup_stmt():
     return select(
         UsageLog.request_id,
@@ -120,6 +133,8 @@ def _usage_lookup_stmt():
         UsageLog.cache_creation_tokens,
         UsageLog.reasoning_tokens,
         UsageLog.ttft_ms,
+        UsageLog.web_search_count,
+        UsageLog.web_search_cost_usd,
     ).outerjoin(User, User.id == UsageLog.user_id)
 
 
@@ -620,6 +635,7 @@ async def get_body_logs_batch(
                 "cache_read_tokens": r.cache_read_tokens,
                 "cache_write_tokens": r.cache_creation_tokens,
                 "reasoning_tokens": r.reasoning_tokens,
+                **_web_search_fields(r),
             }
 
     result = BodyLogBatchResult()
@@ -813,6 +829,7 @@ async def get_body_log(
             "cache_read_tokens": row.cache_read_tokens,
             "cache_write_tokens": row.cache_creation_tokens,
             "reasoning_tokens": row.reasoning_tokens,
+            **_web_search_fields(row),
             "record": result.record,
         },
         headers={"Cache-Control": "no-store"},

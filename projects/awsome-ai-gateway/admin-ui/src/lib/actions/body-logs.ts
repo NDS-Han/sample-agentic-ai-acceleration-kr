@@ -36,6 +36,12 @@ export interface BodyLogUsageMeta {
   /** usage cache_creation_tokens — 캐시 쓰기. 입력 토큰보다 비싸 비용을 좌우한다. */
   cache_write_tokens?: number | null;
   reasoning_tokens?: number | null;
+  /** 이 요청의 AgentCore 웹 검색 수(배포 전 백엔드는 없음). */
+  web_search_count?: number | null;
+  /** 모니터링 전용 웹 검색 비용 — cost_usd(모델 비용)와 별개. null = 미추적(추적 이전 행). */
+  web_search_cost_usd?: number | null;
+  /** features.web_search 배포 여부 — 표시 규칙 입력. */
+  web_search_deployed?: boolean;
 }
 
 export interface BodyLogResponse extends BodyLogUsageMeta {

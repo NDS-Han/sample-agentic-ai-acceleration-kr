@@ -6,6 +6,7 @@
 import { adminAPI } from '@/lib/api-client';
 import { withRetry } from '@/lib/utils/retry';
 import { currentCalendarMonth, monthsAgo } from '@/lib/utils/period';
+import type { WebSearchUsage } from '@/types/entities';
 
 export interface DashboardSummary {
   period: string;
@@ -37,13 +38,19 @@ export interface ClientShareItem {
   cost_usd: number;
   share_pct: number;
   call_count: number;
-  web_search_count: number;   // server-side AgentCore web searches (attribution metric)
+  web_search_count: number;   // server-side AgentCore web searches (all request statuses)
+  /** 모니터링 전용 웹 검색 비용 — cost_usd(모델 비용)·share_pct 와 별개. null = 미추적. */
+  web_search_cost_usd?: number | null;
+  /** 비용 추적 이전(NULL) 행의 검색 수. */
+  web_search_untracked_count?: number;
 }
 
 export interface ClientShareResponse {
   period: string;
+  /** 모델 비용 합계 — 웹 검색 미포함. */
   total_cost_usd: number;
   clients: ClientShareItem[];
+  web_search?: WebSearchUsage;
 }
 
 export interface TeamOption {
@@ -112,6 +119,8 @@ export interface DashboardKPI {
   budget_utilization_pct: number | null;
   active_keys: number;
   active_models: number;
+  /** 모니터링 전용 — total_cost_usd·budget_* 에 포함되지 않는다(배포 전 백엔드는 없음). */
+  web_search?: WebSearchUsage;
 }
 
 /**
@@ -130,6 +139,43 @@ export async function fetchDashboardKPI(period?: string, client?: string): Promi
   return withRetry(() =>
     adminAPI.get<DashboardKPI>(
       '/admin/dashboard/kpi',
+      Object.keys(params).length ? params : undefined,
+    ),
+  );
+}
+
+/** 대시보드 'WEB SEARCH · AGENTCORE' 섹션 — GET /admin/dashboard/web-search. 모니터링 전용. */
+export interface DashboardWebSearch {
+  period: string;
+  /** features.web_search 배포 여부. */
+  deployed: boolean;
+  /** 현재 단가 USD / 1,000 queries(문자열 Decimal). */
+  price_per_1k_queries: string;
+  queries: number;
+  /** 기록된 비용 합. null = 이 기간에 비용이 기록된 검색이 없음(Not tracked). */
+  cost_usd: number | null;
+  untracked_queries: number;
+  successful_requests: number;
+  elapsed_days: number;
+  /** 검색 수 / 경과일(리포팅 TZ). 미래 달이면 null. */
+  avg_queries_per_day: number | null;
+  /** 검색 수 / 성공 요청 수(소수 2자리). 요청 0건이면 null. */
+  queries_per_request: number | null;
+  by_client: { client: string; queries: number; cost_usd: number | null }[];
+  /** 검색이 있었던 날만(YYYY-MM-DD, 리포팅 TZ). 빈 날 채우기는 UI. */
+  daily: { date: string; queries: number }[];
+}
+
+export async function fetchDashboardWebSearch(
+  period?: string,
+  client?: string,
+): Promise<DashboardWebSearch> {
+  const params: Record<string, string> = {};
+  if (period) params.period = period;
+  if (client && client !== 'all') params.client = client;
+  return withRetry(() =>
+    adminAPI.get<DashboardWebSearch>(
+      '/admin/dashboard/web-search',
       Object.keys(params).length ? params : undefined,
     ),
   );

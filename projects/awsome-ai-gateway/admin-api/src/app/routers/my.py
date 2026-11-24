@@ -13,6 +13,7 @@ from app.models.auth import Team
 from app.models.budget import BudgetConfig, BudgetScope, BudgetUsage
 from app.models.model import ModelAlias
 from app.models.usage import UsageLog, UsageStatus
+from app.services.web_search_cost import ws_columns, ws_from_row
 
 router = APIRouter(prefix="/admin/my", tags=["My Usage"])
 
@@ -293,7 +294,9 @@ async def get_my_usage(
         func.sum(UsageLog.cache_creation_tokens).filter(_success).label("cache_creation_tokens"),
         func.sum(UsageLog.cache_read_tokens).filter(_success).label("cache_read_tokens"),
         func.sum(UsageLog.reasoning_tokens).filter(_success).label("reasoning_tokens"),
-        func.sum(UsageLog.web_search_count).filter(_success).label("web_search_count"),
+        # 웹 검색 — status 무관(검색은 모델 호출이 실패해도 이미 실행·과금됨). 모델
+        # 비용(cost_usd)·예산과 별개의 모니터링 값이다.
+        *ws_columns(),
     ).where(
         UsageLog.user_id == user.user_id,
         cost_period_filter(period, success_only=False),
@@ -309,13 +312,16 @@ async def get_my_usage(
         "cache_creation_tokens": srow.cache_creation_tokens or 0,
         "cache_read_tokens": srow.cache_read_tokens or 0,
         "reasoning_tokens": srow.reasoning_tokens or 0,
-        "web_search_count": srow.web_search_count or 0,
+        "web_search_count": int(srow.ws_queries or 0),
     }
+    web_search = ws_from_row(srow)
 
     return {
         "user_id": str(user.user_id),
         "period": period,
         "summary": summary,
+        # 모델 비용(summary.cost_usd)과 별개 — 예산에서 제외되는 웹 검색 비용.
+        "web_search": web_search.model_dump(mode="json"),
         "daily_usage": daily_usage,
         "by_model": by_model,
     }

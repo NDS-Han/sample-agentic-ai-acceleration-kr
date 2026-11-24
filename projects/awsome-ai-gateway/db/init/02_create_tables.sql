@@ -551,6 +551,10 @@ CREATE TABLE IF NOT EXISTS usage.usage_logs (
     -- 와 동일 취급, cost/total/TPM 에서 제외). web_search_loop 가 성공 검색마다 1 증가. AgentCore
     -- WebSearch($7/1k) 를 client 별로 귀속하는 용도. 검색 없거나 기능 off 면 0.
     web_search_count       INTEGER       NOT NULL DEFAULT 0,
+    -- AgentCore Web Search 비용(0058) — 모니터링 전용, cost_usd·예산과 별개. 워커가 기록 시점
+    -- 단가(system_settings.web_search_pricing)로 web_search_count×단가/1000 을 고정한다.
+    -- NULL = 추적 이전(기능 배포 전 행), 0 = 추적 중·검색 없음. 그래서 DEFAULT 없음.
+    web_search_cost_usd    NUMERIC(14,6),
     cost_usd               NUMERIC(10,6) NOT NULL,
     latency_ms             INTEGER       NOT NULL,
     -- TTFT(time to first token) in ms. 스트리밍 첫 콘텐츠 델타까지의 시간.
@@ -1159,6 +1163,7 @@ BEGIN
             ('cache_read_tokens',           'INTEGER NOT NULL DEFAULT 0'),
             ('reasoning_tokens',            'INTEGER NOT NULL DEFAULT 0'),
             ('web_search_count',            'INTEGER NOT NULL DEFAULT 0'),
+            ('web_search_cost_usd',         'NUMERIC(14,6)'),
             ('ttft_ms',                     'INTEGER'),
             ('is_streaming',                'BOOLEAN NOT NULL DEFAULT false'),
             ('estimated_usage',             'BOOLEAN NOT NULL DEFAULT false'),

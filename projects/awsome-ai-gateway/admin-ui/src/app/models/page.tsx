@@ -7,6 +7,8 @@ import { ModelsTable } from '@/components/models/ModelsTable';
 import { CreateModelButton } from '@/components/models/CreateModelButton';
 import { PriceSyncButton } from '@/components/models/PriceSyncButton';
 import { ErrorState } from '@/components/common/ErrorState';
+import { WebSearchPricingCard } from '@/components/models/WebSearchPricingCard';
+import { getWebSearchPricingAction } from '@/lib/actions/settings';
 import { pageTitle } from '@/lib/pageMetadata';
 
 export const generateMetadata = pageTitle('nav', 'models');
@@ -16,10 +18,14 @@ export const generateMetadata = pageTitle('nav', 'models');
 export default async function ModelsPage() {
   const t = await getTranslations('models');
 
-  const modelsRes = await adminAPI
-    .get<{ items: APIModelItem[] }>('/admin/models')
-    .then((v) => ({ ok: true as const, value: v }))
-    .catch(() => ({ ok: false as const }));
+  const [modelsRes, wsPricing] = await Promise.all([
+    adminAPI
+      .get<{ items: APIModelItem[] }>('/admin/models')
+      .then((v) => ({ ok: true as const, value: v }))
+      .catch(() => ({ ok: false as const })),
+    // 웹 검색 단가 — 실패해도 모델 목록은 그린다(카드가 자체 실패 상태를 보인다).
+    getWebSearchPricingAction(),
+  ]);
 
   const models = (modelsRes.ok && modelsRes.value?.items ? modelsRes.value.items : []).map(
     mapToModelListItem,
@@ -42,6 +48,8 @@ export default async function ModelsPage() {
           <ErrorState />
         )}
       </div>
+      {/* AgentCore 웹 검색 단가 — 모델 단가와 같은 화면에서 관리(모니터링 전용, 예산 무관). */}
+      <WebSearchPricingCard initial={wsPricing.success ? wsPricing.data : null} />
     </div>
   );
 }

@@ -6,6 +6,8 @@ from decimal import Decimal
 
 from pydantic import BaseModel, Field
 
+from app.services.web_search_cost import WebSearchUsage
+
 
 # ── Query Params ──
 
@@ -105,6 +107,9 @@ class AnalyticsResponse(BaseModel):
     trends_by_team: list[TeamTrend] = []
     # 토큰 버킷 비율 분석 패널용 — cost_summary 와 동일 WHERE/scope 격리로 집계.
     token_breakdown: TokenBreakdown = TokenBreakdown()
+    # AgentCore 웹 검색 — **모니터링 전용**, cost_summary.total_cost_usd(모델 비용)에 포함되지
+    # 않는다. 같은 기간·scope·client 격리, status 무관(실패 요청의 검색도 과금됨).
+    web_search: WebSearchUsage = Field(default_factory=WebSearchUsage)
 
 
 class UsageByUserModelItem(BaseModel):

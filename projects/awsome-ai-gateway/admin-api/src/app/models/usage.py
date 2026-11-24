@@ -66,6 +66,10 @@ class UsageLog(Base):
     # (not a token count). Written by the cost-recorder-worker; read-only here to
     # attribute AgentCore WebSearch usage ($7/1k) per client on the dashboard.
     web_search_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    # AgentCore Web Search cost (migration 0058) — MONITORING ONLY, never part of
+    # cost_usd or any budget/limit. Frozen by the cost-recorder-worker at write time
+    # (web_search_count × price/1000). NULL = not tracked (pre-feature row), 0 = tracked.
+    web_search_cost_usd: Mapped[Decimal | None] = mapped_column(Numeric(14, 6), nullable=True)
     cost_usd: Mapped[Decimal] = mapped_column(Numeric(10, 6), nullable=False)
     latency_ms: Mapped[int] = mapped_column(Integer, nullable=False)
     ttft_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)

@@ -17,6 +17,7 @@ from app.core.usage_filters import client_filter, reporting_tz_sql
 from app.models.auth import UserRole
 from app.models.usage import ROIScope
 from app.repositories.analytics_repository import AnalyticsRepository
+from app.services.web_search_cost import web_search_visible, ws_columns, ws_from_row
 from app.schemas.analytics import (
     AnalyticsResponse,
     CostSummary,
@@ -474,6 +475,21 @@ class AnalyticsService:
             ))
         trends_by_team = list(_trend_rows.values())
 
+        # 웹 검색(모니터링 전용) — trends 와 같은 구간·scope_ids·client 격리. 단 SUCCESS
+        # 필터는 빼고 센다(검색은 모델 호출이 실패해도 이미 실행·과금). 모델 비용
+        # cost_summary 에는 더하지 않는다.
+        ws_where = [
+            no_success_where if no_success_where is not None
+            else cost_period_filter(period, success_only=False)
+        ]
+        if scope_ids:
+            ws_where.append(UsageLog.team_id.in_(scope_ids))
+        if (cf := client_filter(client)) is not None:
+            ws_where.append(cf)
+        web_search = ws_from_row(
+            (await session.execute(select(*ws_columns()).where(*ws_where))).one()
+        )
+
         return AnalyticsResponse(
             # custom 구간이면 응답의 period 도 진짜 구간을 말한다 — CSV/JSON export 가
             # 이 필드를 파일명 근거로 쓰므로 '2026-07' 같은 잘못된 월로 나가지 않게.
@@ -485,6 +501,7 @@ class AnalyticsService:
             trends=trends,
             trends_by_team=trends_by_team,
             token_breakdown=token_breakdown,
+            web_search=web_search,
         )
 
     async def get_model_cost_detail(
@@ -946,4 +963,19 @@ class AnalyticsService:
                     data.period, item.model, item.display_name or "",
                     item.requests, str(item.cost_usd),
                 ])
+        # 웹 검색 — 위 표의 cost_usd(모델 비용)와 **별개** 구획. 행 단위 열로 섞으면 스프레드시트
+        # 합계가 모델+검색을 섞어 예산 수치와 어긋난다. 비용 공란 = 미추적(무료 아님).
+        # 화면과 같은 표시 규칙: 배포됐거나 기록 비용 > 0 일 때만 구획을 넣는다.
+        ws = data.web_search
+        if web_search_visible(ws):
+            writer.writerow([])
+            writer.writerow([
+                "period", "web_search_queries", "web_search_cost_usd",
+                "web_search_untracked_queries",
+            ])
+            writer.writerow([
+                data.period, ws.queries,
+                "" if ws.cost_usd is None else f"{ws.cost_usd:.6f}",
+                ws.untracked_queries,
+            ])
         return output.getvalue()

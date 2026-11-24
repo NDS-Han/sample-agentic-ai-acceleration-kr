@@ -2,6 +2,7 @@
 
 import { cookies } from 'next/headers';
 import { getTranslations } from 'next-intl/server';
+import { getWebSearchPricingAction } from '@/lib/actions/settings';
 import { adminAPI } from '@/lib/api-client';
 import { normalizeAllocation } from '@/lib/budget-allocation';
 import { currentCalendarMonth } from '@/lib/utils/period';
@@ -30,6 +31,10 @@ export const generateMetadata = pageTitle('nav', 'budgets');
 export default async function BudgetsPage(props: BudgetsPageProps) {
   const searchParams = await props.searchParams;
   const t = await getTranslations('budgets');
+  const tw = await getTranslations('webSearchCost');
+  // 관리자 전용 설정 API — 실패(팀 리더 등)면 안내를 숨긴다.
+  const wsPricing = await getWebSearchPricingAction();
+  const wsDeployed = wsPricing.success && wsPricing.data.deployed === true;
   const focusTeam = searchParams.team && UUID_RE.test(searchParams.team) ? searchParams.team : undefined;
   const focusUser = searchParams.user && UUID_RE.test(searchParams.user) ? searchParams.user : undefined;
   const cookieStore = await cookies();
@@ -184,6 +189,12 @@ export default async function BudgetsPage(props: BudgetsPageProps) {
         <h1 className="text-2xl font-bold">{t('title')}</h1>
         {/* 예산 기간(월)·사용액 집계 경계는 리포팅 TZ(배포 리전) 기준. */}
         <ReportingTzCaption kind="period" className="mt-1" />
+        {/* 예산 사용액은 모델 비용만 — 웹 검색이 배포된 경우에만 안내한다(표시 규칙). */}
+        {wsDeployed && (
+          <p className="mt-1 text-xs text-muted-foreground" data-testid="budget-model-cost-only">
+            {tw('budgetModelCostOnly')}
+          </p>
+        )}
       </div>
 
       {isAdmin ? (
