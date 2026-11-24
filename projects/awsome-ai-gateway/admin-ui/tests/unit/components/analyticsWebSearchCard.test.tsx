@@ -54,46 +54,52 @@ async function renderCards() {
 beforeEach(() => fetchAnalyticsOnce.mockReset());
 
 describe('Analytics — 웹 검색 카드', () => {
-  it('모델 비용 카드는 그대로, 웹 검색은 별도 카드 + 무료분 안내', async () => {
-    fetchAnalyticsOnce.mockResolvedValue(
-      payload({ queries: 12, cost_usd: 0.084, untracked_queries: 0, tracking_since: '2026-11-24T03:00:00Z' }),
-    );
-    const { container } = await renderCards();
-    expect(screen.getByText('$2.50')).toBeTruthy(); // Total Cost = 모델 비용
-    expect(screen.getByText('Model cost in USD during the period (excl. web search)')).toBeTruthy();
-    expect(screen.getByText('Web search')).toBeTruthy();
-    expect(screen.getByText('$0.08')).toBeTruthy();
-    expect(screen.getByText('12 queries · not in budgets')).toBeTruthy();
-    expect(container.querySelector('[data-testid="web-search-cost-note"]')?.textContent).toContain(
-      '5,000 free web search queries per month',
-    );
+  const ws = (o: Partial<WebSearchUsage> = {}): WebSearchUsage => ({
+    queries: 12, cost_usd: 0.084, untracked_queries: 0, tracking_since: '2026-11-24T03:00:00Z',
+    deployed: true, price_per_1k_queries: '7.00', ...o,
   });
 
-  it('기간 전체가 추적 이전이면 Not tracked — $0 아님', async () => {
-    fetchAnalyticsOnce.mockResolvedValue(
-      payload({ queries: 7, cost_usd: null, untracked_queries: 7, tracking_since: null }),
-    );
+  it('보일 때 — 모델 비용 카드 부제 "Model cost", 별도 웹 검색 카드 + ⓘ 툴팁(보이는 안내 문장 없음)', async () => {
+    fetchAnalyticsOnce.mockResolvedValue(payload(ws()));
+    const { container } = await renderCards();
+    expect(screen.getByText('$2.50')).toBeTruthy();
+    expect(screen.getByText('Model cost')).toBeTruthy();
+    expect(screen.getByText('Web search')).toBeTruthy();
+    expect(screen.getByText('$0.08')).toBeTruthy();
+    expect(screen.getByText('12 queries')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'About web search pricing' })).toBeTruthy();
+    expect(screen.getByTestId('web-search-price-info').textContent).toContain('($7.00 per 1,000)');
+    const visible = container.cloneNode(true) as HTMLElement;
+    visible.querySelectorAll('[role="tooltip"]').forEach((n) => n.remove());
+    expect(visible.textContent).not.toMatch(/5,000|budget|tracking|since/i);
+  });
+
+  it('비용이 기록되지 않은 기간이면 Not tracked — $0 아님', async () => {
+    fetchAnalyticsOnce.mockResolvedValue(payload(ws({ queries: 7, cost_usd: null, untracked_queries: 7 })));
     await renderCards();
     expect(screen.getByText('Not tracked')).toBeTruthy();
     expect(screen.queryByText('$0.00')).toBeNull();
   });
 
-  it('일부만 추적됐으면 미추적 검색 수를 함께', async () => {
-    fetchAnalyticsOnce.mockResolvedValue(
-      payload({ queries: 10, cost_usd: 0.028, untracked_queries: 6, tracking_since: '2026-11-24T03:00:00Z' }),
-    );
+  it('일부만 기록됐으면 미기록 검색 수를 함께', async () => {
+    fetchAnalyticsOnce.mockResolvedValue(payload(ws({ queries: 10, cost_usd: 0.028, untracked_queries: 6 })));
     await renderCards();
-    expect(
-      screen.getByText(
-        '10 queries · not in budgets · +6 queries before tracking started (cost not tracked)',
-      ),
-    ).toBeTruthy();
+    expect(screen.getByText('10 queries · +6 queries without recorded cost')).toBeTruthy();
   });
 
-  it('구 백엔드(web_search 없음) — 종전 4장만', async () => {
-    fetchAnalyticsOnce.mockResolvedValue(payload());
-    const { container } = await renderCards();
+  it('미배포·기록 비용 있음 — 배지', async () => {
+    fetchAnalyticsOnce.mockResolvedValue(payload(ws({ deployed: false })));
+    await renderCards();
+    expect(screen.getByText('Web search is not deployed now')).toBeTruthy();
+  });
+
+  it.each([
+    ['미배포·비용 0', ws({ deployed: false, cost_usd: 0 })],
+    ['구 백엔드(web_search 없음)', undefined],
+  ])('%s — 종전 4장 그대로', async (_, w) => {
+    fetchAnalyticsOnce.mockResolvedValue(payload(w));
+    await renderCards();
     expect(screen.queryByText('Web search')).toBeNull();
-    expect(container.querySelector('[data-testid="web-search-cost-note"]')).toBeNull();
+    expect(screen.getByText('Total USD cost during the period')).toBeTruthy();
   });
 });

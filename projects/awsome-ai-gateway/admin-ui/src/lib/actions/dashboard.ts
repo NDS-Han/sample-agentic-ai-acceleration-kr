@@ -144,6 +144,43 @@ export async function fetchDashboardKPI(period?: string, client?: string): Promi
   );
 }
 
+/** 대시보드 'WEB SEARCH · AGENTCORE' 섹션 — GET /admin/dashboard/web-search. 모니터링 전용. */
+export interface DashboardWebSearch {
+  period: string;
+  /** features.web_search 배포 여부. */
+  deployed: boolean;
+  /** 현재 단가 USD / 1,000 queries(문자열 Decimal). */
+  price_per_1k_queries: string;
+  queries: number;
+  /** 기록된 비용 합. null = 이 기간에 비용이 기록된 검색이 없음(Not tracked). */
+  cost_usd: number | null;
+  untracked_queries: number;
+  successful_requests: number;
+  elapsed_days: number;
+  /** 검색 수 / 경과일(리포팅 TZ). 미래 달이면 null. */
+  avg_queries_per_day: number | null;
+  /** 검색 수 / 성공 요청 수(소수 2자리). 요청 0건이면 null. */
+  queries_per_request: number | null;
+  by_client: { client: string; queries: number; cost_usd: number | null }[];
+  /** 검색이 있었던 날만(YYYY-MM-DD, 리포팅 TZ). 빈 날 채우기는 UI. */
+  daily: { date: string; queries: number }[];
+}
+
+export async function fetchDashboardWebSearch(
+  period?: string,
+  client?: string,
+): Promise<DashboardWebSearch> {
+  const params: Record<string, string> = {};
+  if (period) params.period = period;
+  if (client && client !== 'all') params.client = client;
+  return withRetry(() =>
+    adminAPI.get<DashboardWebSearch>(
+      '/admin/dashboard/web-search',
+      Object.keys(params).length ? params : undefined,
+    ),
+  );
+}
+
 export async function fetchDashboardSummary(period?: string, client?: string): Promise<DashboardSummary> {
   const params: Record<string, string> = {};
   if (period) params.period = period;

@@ -40,6 +40,8 @@ export interface BodyLogUsageMeta {
   web_search_count?: number | null;
   /** 모니터링 전용 웹 검색 비용 — cost_usd(모델 비용)와 별개. null = 미추적(추적 이전 행). */
   web_search_cost_usd?: number | null;
+  /** features.web_search 배포 여부 — 표시 규칙 입력. */
+  web_search_deployed?: boolean;
 }
 
 export interface BodyLogResponse extends BodyLogUsageMeta {

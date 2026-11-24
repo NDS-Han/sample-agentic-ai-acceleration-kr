@@ -13,7 +13,8 @@ import { useToast } from '@/components/common/ToastProvider';
 import { usePointInTime } from '@/components/common/usePointInTime';
 import { fmtTokensCompact } from '@/lib/utils/format';
 import { Usd } from '@/components/common/Usd';
-import { WebSearchCostNote, WebSearchCostValue } from '@/components/common/WebSearchCost';
+import { WebSearchCostValue } from '@/components/common/WebSearchCost';
+import { webSearchVisible } from '@/lib/utils/webSearchVisibility';
 import { clientLabel } from '@/lib/constants/gateway';
 
 // ── 본문 텍스트 추출 ──────────────────────────────────────────────────────────
@@ -891,6 +892,10 @@ export function BodyRecordContent({
   const t = useTranslations('monitoring.bodyLogs');
   const tev = useTranslations('monitoring.events');
   const tw = useTranslations('webSearchCost');
+  // 표시 규칙(요청 단위): 검색이 있었고, 배포됐거나 이 요청에 기록된 비용 > 0.
+  const showWs =
+    (data.web_search_count ?? 0) > 0 &&
+    webSearchVisible({ deployed: data.web_search_deployed, cost_usd: data.web_search_cost_usd });
   const pit = usePointInTime();
   const { toast } = useToast();
   const [rawReq, setRawReq] = useState(false);
@@ -991,25 +996,18 @@ export function BodyRecordContent({
           )}
           {data.cost_usd != null && (
             <div>
-              {/* 검색이 있으면 "모델 비용" 으로 — 아래 웹 검색 비용과 합친 값이 아니다. */}
-              <dt className="inline">
-                {(data.web_search_count ?? 0) > 0 ? tw('modelCost') : t('costLabel')}
-              </dt>{' '}
+              {/* 웹 검색 줄이 있으면 "모델 비용" 으로 — 그 비용과 합친 값이 아니다. */}
+              <dt className="inline">{showWs ? tw('modelCost') : t('costLabel')}</dt>{' '}
               <dd className="num inline"><Usd value={data.cost_usd} /></dd>
             </div>
           )}
-          {(data.web_search_count ?? 0) > 0 && (
+          {showWs && (
             <div data-testid="body-log-web-search">
               <dt className="inline">{tw('title')}</dt>{' '}
-              <dd className="num inline-flex items-center gap-1">
+              <dd className="num inline">
                 {tw('queries', { count: data.web_search_count ?? 0 })}
-                {data.web_search_cost_usd !== undefined && (
-                  <>
-                    {' · '}
-                    <WebSearchCostValue cost={data.web_search_cost_usd ?? null} />
-                    <WebSearchCostNote align="left" side="top" />
-                  </>
-                )}
+                {' · '}
+                <WebSearchCostValue cost={data.web_search_cost_usd ?? null} />
               </dd>
             </div>
           )}

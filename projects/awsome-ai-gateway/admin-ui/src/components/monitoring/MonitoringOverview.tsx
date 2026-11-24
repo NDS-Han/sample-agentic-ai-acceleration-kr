@@ -4,7 +4,8 @@
 
 import { useTranslations } from 'next-intl';
 import { fmtUsd, usdTitle } from '@/lib/utils/format';
-import { WebSearchCostNote } from '@/components/common/WebSearchCost';
+import { Badge } from '@/components/common/Badge';
+import { webSearchNotDeployed, webSearchVisible } from '@/lib/utils/webSearchVisibility';
 import { usePointInTime } from '@/components/common/usePointInTime';
 import type { MonitoringOverviewResponse } from '@/lib/actions/monitoring';
 
@@ -13,15 +14,18 @@ function StatCard({
   value,
   valueTitle,
   sub,
+  badge,
 }: {
   label: string;
   value: string;
   valueTitle?: string;
   sub?: string;
+  badge?: React.ReactNode;
 }) {
   return (
     <div className="glass glass-hover rounded-apple p-4">
       <p className="text-sm text-muted-foreground">{label}</p>
+      {badge}
       <p className="text-2xl font-bold mt-1" title={valueTitle}>{value}</p>
       {sub && <p className="text-xs text-muted-foreground mt-1">{sub}</p>}
     </div>
@@ -33,7 +37,8 @@ export function MonitoringOverview({ data }: { data: MonitoringOverviewResponse 
   const tw = useTranslations('webSearchCost');
   const pit = usePointInTime();
   const h = data.last_1h;
-  const ws = h.web_search;
+  // 표시 규칙 — 배포됐거나 기록 비용 > 0 일 때만 웹 검색 카드(아니면 종전 6장 그대로).
+  const ws = webSearchVisible(h.web_search) ? h.web_search : undefined;
 
   return (
     <div className="space-y-4">
@@ -79,18 +84,22 @@ export function MonitoringOverview({ data }: { data: MonitoringOverviewResponse 
               ws.cost_usd == null ? tw('notTracked') : fmtUsd(ws.cost_usd, { subCent: 'significant' })
             }
             valueTitle={
-              ws.cost_usd == null ? tw('notTrackedHint', { since: 'none' }) : usdTitle(ws.cost_usd)
+              ws.cost_usd == null ? tw('notTrackedHint') : usdTitle(ws.cost_usd)
             }
             sub={
               ws.untracked_queries > 0 && ws.cost_usd != null
                 ? `${tw('queries', { count: ws.queries })} · ${tw('untrackedPart', { count: ws.untracked_queries })}`
                 : tw('queries', { count: ws.queries })
             }
+            badge={
+              webSearchNotDeployed(ws) ? (
+                <Badge tone="amber">{tw('notDeployedBadge')}</Badge>
+              ) : undefined
+            }
           />
         )}
         <StatCard label={t('activeModels')} value={String(data.active_models)} />
       </div>
-      {ws && <WebSearchCostNote ws={ws} inline />}
     </div>
   );
 }

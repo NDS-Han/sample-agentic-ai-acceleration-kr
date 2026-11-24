@@ -464,8 +464,12 @@ export interface WebSearchUsage {
   queries: number;
   cost_usd: number | null;
   untracked_queries: number;
-  /** ISO — 워커가 처음 비용을 기록한 시각. 아직 없으면 null. */
+  /** ISO — 워커가 처음 비용을 기록한 시각. 아직 없으면 null. (화면에는 표시하지 않는다.) */
   tracking_since: string | null;
+  /** features.web_search 배포 여부 — 표시 규칙(lib/utils/webSearchVisibility)의 입력. */
+  deployed?: boolean;
+  /** 현재 단가 USD / 1,000 queries(문자열 Decimal) — ⓘ 툴팁용. */
+  price_per_1k_queries?: string;
 }
 
 // ── 감사 로그 (GET /admin/audit/logs) ──

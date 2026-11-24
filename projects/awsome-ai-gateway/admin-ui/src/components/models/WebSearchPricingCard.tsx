@@ -16,7 +16,8 @@ import { useTranslations } from 'next-intl';
 import { SpinnerButton } from '@/components/common/SpinnerButton';
 import { useToast } from '@/components/common/ToastProvider';
 import { useReportingTz } from '@/components/common/ReportingTimezoneProvider';
-import { WebSearchCostNote } from '@/components/common/WebSearchCost';
+import { WebSearchPriceInfo } from '@/components/common/WebSearchCost';
+import { Badge } from '@/components/common/Badge';
 import { setWebSearchPricingAction, type WebSearchPricingSetting } from '@/lib/actions/settings';
 import { fmtDateMinute, fmtUsdRate } from '@/lib/utils/format';
 import { isValidWebSearchPrice } from '@/lib/utils/webSearchPrice';
@@ -59,7 +60,8 @@ export function WebSearchPricingCard({ initial }: { initial: WebSearchPricingSet
     <section className="glass rounded-apple p-4 space-y-3" data-testid="web-search-pricing-card">
       <div className="flex items-center gap-1.5">
         <h2 className="text-sm font-semibold">{t('pricingTitle')}</h2>
-        <WebSearchCostNote ws={setting} />
+        <WebSearchPriceInfo price={setting.price_per_1k_queries} />
+        {!setting.deployed && <Badge tone="amber">{t('notDeployedBadge')}</Badge>}
       </div>
       <p className="text-xs text-muted-foreground">{t('pricingDesc')}</p>
       <form

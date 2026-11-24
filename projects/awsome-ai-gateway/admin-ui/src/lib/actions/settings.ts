@@ -68,8 +68,10 @@ export interface WebSearchPricingSetting {
   default_price_per_1k_queries: string;
   is_default: boolean;
   updated_at: string | null;
-  /** 워커가 처음 비용을 기록한 시각 — 이전 사용분은 "미추적". */
+  /** 워커가 처음 비용을 기록한 시각(화면에는 표시하지 않는다). */
   tracking_since: string | null;
+  /** features.web_search 배포 여부. */
+  deployed?: boolean;
 }
 
 // ⚠️ 'use server' 파일은 async 함수만 export 할 수 있다 — 검증 규칙은 utils 에서 가져온다.

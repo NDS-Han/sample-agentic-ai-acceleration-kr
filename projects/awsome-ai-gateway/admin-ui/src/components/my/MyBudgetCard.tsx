@@ -22,10 +22,13 @@ const PCT_TONE: Record<string, string> = {
 export function MyBudgetCard({
   data,
   basisMismatch = false,
+  showWebSearchHint = false,
 }: {
   data: MyBudgetResponse;
   /** 사용량 섹션이 과거 월을 보고 있을 때 — 이 카드는 항상 이번 달 기준이라 기준 월을 표시한다. */
   basisMismatch?: boolean;
+  /** 웹 검색 표시 규칙이 참일 때만 "예산은 모델 비용만" 안내를 단다. */
+  showWebSearchHint?: boolean;
 }) {
   const t = useTranslations('my');
   const tw = useTranslations('webSearchCost');
@@ -156,9 +159,11 @@ export function MyBudgetCard({
         )}
       </div>
       {/* 예산은 모델 비용만 — 웹 검색 비용은 모니터링 전용이라 사용액·한도에 들어가지 않는다. */}
-      <p className="mt-4 text-[11px] text-muted-foreground" data-testid="budget-model-cost-only">
-        {tw('budgetModelCostOnly')}
-      </p>
+      {showWebSearchHint && (
+        <p className="mt-4 text-[11px] text-muted-foreground" data-testid="budget-model-cost-only">
+          {tw('budgetModelCostOnly')}
+        </p>
+      )}
     </div>
   );
 }

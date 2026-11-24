@@ -3,7 +3,10 @@
 import { getTranslations } from 'next-intl/server';
 import { fmtUsd, usdTitle } from '@/lib/utils/format';
 import type { WebSearchUsage } from '@/types/entities';
-import { WebSearchCostNote } from '@/components/common/WebSearchCost';
+import { WebSearchPriceInfo } from '@/components/common/WebSearchCost';
+import { Badge } from '@/components/common/Badge';
+import { webSearchNotDeployed, webSearchVisible } from '@/lib/utils/webSearchVisibility';
+import type { ReactNode } from 'react';
 import { errorRateInfo } from '@/lib/utils/errorRate';
 import type { AnalyticsFilterForm } from '@/types/api';
 import { buildAnalyticsQuery, fetchAnalyticsOnce } from '@/lib/utils/analyticsQuery';
@@ -34,6 +37,8 @@ interface AnalyticsAPIResponse {
 
 interface MetricCardProps {
   label: string;
+  /** 라벨 옆 부가 요소(ⓘ 툴팁·배지). */
+  labelExtra?: ReactNode;
   value: string;
   /** 값 툴팁 — '< $0.01' 로 줄인 금액의 정확한 값. */
   valueTitle?: string;
@@ -42,14 +47,17 @@ interface MetricCardProps {
   warn?: boolean;
 }
 
-function MetricCard({ label, value, valueTitle, description, warn }: MetricCardProps) {
+function MetricCard({ label, labelExtra, value, valueTitle, description, warn }: MetricCardProps) {
   return (
     <div
       className={`glass glass-hover rounded-apple p-4 flex flex-col gap-2 ${
         warn ? 'border-warning shadow-warning/20' : ''
       }`}
     >
-      <p className="text-sm font-medium text-muted-foreground">{label}</p>
+      <div className="flex flex-wrap items-center gap-1.5">
+        <p className="text-sm font-medium text-muted-foreground">{label}</p>
+        {labelExtra}
+      </div>
       <p className="text-2xl font-bold" title={valueTitle}>{value}</p>
       {description && (
         <p className={`text-xs ${warn ? 'text-warning font-medium' : 'text-muted-foreground'}`}>
@@ -114,35 +122,38 @@ export async function ROIMetricsCards({ filter, latestMonth }: ROIMetricsCardsPr
     },
   ];
 
-  // 웹 검색 — 모델 비용 카드와 별개(예산 제외). null 비용은 "미추적" 이지 $0 이 아니다.
+  // 웹 검색 — 모델 비용 카드와 별개(예산 제외). 표시 규칙: 배포됐거나 기록 비용 > 0.
+  // null 비용은 "Not tracked" 이지 $0 이 아니다. 무료분·정가 안내는 ⓘ 툴팁.
   const ws = data.web_search;
-  if (ws) {
+  const showWs = webSearchVisible(ws);
+  if (ws && showWs) {
     const cost = ws.cost_usd;
+    // 모델 비용 카드가 웹 검색과 합친 값이 아님을 밝힌다.
+    metrics[2].description = tw('modelCost');
     metrics.push({
       label: tw('title'),
+      labelExtra: (
+        <>
+          <WebSearchPriceInfo price={ws.price_per_1k_queries ?? 7} />
+          {webSearchNotDeployed(ws) && <Badge tone="amber">{tw('notDeployedBadge')}</Badge>}
+        </>
+      ),
       value: cost == null ? tw('notTracked') : fmtUsd(cost, { subCent: 'significant' }),
-      valueTitle: cost == null ? tw('notTrackedHint', { since: 'none' }) : usdTitle(cost),
+      valueTitle: cost == null ? tw('notTrackedHint') : usdTitle(cost),
       description:
         ws.untracked_queries > 0 && cost != null
-          ? `${tw('kpiDesc', { count: ws.queries })} · ${tw('untrackedPart', { count: ws.untracked_queries })}`
-          : tw('kpiDesc', { count: ws.queries }),
+          ? `${tw('queries', { count: ws.queries })} · ${tw('untrackedPart', { count: ws.untracked_queries })}`
+          : tw('queries', { count: ws.queries }),
     });
   }
 
   return (
-    <div className="space-y-2">
-      <div
-        className={`grid grid-cols-1 sm:grid-cols-2 gap-4 ${ws ? 'lg:grid-cols-3 xl:grid-cols-5' : 'lg:grid-cols-4'}`}
-      >
-        {metrics.map((metric) => (
-          <MetricCard key={metric.label} {...metric} />
-        ))}
-      </div>
-      {ws && (
-        <div className="px-1">
-          <WebSearchCostNote ws={ws} inline />
-        </div>
-      )}
+    <div
+      className={`grid grid-cols-1 sm:grid-cols-2 gap-4 ${showWs ? 'lg:grid-cols-3 xl:grid-cols-5' : 'lg:grid-cols-4'}`}
+    >
+      {metrics.map((metric) => (
+        <MetricCard key={metric.label} {...metric} />
+      ))}
     </div>
   );
 }

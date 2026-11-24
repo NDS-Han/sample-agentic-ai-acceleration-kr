@@ -24,7 +24,8 @@ import { KPICard } from '@/components/common/KPICard';
 import { errorRateInfo } from '@/lib/utils/errorRate';
 import { AlertLevel } from '@/types/enums';
 import { MyBudgetCard } from '@/components/my/MyBudgetCard';
-import { WebSearchCostNote, WebSearchInline } from '@/components/common/WebSearchCost';
+import { WebSearchInline } from '@/components/common/WebSearchCost';
+import { webSearchVisible } from '@/lib/utils/webSearchVisibility';
 import { ErrorState } from '@/components/common/ErrorState';
 import { Usd } from '@/components/common/Usd';
 import { ReportingTzCaption } from '@/components/common/ReportingTzCaption';
@@ -72,7 +73,11 @@ export function MyUsageDashboard({
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <div className="lg:col-span-1">
           {budget ? (
-            <MyBudgetCard data={budget} basisMismatch={budget.period !== data.period} />
+            <MyBudgetCard
+              data={budget}
+              basisMismatch={budget.period !== data.period}
+              showWebSearchHint={webSearchVisible(data.web_search)}
+            />
           ) : (
             <ErrorState compact />
           )}
@@ -352,16 +357,12 @@ export function MyUsageDashboard({
               {s.reasoning_tokens > 0 && s.web_search_count > 0 && ' · '}
               {/* 웹 검색 수 + 비용(모니터링 전용, 예산 제외). 구 백엔드(web_search 없음)는 수만. */}
               {s.web_search_count > 0 &&
-                (data.web_search ? (
-                  <span className="inline-flex items-center gap-1">
-                    <WebSearchInline
-                      queries={data.web_search.queries}
-                      cost={data.web_search.cost_usd}
-                      untracked={data.web_search.untracked_queries}
-                      trackingSince={data.web_search.tracking_since}
-                    />
-                    <WebSearchCostNote ws={data.web_search} align="left" side="top" />
-                  </span>
+                (data.web_search && webSearchVisible(data.web_search) ? (
+                  <WebSearchInline
+                    queries={data.web_search.queries}
+                    cost={data.web_search.cost_usd}
+                    untracked={data.web_search.untracked_queries}
+                  />
                 ) : (
                   t('tokWebSearch', { n: s.web_search_count.toLocaleString() })
                 ))}
