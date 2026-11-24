@@ -100,6 +100,16 @@ def _status_str(status) -> str | None:
     return str(getattr(status, "value", status))
 
 
+def _web_search_fields(row) -> dict:
+    """요청 1건의 웹 검색 — 모델 비용(cost_usd)과 별개, 예산 제외.
+    web_search_cost_usd=None 은 "미추적"(비용 추적 이전 행)이지 $0 이 아니다."""
+    cost = row.web_search_cost_usd
+    return {
+        "web_search_count": int(row.web_search_count or 0),
+        "web_search_cost_usd": float(cost) if cost is not None else None,
+    }
+
+
 def _usage_lookup_stmt():
     return select(
         UsageLog.request_id,
@@ -120,6 +130,8 @@ def _usage_lookup_stmt():
         UsageLog.cache_creation_tokens,
         UsageLog.reasoning_tokens,
         UsageLog.ttft_ms,
+        UsageLog.web_search_count,
+        UsageLog.web_search_cost_usd,
     ).outerjoin(User, User.id == UsageLog.user_id)
 
 
@@ -620,6 +632,7 @@ async def get_body_logs_batch(
                 "cache_read_tokens": r.cache_read_tokens,
                 "cache_write_tokens": r.cache_creation_tokens,
                 "reasoning_tokens": r.reasoning_tokens,
+                **_web_search_fields(r),
             }
 
     result = BodyLogBatchResult()
@@ -813,6 +826,7 @@ async def get_body_log(
             "cache_read_tokens": row.cache_read_tokens,
             "cache_write_tokens": row.cache_creation_tokens,
             "reasoning_tokens": row.reasoning_tokens,
+            **_web_search_fields(row),
             "record": result.record,
         },
         headers={"Cache-Control": "no-store"},

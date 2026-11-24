@@ -61,6 +61,7 @@ ACTION_GROUPS: dict[str, tuple[str, ...]] = {
         "DELETE_MODEL",
         "PATCH_MODEL_STATUS",
         "SET_PRICING",
+        "SET_WEB_SEARCH_PRICING",
         "TOGGLE_APP_MODEL",
         "SET_APP_DEFAULT_MODEL",
         "SET_CLIENT_ROUTING",

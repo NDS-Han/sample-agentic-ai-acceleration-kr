@@ -24,6 +24,7 @@ from app.models.auth import Department, KeyStatus, Team, User, VirtualKey
 from app.models.budget import BudgetConfig, BudgetScope, BudgetUsage
 from app.models.model import ModelAlias, ModelStatus
 from app.models.usage import UsageLog, UsageStatus
+from app.services.web_search_cost import WebSearchUsage, ws_columns, ws_from_row
 
 logger = logging.getLogger(__name__)
 
@@ -235,39 +236,63 @@ async def client_share(
         period = current_kst_period()
 
     client_col = client_coalesce_expr().label("client")
+    _success = UsageLog.status == UsageStatus.SUCCESS
+    _ws_queries, _ws_cost, _ws_untracked, _ws_since = ws_columns()
     stmt = (
         select(
             client_col,
-            func.coalesce(func.sum(UsageLog.cost_usd), 0).label("cost_usd"),
-            func.count().label("call_count"),
-            # Web search calls per client (attribution metric; not a cost/token). Lets the
-            # dashboard show which apps use AgentCore WebSearch and how much.
-            func.coalesce(func.sum(UsageLog.web_search_count), 0).label("web_search_count"),
+            # 모델 비용·호출 수는 종전대로 SUCCESS 만(§59). WHERE 에서 SUCCESS 를 빼고
+            # FILTER 로 옮긴 것은 웹 검색 때문이다 — 검색은 모델 호출이 실패해도 이미
+            # 실행·과금됐으므로 ERROR/TIMEOUT 행의 검색까지 센다(services/web_search_cost).
+            func.coalesce(func.sum(UsageLog.cost_usd).filter(_success), 0).label("cost_usd"),
+            func.count().filter(_success).label("call_count"),
+            _ws_queries, _ws_cost, _ws_untracked, _ws_since,
         )
-        .where(cost_period_filter(period))
+        .where(cost_period_filter(period, success_only=False))
         .group_by(client_col)
-        .order_by(func.sum(UsageLog.cost_usd).desc())
+        .order_by(func.sum(UsageLog.cost_usd).filter(_success).desc())
     )
-    rows = (await session.execute(stmt)).all()
+    rows = [
+        r for r in (await session.execute(stmt)).all()
+        # 실패 호출만 있던 앱은 종전처럼 숨긴다 — 단 그 실패 호출이 검색을 썼으면 비용이
+        # 있으므로 남긴다.
+        if (r.call_count or 0) > 0 or (r.ws_queries or 0) > 0
+    ]
 
     total = sum(float(r.cost_usd or 0) for r in rows)
     clients = []
     for r in rows:
         cost = float(r.cost_usd or 0)
         share = (cost / total * 100) if total > 0 else 0.0
+        ws = ws_from_row(r)
         clients.append({
             "client": r.client,
             # 6자리 — 소액 호출이 4자리 반올림에서 0 으로 사라진다(model-share 와 동일).
+            # 모델 비용만 — 점유율(share_pct)도 모델 비용 기준이다.
             "cost_usd": round(cost, 6),
             "share_pct": round(share, 2),
             "call_count": int(r.call_count or 0),
-            "web_search_count": int(r.web_search_count or 0),
+            "web_search_count": ws.queries,
+            # 모니터링 전용 웹 검색 비용(모델 비용·예산과 별개). None = 미추적.
+            "web_search_cost_usd": ws.cost_usd,
+            "web_search_untracked_count": ws.untracked_queries,
         })
 
+    ws_total = WebSearchUsage(
+        queries=sum(c["web_search_count"] for c in clients),
+        cost_usd=(
+            round(sum(c["web_search_cost_usd"] for c in clients
+                      if c["web_search_cost_usd"] is not None), 6)
+            if any(c["web_search_cost_usd"] is not None for c in clients) else None
+        ),
+        untracked_queries=sum(c["web_search_untracked_count"] for c in clients),
+        tracking_since=ws_from_row(rows[0]).tracking_since if rows else None,
+    )
     return {
         "period": period,
         "total_cost_usd": round(total, 6),
         "clients": clients,
+        "web_search": ws_total.model_dump(mode="json"),
     }
 
 
@@ -467,6 +492,8 @@ async def dashboard_kpi(
                     ).filter(_success),
                     0,
                 ).label("total_tokens"),
+                # 웹 검색 — 모델 비용(total_cost)·예산과 별개의 모니터링 지표. status 무관.
+                *ws_columns(),
             ).where(*where_clauses)
         )
     ).one()
@@ -592,6 +619,8 @@ async def dashboard_kpi(
         "budget_utilization_pct": round(utilization, 2) if utilization is not None else None,
         "active_keys": active_keys or 0,
         "active_models": active_models or 0,
+        # 모니터링 전용 — total_cost_usd·budget_* 에 포함되지 않는다(예산 제외).
+        "web_search": ws_from_row(usage_row).model_dump(mode="json"),
     }
     await _cache_set(request, cache_key, payload)
     return payload

@@ -15,6 +15,7 @@ from app.models.auth import User
 from app.models.model import ModelAlias, ModelStatus
 from app.models.usage import UsageLog, UsageStatus
 from app.schemas.common import PAGE_LIMIT_MAX, PAGE_LIMIT_MIN
+from app.services.web_search_cost import ws_columns, ws_from_row
 
 router = APIRouter(prefix="/admin/monitoring", tags=["Monitoring"])
 
@@ -34,6 +35,7 @@ async def monitoring_overview(
         func.avg(UsageLog.latency_ms).label("avg_latency_ms"),
         func.percentile_cont(0.95).within_group(UsageLog.latency_ms).label("p95_latency_ms"),
         func.coalesce(func.sum(UsageLog.cost_usd), 0).label("total_cost_usd"),
+        *ws_columns(),
     ).where(UsageLog.requested_at >= one_hour_ago)
     result = await session.execute(stmt)
     row = result.one()
@@ -55,6 +57,8 @@ async def monitoring_overview(
             "avg_latency_ms": round(float(row.avg_latency_ms or 0)),
             "p95_latency_ms": round(float(row.p95_latency_ms or 0)),
             "total_cost_usd": round(float(row.total_cost_usd or 0), 4),
+            # 모니터링 전용 웹 검색(모델 비용 total_cost_usd 와 별개).
+            "web_search": ws_from_row(row).model_dump(mode="json"),
         },
     }
 

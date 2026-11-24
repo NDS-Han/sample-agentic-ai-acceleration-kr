@@ -8,6 +8,7 @@ from datetime import datetime
 from pydantic import BaseModel, Field
 
 from app.schemas.common import KeyStatus, PaginatedResponse
+from app.services.web_search_cost import WebSearchUsage
 
 
 # ── Responses ──
@@ -170,3 +171,6 @@ class ServiceAccountUsageResponse(BaseModel):
     summary: ServiceAccountUsageSummary
     by_model: list[ServiceAccountUsageByModel]
     daily: list[ServiceAccountUsageDaily]
+    # 모니터링 전용 웹 검색(모델 비용 summary.cost_usd·예산과 별개). 기본값은 배포 직후
+    # 캐시에 남은 구 페이로드 호환용.
+    web_search: WebSearchUsage = Field(default_factory=WebSearchUsage)
