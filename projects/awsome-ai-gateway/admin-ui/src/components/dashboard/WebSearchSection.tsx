@@ -24,7 +24,7 @@ import { WebSearchCostValue, WebSearchPriceInfo } from '@/components/common/WebS
 import { ShareDonut } from '@/components/dashboard/ClientShareDonutClient';
 import type { DashboardWebSearch } from '@/lib/actions/dashboard';
 import { CATEGORICAL_PALETTE } from '@/lib/utils/chartTheme';
-import { fmtSharePct, fmtUsdRate, roundSharesTo100 } from '@/lib/utils/format';
+import { fmtSharePct, fmtSmallRatio, fmtUsdRate, roundSharesTo100 } from '@/lib/utils/format';
 import { labelFor } from '@/lib/utils/modelLabel';
 import { reportingNowParts } from '@/lib/utils/period';
 import { buildDailyQuerySeries } from '@/lib/utils/webSearchDaily';
@@ -32,6 +32,8 @@ import { webSearchNotDeployed, webSearchVisible } from '@/lib/utils/webSearchVis
 
 const COLORS = CATEGORICAL_PALETTE;
 const EMPTY_RING = [{ name: '', value: 1, fill: 'hsl(var(--muted))' }];
+/** 도넛 정사각 px — 이 카드는 세 칸이 한 줄이라 앱/모델 점유 도넛(256)보다 작게. */
+const DONUT_PX = 152;
 
 function Stat({ label, value, testId }: { label: string; value: string; testId: string }) {
   return (
@@ -112,11 +114,15 @@ export function WebSearchSection({
         </div>
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-[auto_minmax(0,0.9fr)_minmax(0,1.3fr)]">
           {/* 1) 앱별 검색 수 */}
-          <div className="flex flex-col items-center gap-4 sm:flex-row sm:items-center">
-            <div className="relative h-48 w-48 shrink-0">
-              <ShareDonut data={data.queries > 0 ? pieData : EMPTY_RING} onHover={setHoverIndex} />
-              <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center px-6 text-center">
-                <p className="text-2xl font-bold leading-none tabular-nums" data-testid="web-search-center">
+          <div className="flex min-w-0 flex-col items-center gap-4 sm:flex-row sm:items-center">
+            <div
+              className="relative shrink-0"
+              style={{ width: DONUT_PX, height: DONUT_PX }}
+              data-testid="web-search-donut"
+            >
+              <ShareDonut data={data.queries > 0 ? pieData : EMPTY_RING} onHover={setHoverIndex} size={DONUT_PX} />
+              <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center px-5 text-center">
+                <p className="text-xl font-bold leading-none tabular-nums" data-testid="web-search-center">
                   {(hovered ? hovered.queries : data.queries).toLocaleString('en-US')}
                 </p>
                 <p className="mt-1 text-[11px] text-muted-foreground">
@@ -124,7 +130,7 @@ export function WebSearchSection({
                 </p>
               </div>
             </div>
-            <ul className="w-full min-w-[12rem] space-y-1.5 text-sm" data-testid="web-search-legend">
+            <ul className="w-full min-w-0 space-y-1.5 text-sm sm:w-auto sm:min-w-[11rem] sm:flex-1" data-testid="web-search-legend">
               {data.by_client.map((c, i) => (
                 <li
                   key={c.client}
@@ -167,7 +173,7 @@ export function WebSearchSection({
               <Stat label={t('avgPerDay')} value={fmtNum(data.avg_queries_per_day)} testId="web-search-avg-day" />
               <Stat
                 label={t('perRequest')}
-                value={fmtNum(data.queries_per_request, 2)}
+                value={fmtSmallRatio(data.queries_per_request)}
                 testId="web-search-per-request"
               />
             </div>

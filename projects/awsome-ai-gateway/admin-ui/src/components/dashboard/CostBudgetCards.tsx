@@ -5,6 +5,8 @@
  *
  * 웹 검색 표시 규칙(배포됐거나 기록 비용 > 0)이 참이면:
  *  - Usage This Month = 모델 + 웹 검색, 부제 "Model $X · Web search $Y (all users)"
+ *    (그 기간 웹 검색 비용이 NULL=미추적이면 "Model $X · Web search not tracked (all users)",
+ *     아래 'incl. web search' 부제들도 '· web search not tracked')
  *  - Avg Cost Per User · Daily Average(월말 예상 포함) = 모델 + 웹 검색, 부제 "incl. web search"
  *  - Budget Utilization = **모델 비용만**(백엔드 값 그대로), 부제 "Model cost vs budget · web search excluded"
  * 거짓이면 기능 이전과 똑같은 카드(모델 비용·원래 부제).
@@ -38,6 +40,8 @@ export async function CostBudgetCards({
 
   const view = kpi ? costBudgetView(kpi, period, now) : null;
   const ws = view?.showWebSearch === true;
+  // 웹 검색 비용이 NULL(미추적)이면 합계에 들어간 게 없다 — "$0.00 · incl. web search" 대신 "not tracked".
+  const wsTracked = view?.webSearchTracked === true;
   const budgetUtilization = view?.budgetUtilization ?? null;
   // 한도 합계가 0 이면 비율이 정의되지 않는다(백엔드가 null 을 준다) — 경고 등급도 매기지 않는다.
   const alertLevel = budgetUtilization != null ? alertLevelOf(budgetUtilization) : undefined;
@@ -56,7 +60,9 @@ export async function CostBudgetCards({
           !view
             ? t('fetchFailed')
             : ws
-              ? tw('usageCombinedDesc', { model: usd(view.modelCost), webSearch: usd(view.webSearchCost) })
+              ? wsTracked
+                ? tw('usageCombinedDesc', { model: usd(view.modelCost), webSearch: usd(view.webSearchCost) })
+                : tw('usageModelWsNotTrackedDesc', { model: usd(view.modelCost) })
               : t('usageThisMonthDesc')
         }
         href={`/analytics?period=${period}${clientSuffix}`}
@@ -87,7 +93,7 @@ export async function CostBudgetCards({
           !kpi
             ? t('fetchFailed')
             : ws
-              ? tw('avgCostPerUserCombinedDesc', { count: kpi.active_users })
+              ? tw(wsTracked ? 'avgCostPerUserCombinedDesc' : 'avgCostPerUserWsNotTrackedDesc', { count: kpi.active_users })
               : t('avgCostPerUserDesc', { count: kpi.active_users })
         }
         href={`/analytics?period=${period}&group_by=user${clientSuffix}`}
@@ -99,10 +105,10 @@ export async function CostBudgetCards({
         description={
           view?.projection != null
             ? ws
-              ? tw('dailyAvgProjectionCombined', { amount: usd(view.projection) })
+              ? tw(wsTracked ? 'dailyAvgProjectionCombined' : 'dailyAvgProjectionWsNotTracked', { amount: usd(view.projection) })
               : t('dailyAvgProjection', { amount: usd(view.projection) })
             : ws
-              ? tw('dailyAvgCombinedDesc')
+              ? tw(wsTracked ? 'dailyAvgCombinedDesc' : 'dailyAvgWsNotTrackedDesc')
               : t('dailyAvgDesc')
         }
         href={`/analytics?period=${period}${clientSuffix}`}

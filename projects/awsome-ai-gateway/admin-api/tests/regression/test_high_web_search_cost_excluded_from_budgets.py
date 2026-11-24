@@ -167,5 +167,5 @@ async def test_budget_limit_and_model_cost_identical_with_and_without_web_search
     assert sec["queries"] >= 8 and sec["successful_requests"] >= 3
     assert next(c for c in sec["by_client"] if c["client"] == "claude-code")["queries"] >= 8
     assert sum(d["queries"] for d in sec["daily"]) == sec["queries"]
-    assert sec["queries_per_request"] == round(sec["queries"] / sec["successful_requests"], 2)
+    assert sec["queries_per_request"] == round(sec["queries"] / sec["successful_requests"], 8)
     assert plain["web_search_section"]["queries"] == sec["queries"] - 8

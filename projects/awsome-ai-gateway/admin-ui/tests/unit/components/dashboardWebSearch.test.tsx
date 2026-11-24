@@ -109,6 +109,16 @@ describe('COST & BUDGET 줄 — 표시 규칙 4가지', () => {
     expect(within(c.budget).getByText('Model cost vs budget · web search excluded')).toBeTruthy();
   });
 
+  it('배포됨·비용 미추적(NULL) — $0.00 이 아니라 "Web search not tracked"', async () => {
+    const c = await cards(kpi({ queries: 3, cost_usd: null, untracked_queries: 3 }));
+    expect(within(c.usage).getByText('$12.00')).toBeTruthy();
+    expect(within(c.usage).getByText('Model $12.00 · Web search not tracked (all users)')).toBeTruthy();
+    expect(within(c.avg).getByText('Based on 4 active users this month · web search not tracked')).toBeTruthy();
+    expect(within(c.daily).getByText('Month-end projection $18.00 (linear estimate) · web search not tracked')).toBeTruthy();
+    expect(within(c.budget).getByText('Model cost vs budget · web search excluded')).toBeTruthy();
+    expect(document.body.textContent).not.toMatch(/Web search \$0\.00|incl\. web search/);
+  });
+
   it('C) 미배포·기록 비용 있음 — 합산 표기', async () => {
     const c = await cards(kpi({ deployed: false }));
     expect(within(c.usage).getByText('$12.67')).toBeTruthy();
@@ -212,6 +222,26 @@ describe('WEB SEARCH · AGENTCORE 섹션', () => {
       <WebSearchSection data={section(o as Partial<DashboardWebSearch>)} period="2026-11" today="2026-11-20" />,
     );
     expect(container.textContent).toBe('');
+  });
+
+  it('요청당 — 0.01 미만은 유효숫자 2개(3 / 1,818 → 0.0017), 0.00 으로 뭉개지 않는다', () => {
+    provider(
+      <WebSearchSection
+        data={section({ queries: 3, successful_requests: 1818, queries_per_request: 3 / 1818 })}
+        period="2026-11" today="2026-11-20"
+      />,
+    );
+    expect(screen.getByTestId('web-search-per-request').textContent).toBe('0.0017');
+  });
+
+  it('도넛은 고정 152px 상자(축소 안 됨) — 범례를 덮지 않는다', () => {
+    provider(<WebSearchSection data={section()} period="2026-11" today="2026-11-20" />);
+    const box = screen.getByTestId('web-search-donut');
+    expect(box.style.width).toBe('152px');
+    expect(box.style.height).toBe('152px');
+    expect(box.className).toContain('shrink-0');
+    // 범례는 도넛 상자 밖(형제)에 있다
+    expect(box.contains(screen.getByTestId('web-search-legend'))).toBe(false);
   });
 
   it('요청 0건이면 요청당 —, 미래 달이면 일평균 —', () => {
