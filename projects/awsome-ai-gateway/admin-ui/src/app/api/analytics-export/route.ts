@@ -11,7 +11,11 @@ export async function GET(request: NextRequest) {
   const cookieStore = await cookies();
   const jwt = cookieStore.get('admin_jwt')?.value;
 
-  const searchParams = request.nextUrl.searchParams.toString();
+  // view 는 허용 값(user_model — 사용자×모델 CSV)만 전달한다. 그 외 값은 버려
+  // 상류가 모르는 뷰로 조용히 다른 파일을 만들지 않게 한다.
+  const forwarded = new URLSearchParams(request.nextUrl.searchParams);
+  if (forwarded.get('view') !== 'user_model') forwarded.delete('view');
+  const searchParams = forwarded.toString();
 
   // R17-S6 — upstream 연결 실패/타임아웃은 프레임워크 500 이 아니라 502 로.
   let res: Response;

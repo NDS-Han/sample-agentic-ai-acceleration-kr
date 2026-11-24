@@ -285,6 +285,16 @@ export interface TeamBreakdown {
   request_count: number;
 }
 
+/** /admin/analytics `by_user` 항목(Cost by User 막대). */
+export interface UserBreakdown {
+  /** 실사용자면 항상 있다 — 막대 클릭 시 사용자×모델 상세를 바로 연다. 구버전 API 는 없음. */
+  user_id?: string | null;
+  user: string;
+  email: string;
+  cost_usd: number;
+  requests: number;
+}
+
 // ─── Budget Allocation ────────────────────────────────────────────────────────
 
 export interface AllocationEntry {

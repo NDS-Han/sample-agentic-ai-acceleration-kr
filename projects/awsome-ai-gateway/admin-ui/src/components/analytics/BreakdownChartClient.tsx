@@ -3,6 +3,7 @@
 // Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
 
 
+import { useRef, type KeyboardEvent } from 'react';
 import {
   Bar,
   BarChart,
@@ -17,16 +18,31 @@ import { useTranslations } from 'next-intl';
 import { fmtUsdExact, fmtUsdTick, niceTicks } from '@/lib/utils/format';
 import type { ModelBreakdown, TeamBreakdown } from '@/types/entities';
 import { CATEGORICAL_PALETTE, useChartTheme } from '@/lib/utils/chartTheme';
+import { requestUserModelDrawer, type UserModelTarget } from './userModel';
 
 interface BreakdownChartClientProps {
   labels: string[];
   values: number[];
   title: string;
+  /** By User 모드 — labels 와 같은 순서. 있으면 막대·이름이 사용자×모델 상세를 연다. */
+  userTargets?: UserModelTarget[];
 }
 
-export function BreakdownChartClient({ labels, values, title }: BreakdownChartClientProps) {
+export function BreakdownChartClient({ labels, values, title, userTargets }: BreakdownChartClientProps) {
   const t = useTranslations('analytics');
+  const tu = useTranslations('analytics.userModel');
   const theme = useChartTheme();
+  const rootRef = useRef<HTMLDivElement>(null);
+  const clickable = !!userTargets && userTargets.length > 0;
+
+  // 막대 클릭엔 포커스 가능한 요소가 없다 — 같은 행의 이름(포커스 가능한 tick)을
+  // 트리거로 넘겨 드로어가 닫힐 때 거기로 포커스를 돌려준다.
+  const openUser = (index: number) => {
+    const target = userTargets?.[index];
+    if (!target) return;
+    const trigger = rootRef.current?.querySelector<HTMLElement>(`[data-user-index="${index}"]`) ?? null;
+    requestUserModelDrawer({ ...target, trigger });
+  };
 
   const points = labels.map((label, i) => ({ label, value: values[i] ?? 0 }));
 
@@ -56,9 +72,51 @@ export function BreakdownChartClient({ labels, values, title }: BreakdownChartCl
   const ticks = niceTicks(points.reduce((m, p) => Math.max(m, p.value), 0));
   const step = ticks.length > 1 ? ticks[1] - ticks[0] : 1;
 
+  // By User 모드의 이름 tick — 키보드(Enter/Space)로도 열리도록 버튼 역할.
+  const renderUserTick = (props: {
+    x?: number | string;
+    y?: number | string;
+    index?: number;
+    payload?: { value?: string; index?: number };
+  }) => {
+    const index = props.index ?? props.payload?.index ?? 0;
+    const label = String(props.payload?.value ?? '');
+    const onKey = (e: KeyboardEvent<SVGGElement>) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        openUser(index);
+      }
+    };
+    return (
+      <g
+        data-user-index={index}
+        role="button"
+        tabIndex={0}
+        aria-label={tu('openBreakdown', { name: label })}
+        onClick={() => openUser(index)}
+        onKeyDown={onKey}
+        className="cursor-pointer outline-none focus-visible:[&>text]:underline"
+      >
+        <text
+          x={Number(props.x ?? 0)}
+          y={Number(props.y ?? 0)}
+          dy={4}
+          textAnchor="end"
+          fontSize={11}
+          fill={theme.textMuted}
+        >
+          {formatLabel(label)}
+        </text>
+      </g>
+    );
+  };
+
   return (
-    <div>
+    <div ref={rootRef}>
       <div className="mb-2 text-center text-sm font-medium">{title}</div>
+      {clickable && (
+        <div className="-mt-1 mb-2 text-center text-xs text-primary">{tu('chartHint')}</div>
+      )}
       <ResponsiveContainer width="100%" height={chartHeight}>
         <BarChart
           data={points}
@@ -80,8 +138,8 @@ export function BreakdownChartClient({ labels, values, title }: BreakdownChartCl
             dataKey="label"
             interval={0}
             width={yAxisWidth}
-            tickFormatter={formatLabel}
-            tick={{ fontSize: 11, fill: theme.textMuted }}
+            tickFormatter={clickable ? undefined : formatLabel}
+            tick={clickable ? renderUserTick : { fontSize: 11, fill: theme.textMuted }}
             axisLine={false}
             tickLine={false}
           />
@@ -101,7 +159,13 @@ export function BreakdownChartClient({ labels, values, title }: BreakdownChartCl
           />
           {/* 막대마다 카테고리 색 — 항목 구분 또렷. 축 눈금이 $ 단위라
               예전 하단의 'Item'/'USD' 모서리 라벨은 두지 않는다. */}
-          <Bar dataKey="value" radius={[0, 6, 6, 0]} barSize={18}>
+          <Bar
+            dataKey="value"
+            radius={[0, 6, 6, 0]}
+            barSize={18}
+            onClick={clickable ? (_data, index) => openUser(index) : undefined}
+            cursor={clickable ? 'pointer' : undefined}
+          >
             {points.map((_, i) => (
               <Cell key={i} fill={CATEGORICAL_PALETTE[i % CATEGORICAL_PALETTE.length]} />
             ))}
