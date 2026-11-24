@@ -13,6 +13,7 @@ import {
   nextSort,
   toSortParam,
   tokenMix,
+  userSubline,
   type UserModelCell,
 } from '@/components/analytics/userModel';
 
@@ -101,16 +102,26 @@ describe('툴팁·구성·UUID', () => {
       cacheRead: 'Cache read',
       cacheWrite: 'Cache write',
       total: 'Total',
-      cost: 'Cost',
-      requests: 'Requests',
+      requests: (n) => `${n} ${n === 1 ? 'request' : 'requests'}`,
     });
     expect(tip.split('\n')).toEqual([
       'Sonnet · Kim',
       'Input 100 · Output 50',
       'Cache read 300 · Cache write 50',
       'Total 500',
-      'Cost $0.0040 · Requests 3',
+      '$0.0040 · 3 requests',
     ]);
+    const big = cellTooltip('t', { ...CELL, total_tokens: 143_251, cost_usd: 0.13, requests: 4 }, {
+      input: 'Input', output: 'Output', cacheRead: 'Cache read', cacheWrite: 'Cache write', total: 'Total',
+      requests: (n) => `${n} requests`,
+    });
+    expect(big.split('\n').slice(-2)).toEqual(['Total 143K', '$0.13 · 4 requests']);
+  });
+  it('userSubline — "email · team", 이름이 없으면 이메일은 이름 자리라 팀만', () => {
+    expect(userSubline({ name: 'Load Test', email: 'lt1@x.io', team_name: 'QA' })).toBe('lt1@x.io · QA');
+    expect(userSubline({ name: 'Load Test', email: 'lt2@x.io', team_name: null })).toBe('lt2@x.io');
+    expect(userSubline({ name: ' ', email: 'a@x.io', team_name: 'QA' })).toBe('QA');
+    expect(userSubline({ name: null, email: 'a@x.io' })).toBe('');
   });
   it('tokenMix 는 버킷 비율(%)', () => {
     expect(tokenMix(CELL)).toEqual([20, 10, 60, 10]);

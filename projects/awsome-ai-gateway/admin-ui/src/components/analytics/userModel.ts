@@ -180,19 +180,30 @@ export interface CellTipLabels {
   cacheRead: string;
   cacheWrite: string;
   total: string;
-  cost: string;
-  requests: string;
+  /** 요청 수 문구 — 복수형은 메시지(ICU)가 정한다. 예: "4 requests". */
+  requests: (_count: number) => string;
 }
 
-/** 셀 툴팁 — 제목 줄 + 버킷별 분해·비용·요청 수. 금액은 정확값(1센트 미만 포함). */
+/**
+ * 셀 툴팁 — 제목 줄 + 버킷별 분해(정확값) + 합계(표와 같은 K/M) + "비용 · 요청 수".
+ * 금액은 정확값(1센트 미만 포함). 예: "… Total 143K\n$0.13 · 4 requests".
+ */
 export function cellTooltip(title: string, cell: UserModelCell, l: CellTipLabels): string {
   return [
     title,
     `${l.input} ${fmtInt(cell.input_tokens)} · ${l.output} ${fmtInt(cell.output_tokens)}`,
     `${l.cacheRead} ${fmtInt(cell.cache_read_tokens)} · ${l.cacheWrite} ${fmtInt(cell.cache_write_tokens)}`,
-    `${l.total} ${fmtInt(cell.total_tokens)}`,
-    `${l.cost} ${fmtUsdExact(Number(cell.cost_usd) || 0)} · ${l.requests} ${fmtInt(cell.requests)}`,
+    `${l.total} ${fmtTok(cell.total_tokens)}`,
+    `${fmtUsdExact(Number(cell.cost_usd) || 0)} · ${l.requests(Number(cell.requests) || 0)}`,
   ].join('\n');
+}
+
+/**
+ * 이름 아래 보조 줄 — "email · team". 이름이 없으면 이름 자리에 이미 이메일이 나오므로
+ * 이메일은 빼고 팀만(표 행·드로어 머리 공통 — 동명이인 구분용).
+ */
+export function userSubline(u: { name?: string | null; email?: string | null; team_name?: string | null }): string {
+  return [u.name?.trim() ? u.email : null, u.team_name].filter(Boolean).join(' · ');
 }
 
 // ─── token mix ────────────────────────────────────────────────────────────────

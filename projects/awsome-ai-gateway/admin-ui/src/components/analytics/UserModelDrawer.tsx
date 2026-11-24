@@ -10,7 +10,7 @@ import { fmtLatencyMs, fmtUsd, usdTitle } from '@/lib/utils/format';
 import { modelDisplay } from '@/lib/utils/modelLabel';
 import { ErrorState } from '@/components/common/ErrorState';
 import { MixLegend, TokenMixBar, rowName, useUserModelDetail } from './UserModelTable';
-import { fmtInt, fmtTok, type UserModelDetail, type UserModelTarget } from './userModel';
+import { fmtInt, fmtTok, userSubline, type UserModelDetail, type UserModelTarget } from './userModel';
 
 export interface DrawerTarget extends UserModelTarget {
   trigger?: HTMLElement | null;
@@ -68,6 +68,8 @@ export function UserModelDrawer({ target, onClose, fetchDetail, resolveUserId, o
   const { state, retry } = useUserModelDetail(open ? userId : null, fetchDetail);
   const detail = state.status === 'ok' && userId ? state.data : null;
   const name = detail ? rowName(detail) : rowName({ name: targetName, email: targetEmail });
+  // 표 행과 같은 "email · team" — 같은 이름(예: 'Load Test' 둘)을 구분한다.
+  const sub = userSubline(detail ?? { name: targetName, email: targetEmail });
 
   return (
     <Dialog.Root open={open} onOpenChange={(open) => !open && onClose()}>
@@ -98,8 +100,10 @@ export function UserModelDrawer({ target, onClose, fetchDetail, resolveUserId, o
                 <Dialog.Title className="break-all text-lg font-bold text-foreground">
                   {name}
                 </Dialog.Title>
-                {detail?.team_name && (
-                  <span className="text-xs text-muted-foreground">{detail.team_name}</span>
+                {sub && (
+                  <span className="break-all text-xs text-muted-foreground" data-testid="user-model-drawer-sub">
+                    {sub}
+                  </span>
                 )}
               </div>
               <Dialog.Close
