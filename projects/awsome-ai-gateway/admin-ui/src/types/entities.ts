@@ -226,6 +226,8 @@ export interface OrgNodeMeta {
   has_custom_policies?: boolean | null;
   /** TEAM 만 — 개별 설정을 가진 활성 멤버 수. */
   custom_policy_count?: number | null;
+  /** TEAM(과 그 USER) — 예산 관리와 같은 팀 표시 이름("NDS_Developers"). 구 API 는 없음. */
+  team_display_name?: string | null;
   // budgets / rate-limits 트리에서 동일한 OrgTree 컴포넌트를 재사용하면서
   // 우측 패널에 보여줄 데이터를 메타로 붙인다.
   budget?: {

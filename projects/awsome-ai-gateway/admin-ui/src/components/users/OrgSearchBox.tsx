@@ -169,7 +169,7 @@ export function OrgSearchBox({ root, onSelectOrgNode, onSelectUser }: OrgSearchB
   const truncated = orgResult.truncated || usersTruncated;
 
   return (
-    <div ref={containerRef} className="relative p-2 border-b">
+    <div ref={containerRef} className="relative">
       <div className="relative">
         <Search
           size={14}
@@ -198,7 +198,7 @@ export function OrgSearchBox({ root, onSelectOrgNode, onSelectUser }: OrgSearchB
           }
           aria-autocomplete="list"
           autoComplete="off"
-          className="glass w-full rounded-apple-sm border pl-8 pr-8 py-1.5 text-sm [&::-webkit-search-cancel-button]:hidden"
+          className="w-full rounded-md border border-input bg-background pl-8 pr-8 py-2 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring [&::-webkit-search-cancel-button]:hidden"
         />
         {term && (
           <button
@@ -213,7 +213,7 @@ export function OrgSearchBox({ root, onSelectOrgNode, onSelectUser }: OrgSearchB
       </div>
 
       {showDropdown && (
-        <div className="absolute left-2 right-2 top-full z-30 mt-1 rounded-apple-md border bg-background shadow-lg">
+        <div className="absolute left-0 right-0 top-full z-30 mt-1 rounded-apple-md border bg-background shadow-lg">
           {tooShort ? (
             <p className="px-3 py-2 text-xs text-muted-foreground">{t('minLength')}</p>
           ) : (

@@ -24,9 +24,15 @@ import type { OrgTreeNode } from '@/types/entities';
 // effect deps 에 t 를 넣은 컴포넌트가 무한 재실행된다(실제 next-intl 은 안정값).
 vi.mock('next-intl', () => {
   const tFn = (key: string, params?: Record<string, unknown>) =>
-    params && 'count' in params ? `${key}=${params.count}` : key;
+    params ? `${key}${Object.entries(params).map(([k, v]) => ` ${k}=${String(v)}`).join('')}` : key;
   return { useTranslations: () => tFn };
 });
+vi.mock('@/lib/actions/users', () => ({
+  getScopeAllowedClientsAction: vi.fn(async () => ({ success: true, data: { clients: [] } })),
+  getUserAllowedClientsAction: vi.fn(),
+  setScopeAllowedClientsAction: vi.fn(),
+  setUserAllowedClientsAction: vi.fn(),
+}));
 
 function userNode(name: string): OrgTreeNode {
   return {
@@ -84,36 +90,28 @@ function departmentNode(teams: number, perTeam: number): OrgTreeNode {
 }
 
 describe('OrgDetailPanel — DEPARTMENT 카운트', () => {
+  // 요약 한 줄은 ICU 메시지 하나(org.deptSummary) — 팀 수·사람 수가 각자 이름 붙은 인자로 들어간다.
+  const line = () => screen.getByText(/^org\.dept/).textContent;
+
   it('팀 수 자리에 팀 수가 온다 (사람 수가 아니다)', () => {
     render(<OrgDetailPanel node={departmentNode(20, 50)} />);
-    // teamCount 라벨 뒤의 값은 20 이어야 한다. 1000 이면 원래 버그다.
-    expect(screen.getByText('countSuffix=20')).toBeInTheDocument();
-    expect(screen.queryByText('countSuffix=1000')).not.toBeInTheDocument();
-  });
-
-  it('사람 수를 별도 줄로 함께 보여준다', () => {
-    render(<OrgDetailPanel node={departmentNode(20, 50)} />);
-    expect(screen.getByText('teamCount')).toBeInTheDocument();
-    expect(screen.getByText('memberCount')).toBeInTheDocument();
-    expect(screen.getByText('memberCountValue=1000')).toBeInTheDocument();
+    expect(line()).toBe('org.deptSummary teams=20 people=1000');
   });
 
   it('team_count 가 없으면 children 수로 폴백한다 (사람 수로 폴백하지 않는다)', () => {
-    // 구버전 서버와 섞여 배포되는 창을 가정한다. 그때도 사람 수를 팀 수 자리에
-    // 넣어서는 안 된다 — 그게 원래 버그의 형태다.
+    // 구버전 서버와 섞여 배포되는 창 — 그때도 사람 수(21)를 팀 수 자리에 넣으면 안 된다.
     const node = departmentNode(3, 7);
     (node.meta as { team_count: number | null }).team_count = null;
     render(<OrgDetailPanel node={node} />);
-    expect(screen.getByText('countSuffix=3')).toBeInTheDocument(); // children.length
-    expect(screen.queryByText('countSuffix=21')).not.toBeInTheDocument(); // 3×7 사람 수
+    expect(line()).toBe('org.deptSummary teams=3 people=21');
   });
 
-  it('member_count 가 없으면 사람 수 줄을 아예 그리지 않는다', () => {
+  it('member_count 가 없으면 사람 수를 아예 그리지 않는다', () => {
     const node = departmentNode(4, 2);
     (node.meta as { member_count: number | null }).member_count = null;
     render(<OrgDetailPanel node={node} />);
     // "모른다" 를 0 으로 표시하면 "구성원 0명" 이라는 틀린 주장이 된다.
-    expect(screen.queryByText('memberCount')).not.toBeInTheDocument();
+    expect(line()).toBe('org.deptTeamsOnly teams=4');
   });
 });
 
@@ -139,19 +137,8 @@ describe('OrgDetailPanel — ORGANIZATION 카운트', () => {
     } as OrgTreeNode;
   }
 
-  it('부서 수·팀 수·사람 수 세 값을 서로 다른 라벨로 보여준다', () => {
+  it('부서 수·팀 수·사람 수 세 값을 서로 다른 이름의 인자로 보여준다(섞이지 않는다)', () => {
     render(<OrgDetailPanel node={orgNode()} />);
-    expect(screen.getByText('departmentCount')).toBeInTheDocument();
-    expect(screen.getByText('countSuffix=2')).toBeInTheDocument(); // 부서 2개
-    expect(screen.getByText('teamCount')).toBeInTheDocument();
-    expect(screen.getByText('countSuffix=22')).toBeInTheDocument(); // 팀 22개
-    expect(screen.getByText('memberCountValue=1002')).toBeInTheDocument(); // 사람 1002명
-  });
-
-  it('세 값이 서로 섞이지 않는다', () => {
-    render(<OrgDetailPanel node={orgNode()} />);
-    // 부서 수 라벨에 팀 수(22)나 사람 수(1002)가 붙으면 실패한다.
-    expect(screen.queryByText('memberCountValue=22')).not.toBeInTheDocument();
-    expect(screen.queryByText('countSuffix=1002')).not.toBeInTheDocument();
+    expect(screen.getByText(/^org\.summary/).textContent).toBe('org.summary depts=2 teams=22 people=1002');
   });
 });

@@ -415,3 +415,35 @@ export async function getOrgTreeAction(
     return { success: false, error: toErrorMessage(err) };
   }
 }
+
+// ─── 사용자 활동(마지막 사용·이번 달 웹 검색) — /users 팀 구성원 표·사용자 상세 ──────────
+
+export interface UserActivityItem {
+  user_id: string;
+  last_used_at: string | null;
+  web_searches: number;
+}
+
+/** GET /admin/users/activity — 요청한 id 마다 한 행. 200명씩 나눠 부른다. */
+export async function getUsersActivityAction(
+  userIds: string[],
+): Promise<ActionResult<{ period: string; items: UserActivityItem[] }>> {
+  const ids = [...new Set(userIds)].filter((x) => /^[0-9a-f-]{36}$/i.test(x));
+  if (ids.length === 0) return { success: true, data: { period: '', items: [] } };
+  try {
+    let period = '';
+    const items: UserActivityItem[] = [];
+    for (let i = 0; i < ids.length; i += 200) {
+      const qs = new URLSearchParams();
+      ids.slice(i, i + 200).forEach((id) => qs.append('user_id', id));
+      const r = await withRetry(() =>
+        adminAPI.get<{ period: string; items: UserActivityItem[] }>(`/admin/users/activity?${qs}`),
+      );
+      period = r.period;
+      items.push(...r.items);
+    }
+    return { success: true, data: { period, items } };
+  } catch (err) {
+    return { success: false, error: toErrorMessage(err) };
+  }
+}
