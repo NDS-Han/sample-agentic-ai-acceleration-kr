@@ -126,6 +126,10 @@ class HeaderInjectorMiddleware:
                     headers.append("X-RateLimit-Limit", str(rl.limit))
                     headers.append("X-RateLimit-Reset", str(rl.window_reset))
 
+                # 웹 검색 soft block — 월 검색 수 한도 소진(services/web_search_quota).
+                if ws_notice := state.get("web_search_notice"):
+                    headers.append("x-gateway-web-search", ws_notice)
+
                 # Cost Limit
                 if cl := state.get("cost_limit_result"):
                     headers.append("X-CostLimit-Remaining", str(cl.cpm_remaining))

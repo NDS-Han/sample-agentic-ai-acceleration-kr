@@ -846,6 +846,25 @@ async def _handle_responses(request: Request):
                                     "message": f"Your account does not have access to model '{model_config.alias}'. Contact your administrator to request access."}},
             )
 
+    # --- 웹 검색 통제(월 검색 수 한도) — /v1/messages 와 같은 판정·순서 ---
+    # global off > app off > 월 한도(soft block: 도구 미주입 + instructions 노트 + 헤더) >
+    # 요청당 상한 > 허용. 요청을 거절하지 않는다(services/web_search_quota).
+    from app.config import get_settings as _gs_quota
+    from app.services.web_search_quota import add_monthly_limit_notice, gate_web_search
+
+    _ws_gate = await gate_web_search(
+        state=state, redis=redis, session_factory=session_factory, auth_context=auth_context,
+        app_enabled=(
+            getattr(request.app.state, "agentcore_mcp_client", None) is not None
+            and profile is not None
+            and bool(getattr(profile, "web_search_enabled", False))
+            and isinstance(req_data, dict)
+        ),
+        default_cap=_gs_quota().web_search_max_searches_per_request,
+    )
+    if _ws_gate.monthly_limit_reached and isinstance(req_data, dict):
+        add_monthly_limit_notice(req_data, "responses")
+
     # Pre-reserve RPM + TPM (USER/TEAM/GLOBAL) — same enforcement as chat path.
     if auth_context:
         from app.services.rate_limit_enforcement import enforce_rate_limits
@@ -856,22 +875,20 @@ async def _handle_responses(request: Request):
         #   예약한다. 이 경로는 심사가 웹서치 루프 진입 전에 돌아 원본 바디만
         #   예약됐고, 루프가 최대 max_iterations 턴을 돌며 한도의 최대 N 배까지
         #   지출할 수 있었다. messages.py /v1/messages 와 같은 헬퍼·같은 값.
-        if (
-            getattr(request.app.state, "agentcore_mcp_client", None) is not None
-            and getattr(profile, "web_search_enabled", False)
-            and isinstance(req_data, dict)
-        ):
+        if _ws_gate.enabled:
             from app.config import get_settings as _gs
 
             _s = _gs()
+            _ws_iters_adm = _ws_gate.max_iterations(
+                _s.web_search_max_searches_per_turn, _s.web_search_max_iterations)
             _admission_body = conservative_admission_body(
-                req_data, _s.web_search_max_iterations,
+                req_data, _ws_iters_adm,
                 max_result_chars=_s.web_search_max_result_chars,
                 max_searches_per_turn=_s.web_search_max_searches_per_turn,
                 default_max_results=_s.web_search_max_results_default,
                 # Responses 스티처는 soft/nudge 턴이 없다 — 검색 턴 + hard final 이
                 # 실제 상한이다(Anthropic 의 iters+3 과 구분, R20 S-b).
-                bound_turns=_s.web_search_max_iterations + 1,
+                bound_turns=_ws_iters_adm + 1,
                 admission_add_cap=_s.web_search_admission_input_add_cap,
             )
 
@@ -955,6 +972,8 @@ async def _handle_responses(request: Request):
         and profile is not None
         and getattr(profile, "web_search_enabled", False)
         and isinstance(req_data, dict)
+        # 월 한도 소진 = soft block(도구 미주입, 위 _ws_gate).
+        and _ws_gate.enabled
     ):
         from app.config import get_settings
         from app.services.web_search_loop import run_web_search_loop
@@ -1136,10 +1155,13 @@ async def _handle_responses(request: Request):
                 invoke_stream=_ws_invoke_stream,
                 initial_req_data=req_data,
                 is_stream=is_stream,
-                mcp_client=mcp_client,
+                # 검색마다 월 한도 예약 + 요청당 상한(QuotaGuard).
+                mcp_client=_ws_gate.wrap(mcp_client, redis),
                 request=request,
                 on_usage=_ws_record,
-                max_iterations=_settings_ws.web_search_max_iterations,
+                max_iterations=_ws_gate.max_iterations(
+                    _settings_ws.web_search_max_searches_per_turn,
+                    _settings_ws.web_search_max_iterations),
                 total_deadline_sec=_settings_ws.web_search_total_deadline_sec,
                 default_max_results=_settings_ws.web_search_max_results_default,
                 max_result_chars=_settings_ws.web_search_max_result_chars,
