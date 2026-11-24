@@ -17,6 +17,7 @@ import {
   fetchUserModelJson,
   filterParams,
   isRangeTooLongError,
+  isUuid,
   nextSort,
   toSortParam,
   type SortColumn,
@@ -146,6 +147,13 @@ export function UserModelSection({ filters }: { filters: UserModelFilters }) {
     };
     window.addEventListener(USER_MODEL_OPEN_EVENT, onOpen);
     return () => window.removeEventListener(USER_MODEL_OPEN_EVENT, onOpen);
+  }, []);
+
+  // 딥링크 — /analytics?group_by=user&user=<uuid> (Users/Teams 사용자 상세의 'Analytics')는
+  // 그 사용자의 모델별 드로어를 바로 연다.
+  useEffect(() => {
+    const id = new URLSearchParams(window.location.search).get('user');
+    if (isUuid(id)) setDrawer({ user_id: id, email: null, name: null, trigger: null });
   }, []);
 
   const onSort = (col: SortColumn) => {

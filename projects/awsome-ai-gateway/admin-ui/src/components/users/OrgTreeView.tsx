@@ -9,7 +9,6 @@ import type { OrgTreeNode, UserSearchItem } from '@/types/entities';
 import { OrgTree } from './OrgTree';
 import { OrgDetailPanel } from './OrgDetailPanel';
 import { OrgSearchBox } from './OrgSearchBox';
-import { ConfirmDialog } from '@/components/common/ConfirmDialog';
 import { useToast } from '@/components/common/ToastProvider';
 import { getOrgTreeAction } from '@/lib/actions/users';
 import {
@@ -116,9 +115,6 @@ export function OrgTreeView({ root }: OrgTreeViewProps) {
   // 검색 결과로만 존재하는 USER 노드(팀 미배정·멤버 0명 팀 등 root 에 없는 사용자).
   const [syntheticNode, setSyntheticNode] = useState<OrgTreeNode | null>(null);
   const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set());
-  // 미저장 편집 중 노드 전환 시도 — 확인 후 전환한다(RateLimitTreeView 와 같은 규칙).
-  const [panelDirty, setPanelDirty] = useState(false);
-  const [pendingSelect, setPendingSelect] = useState<(() => void) | null>(null);
   const hasMountedRef = useRef(false);
 
   const selectedNode = useMemo(() => {
@@ -213,11 +209,6 @@ export function OrgTreeView({ root }: OrgTreeViewProps) {
     }
   }, [expandedNodes]);
 
-  // 노드 전환 직후 dirty 를 비운다 — 새 패널이 마운트되며 자신의 dirty 를 다시 보고한다.
-  useEffect(() => {
-    setPanelDirty(false);
-  }, [selectedId]);
-
   // Cognito 동기화·빈 팀 토글 OFF 등으로 트리에서 선택 노드가 사라졌으면
   // 선택을 해제한다. dirty 폼이 있으면 토글 자체가 가드(아래 handleToggleEmpty)
   // 를 거치므로 이 경로는 비dirty 전환만 처리한다.
@@ -240,14 +231,8 @@ export function OrgTreeView({ root }: OrgTreeViewProps) {
     window.history.replaceState(null, '', url);
   };
 
-  /** dirty 폼이 있으면 ConfirmDialog 를 거쳐 전환한다. */
-  const requestSelect = (action: () => void) => {
-    if (panelDirty) {
-      setPendingSelect(() => action);
-      return;
-    }
-    action();
-  };
+  /** 노드 전환 — 정책은 항목별 대화상자가 바로 저장하므로 미저장 상태가 없다(확인 단계 불필요). */
+  const requestSelect = (action: () => void) => action();
 
   const selectTreeNode = (node: OrgTreeNode) => {
     setSyntheticNode(null);
@@ -370,100 +355,102 @@ export function OrgTreeView({ root }: OrgTreeViewProps) {
     }
   };
 
-  /**
-   * 토글 OFF 시 선택된 빈 팀이 트리에서 사라진다 — dirty 폼이 있으면
-   * 노드 전환과 같은 ConfirmDialog 가드를 거친다.
-   */
   const handleToggleEmpty = (checked: boolean) => {
-    if (!checked && panelDirty && selectedId && syntheticNode?.id !== selectedId) {
-      const survives = !!findNodeById(root, selectedId);
-      if (!survives) {
-        setPendingSelect(() => () => {
-          void applyShowEmpty(false);
-        });
-        return;
-      }
-    }
     void applyShowEmpty(checked);
   };
 
+  /** 펼치기만 — 팀을 선택할 때 멤버를 드러낸다(이미 펼쳐져 있으면 그대로). */
+  const handleExpand = (id: string) => {
+    setExpandedNodes((prev) => (prev.has(id) ? prev : new Set([...prev, id])));
+  };
+
+  /** 저장 후 트리 메타(개별설정 점·팀장)를 다시 읽는다. 토글 상태는 ref 의 최신값. */
+  const reloadTree = () => {
+    const gen = ++treeGenRef.current;
+    const withEmpty = showEmptyRef.current;
+    void (async () => {
+      try {
+        const r = await getOrgTreeAction(withEmpty);
+        if (gen !== treeGenRef.current) return;
+        if (r.success && r.data) {
+          setTreeOverride(r.data);
+          setOverrideHasEmpty(withEmpty);
+        } else {
+          rollbackIfMissingEmpty(withEmpty);
+        }
+      } catch {
+        if (gen === treeGenRef.current) rollbackIfMissingEmpty(withEmpty);
+      }
+    })();
+  };
+
+  /** 구성원 표의 행 → 그 사용자 선택(팀은 펼쳐 둔다). */
+  const openUserById = (id: string) => {
+    const found = findNodeById(effectiveRoot, id);
+    if (!found) return;
+    const path = findNodeExpandPath(effectiveRoot, id) ?? [];
+    setExpandedNodes((prev) => new Set([...prev, ...path]));
+    selectTreeNode(found);
+  };
+
+  const orgCounts = effectiveRoot
+    ? { people: effectiveRoot.meta.member_count ?? 0, teams: effectiveRoot.meta.team_count ?? 0 }
+    : null;
+
   return (
-    <div className="flex flex-col gap-3">
-      <div className="flex items-center justify-between gap-3 flex-wrap">
-        <OrgSearchBox
-          root={effectiveRoot}
-          onSelectOrgNode={handleSelectOrgNode}
-          onSelectUser={handleSelectUser}
-        />
-        <label className="flex items-center gap-1.5 cursor-pointer text-xs text-muted-foreground select-none">
-          <input
-            type="checkbox"
-            checked={showEmptyTeams}
-            onChange={(e) => handleToggleEmpty(e.target.checked)}
+    <div className="flex flex-col gap-4 lg:flex-row lg:items-start">
+      <section
+        aria-label={t('treeLabel')}
+        className="glass flex w-full flex-col rounded-apple lg:sticky lg:top-4 lg:w-[330px] lg:flex-shrink-0"
+      >
+        <div className="p-3 pb-2">
+          <OrgSearchBox root={effectiveRoot} onSelectOrgNode={handleSelectOrgNode} onSelectUser={handleSelectUser} />
+        </div>
+        <div className="flex items-center justify-between gap-2 px-3 pb-2 text-xs text-muted-foreground">
+          <span>{orgCounts ? t('orgCounts', { people: orgCounts.people, teams: orgCounts.teams }) : ''}</span>
+          <button
+            type="button"
+            aria-pressed={showEmptyTeams}
+            onClick={() => handleToggleEmpty(!showEmptyTeams)}
             disabled={treeLoading}
-            className="h-3.5 w-3.5 rounded border-gray-300"
-          />
-          {t('showEmptyTeams')}
-        </label>
-      </div>
-      <div className="flex gap-0 border rounded-lg overflow-hidden min-h-[600px]">
-      <div className="w-72 border-r overflow-y-auto">
-        {effectiveRoot ? (
-          <OrgTree
-            node={effectiveRoot}
-            selectedNodeId={selectedId}
-            expandedNodes={expandedNodes}
-            onSelect={(node) => {
-              if (node.id !== selectedId) requestSelect(() => selectTreeNode(node));
-            }}
-            onToggle={handleToggle}
-            emptyTeamLabel={t('emptyTeamBadge')}
-            customPolicyLabel={t('customBadge')}
-            formatCustomCount={(n) => t('customCount', { count: n })}
-          />
-        ) : (
-          <p className="p-4 text-muted-foreground text-sm">{t('noOrgData')}</p>
-        )}
-      </div>
-      <div className="flex-1 p-6">
+            className="rounded-md px-2 py-1 font-medium hover:bg-muted hover:text-foreground disabled:opacity-50 aria-pressed:bg-primary/10 aria-pressed:text-primary focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          >
+            {showEmptyTeams ? t('hideEmptyTeams') : t('showEmptyTeams')}
+          </button>
+        </div>
+        <div className="max-h-[calc(100vh-14rem)] min-h-[420px] overflow-y-auto border-t border-border px-1.5 py-2">
+          {effectiveRoot ? (
+            <OrgTree
+              node={effectiveRoot}
+              selectedNodeId={selectedId}
+              expandedNodes={expandedNodes}
+              onSelect={(node) => {
+                if (node.id !== selectedId) requestSelect(() => selectTreeNode(node));
+              }}
+              onToggle={handleToggle}
+              onExpand={handleExpand}
+              labels={{
+                emptyTeam: t('emptyTeamBadge'),
+                customPolicy: t('customBadge'),
+                leader: t('leaderBadge'),
+                memberCount: (n) => t('memberCountShort', { count: n }),
+                expand: (name) => t('treeExpand', { name }),
+                collapse: (name) => t('treeCollapse', { name }),
+              }}
+            />
+          ) : (
+            <p className="p-4 text-sm text-muted-foreground">{t('noOrgData')}</p>
+          )}
+        </div>
+      </section>
+      <div className="min-w-0 flex-1">
         <OrgDetailPanel
           node={selectedNode}
-          onDirtyChange={setPanelDirty}
-          orgId={effectiveRoot?.type === 'ORGANIZATION' ? effectiveRoot.id : undefined}
-          onSaved={() => {
-            // 저장으로 개별설정 점이 바뀔 수 있다 — 트리 메타를 재조회해 갱신.
-            // 이 클로저는 Apply 클릭 렌더에 묶여 오래 살아남으므로 토글 상태는
-            // 캡처값이 아니라 ref 의 최신값을 쓴다. 응답 전에 토글이 바뀌었으면
-            // (세대 증가) 이 응답은 버린다.
-            const gen = ++treeGenRef.current;
-            const withEmpty = showEmptyRef.current;
-            void (async () => {
-              try {
-                const r = await getOrgTreeAction(withEmpty);
-                if (gen !== treeGenRef.current) return;
-                if (r.success && r.data) {
-                  setTreeOverride(r.data);
-                  setOverrideHasEmpty(withEmpty);
-                } else {
-                  rollbackIfMissingEmpty(withEmpty);
-                }
-              } catch {
-                if (gen === treeGenRef.current) rollbackIfMissingEmpty(withEmpty);
-              }
-            })();
-          }}
+          root={effectiveRoot}
+          onOpenUser={openUserById}
+          onSaved={reloadTree}
         />
       </div>
-      </div>
-      <ConfirmDialog
-        isOpen={pendingSelect !== null}
-        onClose={() => setPendingSelect(null)}
-        onConfirm={() => pendingSelect?.()}
-        title={t('discardChangesTitle')}
-        message={t('discardChangesMessage')}
-        confirmLabel={t('discardChangesConfirm')}
-        isDestructive
-      />
     </div>
   );
 }

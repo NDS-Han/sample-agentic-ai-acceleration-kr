@@ -103,6 +103,20 @@ class UserSearchItem(BaseModel):
     team_name: str | None = None
 
 
+class UserActivityItem(BaseModel):
+    user_id: str
+    #: 마지막 요청 시각(전 기간, 상태 무관). 요청이 한 번도 없으면 None.
+    last_used_at: datetime | None = None
+    #: 그 기간(리포팅 TZ 월) 웹 검색 수 — 상태 무관(실패 요청의 검색도 실행·과금된다,
+    #: web_search_quota 와 같은 모집단).
+    web_searches: int = 0
+
+
+class UserActivityResponse(BaseModel):
+    period: str
+    items: list[UserActivityItem] = []
+
+
 class UserSearchResponse(BaseModel):
     items: list[UserSearchItem] = []
     #: limit 에서 잘렸는지. UI 가 "결과가 더 있습니다" 힌트를 띄운다 — 잘림을 숨기면
@@ -132,6 +146,9 @@ class OrgNodeMeta(BaseModel):
     #: TEAM 만 — 개별 설정을 가진 **활성** 멤버 수. 비활성 사용자는 트리 노드가
     #: 없으므로 카운트에서도 빼야 점 개수와 일치한다.
     custom_policy_count: int | None = None
+    #: TEAM 만 — 예산 관리 등 다른 화면과 같은 팀 표시 이름(기본 부서가 아니면
+    #: "부서_팀", 예: NDS_Developers). USER 노드에서는 소속 팀의 같은 값.
+    team_display_name: str | None = None
 
 
 class OrgTreeNode(BaseModel):

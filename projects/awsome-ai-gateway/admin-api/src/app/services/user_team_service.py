@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.audit import audit_logger
+from app.core.config import get_settings
 from app.core.auth import CurrentUser
 from app.core.cache_invalidation import (
     CacheInvalidationManager,
@@ -732,10 +733,17 @@ class UserTeamService:
             ).scalars()
         )
 
+        # 팀 표시 이름 — 예산 관리(budget_service._team_display_name)와 같은 규칙:
+        # 기본 부서가 아니면 "부서_팀". 트리에서도 같은 이름이 보여야 두 화면을 대조할 수 있다.
+        default_dept_id = uuid.UUID(get_settings().DEFAULT_DEPT_ID)
+
         dept_nodes: list[OrgTreeNode] = []
         for dept in sorted(org.departments, key=lambda d: (d.name or "").lower()):
             team_nodes: list[OrgTreeNode] = []
             for team in sorted(dept.teams, key=lambda t: (t.name or "").lower()):
+                team_display = (
+                    f"{dept.name}_{team.name}" if dept.id != default_dept_id else team.name
+                )
                 leader = next(
                     (m for m in team.members if team.leader_user_id and m.id == team.leader_user_id),
                     None,
@@ -761,6 +769,7 @@ class UserTeamService:
                                 email=member.email,
                                 role=member.role.value,
                                 team_name=team.name,
+                                team_display_name=team_display,
                                 has_custom_policies=member.id in custom_user_ids,
                             ),
                         )
@@ -783,6 +792,7 @@ class UserTeamService:
                             custom_policy_count=sum(
                                 1 for m in active_members if m.id in custom_user_ids
                             ),
+                            team_display_name=team_display,
                         ),
                     )
                 )

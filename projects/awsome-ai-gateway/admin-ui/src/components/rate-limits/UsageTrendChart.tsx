@@ -47,6 +47,8 @@ interface UsageTrendChartProps {
     tpm?: number | null;
     cph?: number | null;
   };
+  /** 바깥 카드 여백 조정(기본 mb-4). */
+  className?: string;
 }
 
 // X축/툴팁 라벨. 서버 버킷은 epoch 를 bucket_sec 로 내림한 절대 시각 창
@@ -105,7 +107,7 @@ function fmtValue(v: number, metric: Metric): string {
   return v >= 10 ? v.toFixed(0) : v.toFixed(1);
 }
 
-export function UsageTrendChart({ scope, scopeId, limits }: UsageTrendChartProps) {
+export function UsageTrendChart({ scope, scopeId, limits, className = 'mb-4' }: UsageTrendChartProps) {
   const t = useTranslations('rateLimits');
   // 브라우저 TZ — 마운트 전 null. 차트는 fetch(마운트 후) 뒤에만 그려지므로
   // 실제 라벨은 항상 브라우저 TZ 로 나온다.
@@ -154,7 +156,7 @@ export function UsageTrendChart({ scope, scopeId, limits }: UsageTrendChartProps
   const hasData = data.some((p) => p[metric] > 0);
 
   return (
-    <div className="mb-4 rounded-md border border-border bg-card/50 px-3 py-2.5">
+    <div className={`${className} rounded-md border border-border bg-card/50 px-3 py-2.5`} data-testid="usage-trend">
       <div className="flex items-center justify-between gap-2">
         <span className="text-xs font-medium text-muted-foreground">{t('usageTrend')}</span>
         <div className="flex items-center gap-1">
@@ -194,15 +196,20 @@ export function UsageTrendChart({ scope, scopeId, limits }: UsageTrendChartProps
       </div>
       <p className="mt-1 text-[11px] text-muted-foreground">{t('usageTrendDesc')}</p>
 
-      <div className="mt-2 h-[150px]">
+      {/* 차트는 그릴 데이터가 있을 때만 150px — 빈 구간·조회 불가는 한 줄짜리 빈 상태로
+          (키 큰 빈 차트가 카드 자리를 차지하지 않게). */}
+      <div className={loading && !trend ? 'mt-2 h-[150px]' : trend?.available && hasData ? 'mt-2 h-[150px]' : 'mt-2'}>
         {loading && !trend ? (
           <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
             …
           </div>
-        ) : !trend?.available ? null : !hasData ? (
-          <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
+        ) : !trend?.available || !hasData ? (
+          <p
+            className="rounded-md border border-dashed border-border px-3 py-2 text-center text-xs text-muted-foreground"
+            data-testid="usage-trend-empty"
+          >
             {t('trendEmpty')}
-          </div>
+          </p>
         ) : (
           <ResponsiveContainer width="100%" height="100%">
             <AreaChart data={data} margin={{ top: 4, right: 4, left: -18, bottom: 0 }}>

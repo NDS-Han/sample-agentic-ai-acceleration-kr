@@ -39,6 +39,11 @@ export default async function UsersPage(props: UsersPageProps) {
     .then((v) => ({ ok: true as const, value: v }))
     .catch(() => ({ ok: false as const }));
   const orgTree = orgTreeResult.ok ? orgTreeResult.value : null;
+  // 마지막 Cognito 전체 동기화 — 감사 로그(COGNITO_SYNC_ALL, 30일 안). 실패·없음이면 캡션이 "기록 없음".
+  const lastSyncAt = await adminAPI
+    .get<{ items?: { timestamp: string }[] }>('/admin/audit/logs', { range: '30d', action: 'COGNITO_SYNC_ALL', limit: 1 })
+    .then((r) => r.items?.[0]?.timestamp ?? null)
+    .catch(() => null);
 
   // 퀵챗 화면 컨텍스트용 — 조직 구조의 "규모(개수)"만. 사용자 이메일/이름/리더명은
   // 절대 동봉하지 않는다(PII). 상세는 agent 가 query_db 로 직접 조회.
@@ -56,14 +61,9 @@ export default async function UsersPage(props: UsersPageProps) {
         }}
       />
 
-      <div className="flex items-center justify-between mb-6">
+      <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
         <h1 className="text-2xl font-bold">{t('title')}</h1>
-        <div className="flex items-center gap-3">
-          <CognitoSyncButton />
-          <p className="text-xs text-muted-foreground">
-            {t('cognitoNote')}
-          </p>
-        </div>
+        <CognitoSyncButton lastSyncAt={lastSyncAt} />
       </div>
       {fromRateLimits && (
         <div className="mb-4 rounded-apple border border-primary/30 bg-primary/5 px-4 py-3 text-sm">
