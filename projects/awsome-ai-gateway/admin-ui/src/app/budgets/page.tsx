@@ -12,6 +12,7 @@ import { alertLevelOf } from '@/lib/utils/alertLevel';
 import { mapToModelListItem, type APIModelItem } from '@/lib/utils/modelMapping';
 import { parseJWT, roleFromCookie, ADMIN_ROLE_COOKIE } from '@/lib/auth';
 import type { BudgetSummaryItem, ModelListItem, TeamBudgetAllocation } from '@/types/entities';
+import { BudgetScope } from '@/types/enums';
 import { BudgetSummaryTable } from '@/components/budgets/BudgetSummaryTable';
 import { TeamAllocationView } from '@/components/budgets/TeamAllocationView';
 import { ErrorState } from '@/components/common/ErrorState';
@@ -228,7 +229,15 @@ export default async function BudgetsPage(props: BudgetsPageProps) {
       )}
 
       {/* 웹 검색 한도(검색 수 기준, 예산과 별개) — 조직 기본·팀 공용 풀·사용자 개별 지정. */}
-      {isAdmin && <WebSearchQuotaSection initial={wsQuota} />}
+      {isAdmin && (
+        <WebSearchQuotaSection
+          initial={wsQuota}
+          // 위 예산 표와 같은 팀 표시 이름(백엔드 _team_display_name — NDS_Developers 등).
+          teamNames={Object.fromEntries(
+            items.filter((i) => i.target_type === BudgetScope.TEAM).map((i) => [i.target_id, i.target_name]),
+          )}
+        />
+      )}
     </div>
   );
 }
