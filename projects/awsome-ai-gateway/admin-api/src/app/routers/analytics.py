@@ -2,28 +2,26 @@
 
 from __future__ import annotations
 
-import json
+import asyncio
 import logging
 import uuid
 from typing import Literal
 
 from fastapi import APIRouter, Depends, Query, Request
-from fastapi.encoders import jsonable_encoder
 from fastapi.responses import Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import CurrentUser, require_admin, require_admin_or_team_leader
-from app.core.db import get_db_session
+from app.core.db import get_analytics_session
 from app.core.usage_filters import current_kst_period
-from app.models.auth import UserRole
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/admin/analytics", tags=["Analytics"])
 
-#: /admin/analytics 응답 캐시 TTL(초). dashboard 와 같은 값이지만 정책이 달라 별도로 둔다
-#: (여기는 ADMIN + scope='all' 에만 캐시한다 — 아래 get_analytics 주석 참조).
-_ANALYTICS_CACHE_TTL = 30
+def _scope_part(scope_ids) -> str:
+    """캐시 키의 범위 조각 — **해석된** 팀 집합. None = 전사(ADMIN 의 scope='all')."""
+    return "global" if scope_ids is None else "teams=" + ",".join(sorted(str(t) for t in scope_ids))
 
 
 def _analytics_cache_key(
@@ -33,53 +31,32 @@ def _analytics_cache_key(
     client: str | None,
     start_date: str | None = None,
     end_date: str | None = None,
+    scope_ids=None,
 ) -> str:
-    """전사(ADMIN, scope='all') 응답 전용 캐시 키.
+    """/admin/analytics 응답 캐시 키.
 
-    ⚠️ scope 를 키에 넣지 않는다 — 이 키는 `scope='all'` 인 경우에만 쓰이므로 상수다.
-    대신 **호출부가 role 을 검사**해 ADMIN 이 아니면 캐시를 아예 쓰지 않는다.
-    키에 scope 만 넣고 role 을 빼면 TEAM_LEADER 가 ADMIN 의 전사 응답을 받는다.
-    custom 날짜 구간은 키에 실어야 한다 — 빼면 월 질의와 구간 질의가 같은 키를 공유해
-    TTL 안에 서로의 응답을 돌려준다.
+    ⚠️ 격리 불변식: 키에 들어가는 범위는 요청 문자열(scope='all')이 아니라 **해석된 팀 집합**
+    (_resolve_scope 결과)이다. 같은 `scope='all'` 이 ADMIN 에겐 전사(→ 'global'),
+    TEAM_LEADER 에겐 본인이 리드하는 팀들(→ 'teams=a,b')로 갈리므로, 키가 다르고
+    TEAM_LEADER 가 ADMIN 의 전사 응답을 받는 경로가 없다. 응답은 (기간·group_by·client·팀
+    집합)만의 함수라 행위자 자체를 키에 넣을 필요는 없다 — 같은 팀을 리드하는 두 리더는 같은
+    응답을 공유해도 된다(같은 데이터를 볼 권한).
+    custom 날짜 구간도 키에 싣는다 — 빼면 월 질의와 구간 질의가 TTL 안에 서로의 응답을 돌려준다.
     """
     normalized_client = "all" if client in (None, "", "all") else client
     range_part = f"{start_date or ''}~{end_date or ''}"
-    return f"analytics:global:{period}:{range_part}:{group_by}:{normalized_client}"
+    return (f"analytics:v2:{_scope_part(scope_ids)}:{period}:{range_part}:{group_by}:"
+            f"{normalized_client}")
 
 
-async def _cache_get(request: Request, key: str):
-    """캐시 조회 — 실패는 miss(fail-open). 캐시는 정합성의 근거가 아니다."""
-    redis = getattr(request.app.state, "redis", None)
-    if redis is None:
-        return None
-    try:
-        raw = await redis.get(key)
-        if not raw:
-            return None
-        cached = json.loads(raw)
-        # ⚠️ dict 가 아니면 깨진 엔트리다(예: pydantic 모델을 json.dumps(..., default=str)
-        # 로 저장하면 str() repr 문자열이 들어간다). 문자열을 그대로 반환하면 UI 는
-        # data.cost_summary == undefined 를 받아 페이지가 깨진다 — miss 로 처리해 재계산.
-        return cached if isinstance(cached, dict) else None
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("analytics cache get failed key=%s err=%s", key, exc)
-        return None
+async def _cached(request: Request, key: str, rng, compute, *, keep_local: bool = False):
+    from app.core import read_cache
+    from app.services import usage_rollup as ur
 
-
-async def _cache_set(
-    request: Request, key: str, value: object, ttl: int = _ANALYTICS_CACHE_TTL
-) -> None:
-    redis = getattr(request.app.state, "redis", None)
-    if redis is None:
-        return
-    try:
-        # jsonable_encoder 로 pydantic 모델→dict 를 먼저 펼쳐야 한다.
-        # json.dumps(model, default=str) 는 모델 통째를 str() repr 로 저장해서
-        # 캐시 적중 시 응답이 JSON 객체가 아니라 문자열이 된다.
-        await redis.setex(key, ttl, json.dumps(jsonable_encoder(value)))
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("analytics cache set failed key=%s err=%s", key, exc)
-
+    return await read_cache.cached(
+        getattr(request.app.state, "redis", None), key, compute,
+        ttl=read_cache.ttl_for(rng.end, ur.reporting_today()), keep_local=keep_local,
+    )
 
 
 @router.get("")
@@ -96,48 +73,36 @@ async def get_analytics(
     start_date: str | None = Query(default=None, description="YYYY-MM-DD — custom 구간 시작(end_date 필요)"),
     end_date: str | None = Query(default=None, description="YYYY-MM-DD — custom 구간 끝(포함)"),
     user: CurrentUser = Depends(require_admin_or_team_leader),
-    session: AsyncSession = Depends(get_db_session),
+    session: AsyncSession = Depends(get_analytics_session),
 ):
-    from app.services.analytics_service import AnalyticsService
+    from app.services import usage_rollup as ur
+    from app.services.analytics_service import AnalyticsService, _resolve_scope
 
     svc: AnalyticsService = request.app.state.analytics_service
 
-    # ⚠️ 캐시는 **ADMIN + scope='all'** 에만 적용한다. 그 조합만이 행위자와 무관한
-    #    (전사) 응답이기 때문이다.
-    #
-    #    캐시를 걸면 안 되는 이유가 성능 트레이드오프가 아니라 **데이터 격리**다:
-    #    이 엔드포인트는 require_admin_or_team_leader 이고, 같은 `scope='all'` 이
-    #    ADMIN 에겐 GLOBAL·TEAM_LEADER 에겐 본인 팀으로 갈린다
-    #    (analytics_service.get_analytics 의 role 분기). 그래서 키에 행위자를 넣지 않고
-    #    `analytics:{period}:{group_by}:{scope}` 로 캐시하면, ADMIN 이 먼저 조회해
-    #    채워둔 **전사 비용·사용자·모델·추이**를 TTL 안에 동일 파라미터로 요청한
-    #    TEAM_LEADER 가 그대로 받는다 — ForbiddenError 격리와 위 fail-closed 불변식이
-    #    통째로 무력화된다.
-    #    ⇒ TEAM_LEADER 요청과 team: 범위 요청은 아예 캐시하지 않는다(cache_key=None).
-    #      role 을 키에 섞는 방법도 있지만, TEAM_LEADER 는 팀마다 응답이 달라
-    #      team_id 까지 넣어야 하고 그러면 적중률이 거의 0 이다 — 복잡도만 늘고 이득이 없다.
-    cache_key = None
-    if user.role == UserRole.ADMIN and scope == "all":
-        cache_key = _analytics_cache_key(
-            period=period, group_by=group_by, client=client,
-            start_date=start_date, end_date=end_date,
-        )
-        if (cached := await _cache_get(request, cache_key)) is not None:
-            return cached
-
-    result = await svc.get_analytics(
-        session,
-        period=period,
-        group_by=group_by,
-        scope=scope,
-        client=client,
-        actor=user,
-        start_date=start_date,
-        end_date=end_date,
+    # 범위 해석(권한 검사 포함 — TEAM_LEADER 의 남의 팀 요청은 여기서 403)이 캐시보다 먼저다.
+    # 캐시 키는 해석된 팀 집합을 담는다(_analytics_cache_key 주석의 격리 불변식).
+    rng = ur.resolve_range(period, start_date, end_date)
+    _, scope_ids = await _resolve_scope(user, scope, session)
+    cache_key = _analytics_cache_key(
+        period=period, group_by=group_by, client=client,
+        start_date=start_date, end_date=end_date, scope_ids=scope_ids,
     )
-    if cache_key is not None:
-        await _cache_set(request, cache_key, result)
-    return result
+
+    async def compute():
+        return await svc.get_analytics(
+            session,
+            period=period,
+            group_by=group_by,
+            scope=scope,
+            client=client,
+            actor=user,
+            start_date=start_date,
+            end_date=end_date,
+            scope_ids=scope_ids,
+        )
+
+    return await _cached(request, cache_key, rng, compute)
 
 
 @router.get("/models")
@@ -149,7 +114,7 @@ async def get_model_cost_analytics(
     start_date: str | None = Query(default=None, description="YYYY-MM-DD — custom 구간 시작(end_date 필요)"),
     end_date: str | None = Query(default=None, description="YYYY-MM-DD — custom 구간 끝(포함)"),
     user: CurrentUser = Depends(require_admin_or_team_leader),
-    session: AsyncSession = Depends(get_db_session),
+    session: AsyncSession = Depends(get_analytics_session),
 ):
     """모델별 상세 비용 — /analytics 페이지의 상세 섹션.
 
@@ -158,21 +123,30 @@ async def get_model_cost_analytics(
     괜찮았지만, 같은 화면에 붙은 이상 필터가 다르면 카드와 표의 숫자가 어긋난다.
     집계·격리 로직은 AnalyticsService.get_model_cost_detail 이 단일 소스다.
     """
-    from app.services.analytics_service import AnalyticsService
+    from app.services import usage_rollup as ur
+    from app.services.analytics_service import AnalyticsService, _resolve_scope
 
     if not period:
         period = current_kst_period()  # KST 월(§59) — pod TZ(UTC) 아님
 
     svc: AnalyticsService = request.app.state.analytics_service
-    return await svc.get_model_cost_detail(
-        session,
-        period=period,
-        actor=user,
-        scope=scope,
-        client=client,
-        start_date=start_date,
-        end_date=end_date,
-    )
+    rng = ur.resolve_range(period, start_date, end_date)
+    _, scope_ids = await _resolve_scope(user, scope, session)  # 권한 검사가 캐시보다 먼저
+    key = _analytics_cache_key(period=period, group_by="models-detail", client=client,
+                               start_date=start_date, end_date=end_date, scope_ids=scope_ids)
+
+    async def compute():
+        return await svc.get_model_cost_detail(
+            session,
+            period=period,
+            actor=user,
+            scope=scope,
+            client=client,
+            start_date=start_date,
+            end_date=end_date,
+        )
+
+    return await _cached(request, key, rng, compute)
 
 
 @router.get("/export")
@@ -189,7 +163,7 @@ async def export_analytics(
         default=None, description="user_model = 사용자 × 모델 행(CSV 전용)"
     ),
     user: CurrentUser = Depends(require_admin_or_team_leader),
-    session: AsyncSession = Depends(get_db_session),
+    session: AsyncSession = Depends(get_analytics_session),
 ):
     if view == "user_model":
         from app.services import user_model_usage as umu
@@ -241,27 +215,28 @@ async def get_usage_by_user(
     period: str = Query(description="YYYY-MM format"),
     date: str = Query(description="YYYY-MM-DD format (within period month)"),
     admin: CurrentUser = Depends(require_admin),
-    session: AsyncSession = Depends(get_db_session),
+    session: AsyncSession = Depends(get_analytics_session),
 ):
     """User 단위 누적 (period 1일 ~ date, KST, SUCCESS only). Dashboard 요약 테이블용."""
-    from app.services.analytics_service import AnalyticsService
+    from app.services import usage_rollup as ur
+    from app.services.analytics_service import AnalyticsService, _validate_period_date
 
+    _validate_period_date(period, date)
     svc: AnalyticsService = request.app.state.analytics_service
-    return await svc.get_usage_by_user(session, period=period, date=date)
+    rng = ur.month_range(period)
+
+    async def compute():
+        return await svc.get_usage_by_user(session, period=period, date=date)
+
+    return await _cached(request, f"analytics:v2:usage-by-user:{period}:{date}", rng, compute)
 
 
 # ── 사용자 × 모델 토큰 사용량 (By User 모드) ───────────────────────────────────
 
-#: 사용자 × 모델 스코프 결과 캐시 TTL(초). 스코프 **전체** 결과를 캐시하므로 정렬·페이지·
-#: 검색은 캐시에서 파생된다(질의 1회 ≈ 0.6s @ 5M행/월 벤치, 이후 1분간 메모리 연산).
-_USER_MODELS_CACHE_TTL = 60
-
-
-def _user_models_cache_key(*, scope: str, start: str, end: str, client: str | None) -> str:
-    """키 = 범위 + 앱 필터 + 스코프. ADMIN·scope='all' 에만 쓰인다(아래 호출부 참조) —
-    get_analytics 와 같은 격리 규칙: TEAM_LEADER 와 team: 범위는 캐시하지 않는다."""
+def _user_models_cache_key(*, scope_ids, start: str, end: str, client: str | None) -> str:
+    """키 = 범위 + 앱 필터 + **해석된** 팀 집합(_analytics_cache_key 와 같은 격리 불변식)."""
     normalized_client = "all" if client in (None, "", "all") else client
-    return f"analytics:user-models:v1:{scope}:{start}~{end}:{normalized_client}"
+    return f"analytics:user-models:v2:{_scope_part(scope_ids)}:{start}~{end}:{normalized_client}"
 
 
 @router.get("/user-models")
@@ -279,12 +254,16 @@ async def get_user_models(
     page_size: int = Query(10, ge=1, le=50),
     q: str | None = Query(default=None, max_length=100, description="이름·이메일·팀 부분 일치"),
     user: CurrentUser = Depends(require_admin_or_team_leader),
-    session: AsyncSession = Depends(get_db_session),
+    session: AsyncSession = Depends(get_analytics_session),
 ):
     """사용자 × 모델 표 — 상위 5 모델(총 토큰) 열 + Other + 행 합계.
 
     숫자는 Total Tokens KPI 와 같은 정의(SUCCESS·리포팅 tz 일자·앱 필터·팀 스코프)다.
     기간 검증은 /admin/analytics 와 같다(366일 초과 422, 한쪽만 400).
+
+    스코프 **전체** 결과(6,000 사용자 ≈ 3 MB)를 캐시하고 정렬·페이지·검색은 거기서 파생한다.
+    파생(정렬·검색·페이지)과 JSON (역)직렬화는 이벤트 루프 밖(스레드)에서 하고, 파싱된 결과는
+    프로세스 로컬 LRU 에 TTL 동안 둔다 — 페이지를 넘길 때마다 3 MB 를 다시 파싱하지 않는다.
     """
     from app.services import user_model_usage as umu
     from app.services.analytics_service import _resolve_scope
@@ -299,20 +278,17 @@ async def get_user_models(
             "sort must be total|input|output|cache|cost|name|other|model:<alias>"
         )
     _, scope_ids = await _resolve_scope(user, scope, session)
+    cache_key = _user_models_cache_key(
+        scope_ids=scope_ids, start=rng.start.isoformat(), end=rng.end.isoformat(), client=client
+    )
 
-    cache_key = None
-    payload = None
-    if user.role == UserRole.ADMIN and scope == "all":
-        cache_key = _user_models_cache_key(
-            scope=scope, start=rng.start.isoformat(), end=rng.end.isoformat(), client=client
-        )
-        payload = await _cache_get(request, cache_key)
-    if payload is None:
-        payload = await umu.fetch_scope_payload(session, rng, scope_ids, client)
-        if cache_key is not None:
-            await _cache_set(request, cache_key, payload, ttl=_USER_MODELS_CACHE_TTL)
-    return umu.page_from_payload(
-        payload, sort=sort, direction=dir, page=page, page_size=page_size, q=q
+    async def compute():
+        return await umu.fetch_scope_payload(session, rng, scope_ids, client)
+
+    payload = await _cached(request, cache_key, rng, compute, keep_local=True)
+    return await asyncio.to_thread(
+        umu.page_from_payload, payload, sort=sort, direction=dir, page=page,
+        page_size=page_size, q=q,
     )
 
 
@@ -325,7 +301,7 @@ async def get_user_model_detail(
     scope: str = Query("all", description="all | team:{uuid}"),
     client: str | None = Query(default=None),
     user: CurrentUser = Depends(require_admin_or_team_leader),
-    session: AsyncSession = Depends(get_db_session),
+    session: AsyncSession = Depends(get_analytics_session),
 ):
     """한 사용자의 전 모델 상세(요청 수·4 토큰 버킷·합계·비용·평균 지연). 캐시하지 않는다."""
     from app.services import user_model_usage as umu

@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import CurrentUser, require_admin
 from app.core.config import get_settings
-from app.core.db import get_db_session
+from app.core.db import get_analytics_session, get_db_session
 from app.models.usage import GitEvent, GitEventType, ProductivityEvent, ProductivityEventType
 from app.routers.internal import _require_internal_token
 
@@ -246,7 +246,7 @@ async def get_productivity_analytics(
     request: Request,
     period: str | None = None,
     admin: CurrentUser = Depends(require_admin),
-    session: AsyncSession = Depends(get_db_session),
+    session: AsyncSession = Depends(get_analytics_session),
 ):
 
     # 기본 period 는 **KST 기준 현재월**. date.today() 는 프로세스 로컬 TZ(pod=UTC)를
@@ -339,42 +339,36 @@ async def get_productivity_analytics(
     union_stmt = select(func.count()).select_from(dev_prod.union(dev_git).subquery())
     active_devs = (await session.execute(union_stmt)).scalar_one() or 0
 
-    # Cost data for ROI calculation — §59 비용 집계 표준(SUCCESS + KST).
-    from app.models.usage import UsageLog
-    from app.core.usage_filters import cost_period_filter
-    total_cost_stmt = (
-        select(func.coalesce(func.sum(UsageLog.cost_usd), 0))
-        .where(cost_period_filter(period))
-    )
-    total_cost = float((await session.execute(total_cost_stmt)).scalar_one() or 0)
+    # Cost data for ROI calculation — §59 비용 집계 표준(SUCCESS + 리포팅 tz 월), 하이브리드 롤업.
     # R25-N13/R2-N8 — "산출물당 비용" 의 분자가 전사 비용이고 분모는 계측 사용자의
     # 산출물이면 비계측 비용이 얹혀 부풀려진다. 지표별로 분모와 같은 코호트의
     # 비용을 분자로 쓴다(라인→productivity 이벤트 사용자, 커밋→git 이벤트 사용자).
-    prod_cohort_cost_stmt = (
-        select(func.coalesce(func.sum(UsageLog.cost_usd), 0))
-        .where(
-            cost_period_filter(period),
-            UsageLog.user_id.in_(
-                select(ProductivityEvent.user_id).where(
-                    kst_period_range_filter(ProductivityEvent.created_at, period)
-                )
-            ),
-        )
+    from app.services import usage_reads as reads
+    from app.services import usage_rollup as ur
+
+    rng = ur.month_range(period)
+    total_cost = float(await reads.success_cost(session, ur.RollupScope.of(rng)))
+    prod_users = [
+        r[0] for r in (await session.execute(
+            select(ProductivityEvent.user_id).distinct()
+            .where(kst_period_range_filter(ProductivityEvent.created_at, period))
+        )).all() if r[0] is not None
+    ]
+    git_users = [
+        r[0] for r in (await session.execute(
+            select(GitEvent.user_id).distinct()
+            .where(kst_period_range_filter(GitEvent.created_at, period),
+                   GitEvent.user_id.isnot(None))
+        )).all()
+    ]
+    prod_cohort_cost = (
+        float(await reads.success_cost(session, ur.RollupScope.of(rng, users=prod_users)))
+        if prod_users else 0.0
     )
-    git_cohort_cost_stmt = (
-        select(func.coalesce(func.sum(UsageLog.cost_usd), 0))
-        .where(
-            cost_period_filter(period),
-            UsageLog.user_id.in_(
-                select(GitEvent.user_id).where(
-                    kst_period_range_filter(GitEvent.created_at, period),
-                    GitEvent.user_id.isnot(None),
-                )
-            ),
-        )
+    git_cohort_cost = (
+        float(await reads.success_cost(session, ur.RollupScope.of(rng, users=git_users)))
+        if git_users else 0.0
     )
-    prod_cohort_cost = float((await session.execute(prod_cohort_cost_stmt)).scalar_one() or 0)
-    git_cohort_cost = float((await session.execute(git_cohort_cost_stmt)).scalar_one() or 0)
 
     lines_gen = int(prod_row.total_lines_generated or 0)
     lines_acc = int(prod_row.total_lines_accepted or 0)

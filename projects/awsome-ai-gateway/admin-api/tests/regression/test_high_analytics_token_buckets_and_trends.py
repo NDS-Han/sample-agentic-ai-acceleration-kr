@@ -39,10 +39,11 @@ BILLED_BUCKETS = {
 # 토큰을 합산하는 모듈들 (dashboard.py 는 기준 구현으로 함께 검사).
 # /admin/analytics/models 집계는 라우터 → services/analytics_service.py 로 이동했다
 # (라우터는 위임만 한다) — 가드도 같은 파일을 봐야 한다.
+# wave 2: Dashboard/Analytics 합계는 하이브리드 롤업 읽기(services/usage_reads.Totals)로 옮겼다.
 TOKEN_SUM_MODULES = [
     "repositories/analytics_repository.py",
     "services/analytics_service.py",
-    "routers/dashboard.py",
+    "services/usage_reads.py",
     "routers/my.py",
     "routers/monitoring.py",
 ]
@@ -171,22 +172,35 @@ def test_analytics_response_fields_are_explicitly_assigned(field: str):
 
 @pytest.mark.unit
 def test_trend_aggregation_is_scope_isolated():
-    """trends 집계 WHERE 에 scope_id 격리가 있어야 한다(TEAM_LEADER 누출 방지)."""
+    """get_analytics 의 모든 하이브리드 읽기 범위가 scope_ids 로 팀을 좁혀야 한다(TEAM_LEADER 누출 방지).
+
+    예외는 seed 잔차의 뺄 값(월 실사용, 사용자 전체 — budget_usages 와 단위를 맞춘다)뿐이다.
+    trends(by_day=True) 범위가 반드시 있어야 한다 — 없으면 가드가 공허하다.
+    """
     fn = _get_analytics_body()
-    assigns = [
-        n
-        for n in ast.walk(fn)
-        if isinstance(n, ast.Assign)
-        and any(isinstance(t, ast.Name) and t.id == "trend_where" for t in n.targets)
+    calls = [
+        n for n in ast.walk(fn)
+        if isinstance(n, ast.Call) and ast.unparse(n.func).endswith("RollupScope.of")
     ]
-    assert assigns, "trends 집계에 trend_where 가 없다 — 필터 구성을 확인"
-    src = ast.unparse(fn)
-    idx = src.index("trend_where")
-    window = src[idx : idx + 600]
-    assert "scope_id" in window and "team_id" in window, (
-        "trends 집계가 scope_id 로 팀을 좁히지 않는다 — TEAM_LEADER 가 전사 일별 "
-        "비용을 받아가는 권한 누출"
-    )
+    assert calls, "get_analytics 가 하이브리드 범위를 만들지 않는다"
+    by_day = [c for c in calls if any(k.arg == "by_day" for k in c.keywords)]
+    assert by_day, "trends 범위(by_day=True)가 없다"
+    for c in calls:
+        src = ast.unparse(c)
+        if "month_range(period)" in src:
+            continue  # seed 잔차 뺄 값 — 의도적 무스코프(결과가 호출자에게 나가지 않는다)
+        kw = {k.arg: ast.unparse(k.value) for k in c.keywords}
+        assert kw.get("teams") == "scope_ids", (
+            f"하이브리드 범위가 scope_ids 로 팀을 좁히지 않는다 — TEAM_LEADER 누출: {src}"
+        )
+
+
+@pytest.mark.unit
+def test_hybrid_totals_sql_covers_all_billed_buckets():
+    from app.services import usage_reads as reads
+
+    for col in ("sum(i)", "sum(o)", "sum(cw)", "sum(cr)"):
+        assert col in reads._TOTALS_SELECT, col
 
 
 @pytest.mark.unit

@@ -7,20 +7,21 @@
   - 요청당 상한 = USER ?? TEAM ?? ORG ?? 기본(WEB_SEARCH_MAX_SEARCHES_PER_REQUEST, 5).
 
 사용량은 ``usage_logs.web_search_count`` 의 리포팅 TZ 월 합계(상태 무관 — 게이트웨이 카운터와
-같은 정의). 워커 적재 지연(수 초)만큼 게이트웨이의 Redis 카운터보다 늦을 수 있다.
+같은 정의)를 하이브리드 롤업(services/usage_rollup)으로 읽는다. 워커 적재 지연(수 초)만큼
+게이트웨이의 Redis 카운터보다 늦을 수 있다.
 """
 from __future__ import annotations
 
 import uuid
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
-from app.core.usage_filters import cost_period_filter
 from app.models.auth import Department, Team, User
 from app.models.budget import WebSearchPolicy
-from app.models.usage import UsageLog
+from app.services import usage_reads as reads
+from app.services import usage_rollup as ur
 from app.schemas.web_search_quota import (
     WebSearchPolicyRow,
     WebSearchQuotaEffective,
@@ -75,21 +76,21 @@ class WebSearchQuotaService:
         rows = (await self.session.execute(select(WebSearchPolicy).where(or_(*conds)))).scalars()
         return {r.scope: r for r in rows}
 
-    async def _sum(self, column, scope_id: uuid.UUID, period: str) -> int:
-        stmt = select(func.coalesce(func.sum(UsageLog.web_search_count), 0)).where(
-            column == scope_id, cost_period_filter(period, success_only=False)
-        )
-        return int((await self.session.execute(stmt)).scalar() or 0)
+    async def _sum(self, column: str, scope_id: uuid.UUID, period: str) -> int:
+        rng = ur.month_range(period)
+        scope = (ur.RollupScope.of(rng, users=[scope_id]) if column == "user"
+                 else ur.RollupScope.of(rng, teams=[scope_id]))
+        return await reads.ws_sum(self.session, scope)
 
     async def effective_for_user(self, user_id: uuid.UUID, team_id: uuid.UUID | None,
                                  period: str) -> WebSearchQuotaEffective:
         eff = resolve(await self._rows(user_id, team_id), include_user=True, period=period,
                       default_cap=default_per_request_cap())
-        eff.used = await self._sum(UsageLog.user_id, user_id, period)
+        eff.used = await self._sum("user", user_id, period)
         if eff.monthly_limit is not None:
             eff.remaining = max(0, eff.monthly_limit - eff.used)
         if team_id is not None:
-            eff.team_used = await self._sum(UsageLog.team_id, team_id, period)
+            eff.team_used = await self._sum("team", team_id, period)
             if eff.team_pool_limit is not None:
                 eff.team_remaining = max(0, eff.team_pool_limit - eff.team_used)
         else:
@@ -100,7 +101,7 @@ class WebSearchQuotaService:
                                  ) -> WebSearchQuotaEffective:
         eff = resolve(await self._rows(None, team_id), include_user=False, period=period,
                       default_cap=default_per_request_cap())
-        eff.team_used = await self._sum(UsageLog.team_id, team_id, period)
+        eff.team_used = await self._sum("team", team_id, period)
         if eff.team_pool_limit is not None:
             eff.team_remaining = max(0, eff.team_pool_limit - eff.team_used)
         return eff
@@ -110,14 +111,8 @@ class WebSearchQuotaService:
         org = next((p for p in policies if p.scope == ORG), None)
         team_rows = {p.scope_id: p for p in policies if p.scope == TEAM}
         user_rows = {p.scope_id: p for p in policies if p.scope == USER}
-        period_f = cost_period_filter(period, success_only=False)
-
-        team_used = dict(
-            (await self.session.execute(
-                select(UsageLog.team_id, func.coalesce(func.sum(UsageLog.web_search_count), 0))
-                .where(period_f).group_by(UsageLog.team_id)
-            )).all()
-        )
+        rng = ur.month_range(period)
+        team_used = await reads.ws_by_team(self.session, ur.RollupScope.of(rng))
         org_used = int(sum(int(v or 0) for v in team_used.values()))
         teams = (await self.session.execute(
             select(Team.id, Team.name, Department.name)
@@ -137,10 +132,7 @@ class WebSearchQuotaService:
         user_items: list[WebSearchQuotaUserItem] = []
         if user_rows:
             ids = list(user_rows)
-            used = dict((await self.session.execute(
-                select(UsageLog.user_id, func.coalesce(func.sum(UsageLog.web_search_count), 0))
-                .where(period_f, UsageLog.user_id.in_(ids)).group_by(UsageLog.user_id)
-            )).all())
+            used = await reads.ws_by_user(self.session, ur.RollupScope.of(rng, users=ids))
             users = (await self.session.execute(
                 select(User.id, User.email, User.display_name, Team.name)
                 .outerjoin(Team, Team.id == User.team_id)

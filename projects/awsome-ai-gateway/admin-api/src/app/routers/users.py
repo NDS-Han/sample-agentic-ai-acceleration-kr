@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.audit import audit_logger
 from app.core.auth import CurrentUser, require_admin, require_human_admin
-from app.core.db import get_db_session
+from app.core.db import get_analytics_session, get_db_session
 from app.core.exceptions import ForbiddenError
 from app.repositories._cursor import encode_cursor
 from app.services.user_allowed_client_service import UserAllowedClientService
@@ -217,22 +217,21 @@ async def get_users_activity(
     user_id: list[uuid.UUID] = Query(..., min_length=1),
     period: str | None = Query(default=None, pattern=r"^\d{4}-(0[1-9]|1[0-2])$"),
     admin: CurrentUser = Depends(require_admin),
-    session: AsyncSession = Depends(get_db_session),
+    session: AsyncSession = Depends(get_analytics_session),
 ):
     """사용자별 마지막 사용 시각 + 그 기간 웹 검색 수 — /users 팀 구성원 표·사용자 상세용.
 
     - ``last_used_at``: 전 기간 마지막 요청(상태 무관). (user_id, requested_at DESC)
       인덱스로 사용자당 1행만 읽는다(LIMIT 1 서브쿼리) — 사용자 전체 행을 그룹 집계하지 않는다.
     - ``web_searches``: 리포팅 TZ 월(``period``, 기본 이번 달)의 web_search_count 합.
-      상태 무관 — 웹 검색 한도(web_search_quota)와 같은 모집단.
+      상태 무관 — 웹 검색 한도(web_search_quota)와 같은 모집단. 하이브리드 롤업으로 읽는다.
     - 한 번에 최대 200명. 요청한 id 마다 정확히 한 행(사용 기록이 없으면 None / 0).
 
     ⚠️ ``/users/{user_id}/...`` 보다 먼저 선언되어야 한다(``/users/search`` 와 같은 이유).
     """
-    from sqlalchemy import func, select
-
-    from app.core.usage_filters import cost_period_filter, current_kst_period
-    from app.models.usage import UsageLog
+    from app.core.usage_filters import current_kst_period
+    from app.services import usage_reads as reads
+    from app.services import usage_rollup as ur
 
     ids = list(dict.fromkeys(user_id))
     if len(ids) > USER_ACTIVITY_MAX_IDS:
@@ -243,15 +242,8 @@ async def get_users_activity(
         row[0]: row[1]
         for row in (await session.execute(_LAST_USED_SQL, {"ids": ids})).all()
     }
-    ws = dict(
-        (
-            await session.execute(
-                select(UsageLog.user_id, func.coalesce(func.sum(UsageLog.web_search_count), 0))
-                .where(UsageLog.user_id.in_(ids), cost_period_filter(p, success_only=False))
-                .group_by(UsageLog.user_id)
-            )
-        ).all()
-    )
+    # 웹 검색 수 — 하이브리드 롤업 읽기(services/usage_rollup), 상태 무관(웹 검색 한도와 같은 모집단).
+    ws = await reads.ws_by_user(session, ur.RollupScope.of(ur.month_range(p), users=ids))
     return UserActivityResponse(
         period=p,
         items=[

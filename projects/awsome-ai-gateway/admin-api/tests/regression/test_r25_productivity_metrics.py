@@ -28,15 +28,26 @@ class _Row:
 
 
 class _Result:
-    def __init__(self, row=None, scalar=0):
+    def __init__(self, row=None, scalar=0, rows=None):
         self._row = row
         self._scalar = scalar
+        self._rows = rows or []
 
     def one(self):
         return self._row
 
     def scalar_one(self):
         return self._scalar
+
+    def scalar(self):
+        return self._scalar
+
+    def all(self):
+        return self._rows
+
+
+U_PROD = "00000000-0000-0000-0000-00000000000a"
+U_GIT = "00000000-0000-0000-0000-00000000000b"
 
 
 @pytest.fixture
@@ -49,17 +60,21 @@ def mock_session():
       3 pr_opened      → .scalar_one()
       4 pr_merged      → .scalar_one()
       5 active_devs    → .scalar_one()
-      6 total_cost     → .scalar_one()
-      7 prod_cohort    → .scalar_one()
-      8 git_cohort     → .scalar_one()
+      6 total_cost     → .scalar()   (하이브리드 롤업 읽기, 전 사용자)
+      7 prod 코호트 사용자 → .all()
+      8 git 코호트 사용자  → .all()
+      9 prod_cohort    → .scalar()   (하이브리드, users=prod 코호트) — 코호트가 비면 생략
+     10 git_cohort     → .scalar()   (하이브리드, users=git 코호트) — 코호트가 비면 생략
     """
 
     class _QueueSession:
         def __init__(self, results):
             self._queue = list(results)
+            self.params: list[dict] = []
 
-        async def execute(self, _stmt):
+        async def execute(self, _stmt, params=None):
             assert self._queue, "예상보다 많은 execute 호출"
+            self.params.append(params or {})
             return self._queue.pop(0)
 
     return _QueueSession
@@ -98,8 +113,9 @@ async def test_acceptance_rate_is_line_based_not_event_based(mock_session):
             _Result(scalar=0),  # pr_merged
             _Result(scalar=1),  # active_devs
             _Result(scalar=100.0),  # total_cost
+            _Result(rows=[(U_PROD,)]),  # prod 코호트
+            _Result(rows=[]),  # git 코호트 없음 → git 비용 질의 생략
             _Result(scalar=10.0),  # prod_cohort_cost
-            _Result(scalar=0.0),  # git_cohort_cost
         ]
     )
     out = await _call(session)
@@ -116,12 +132,18 @@ async def test_cost_per_line_uses_productivity_cohort_cost(mock_session):
             _Result(scalar=0),
             _Result(scalar=1),
             _Result(scalar=1000.0),  # total_cost — 쓰이면 안 됨
+            _Result(rows=[(U_PROD,)]),
+            _Result(rows=[(U_GIT,)]),
             _Result(scalar=10.0),  # prod_cohort_cost
             _Result(scalar=0.0),
         ]
     )
     out = await _call(session)
     assert out["roi"]["cost_per_generated_line"] == pytest.approx(0.1)
+    # 코호트 비용 질의는 하이브리드 읽기를 그 코호트 사용자로 좁힌다.
+    assert "r_users" not in session.params[5]
+    assert session.params[8]["r_users"] == [U_PROD]
+    assert session.params[9]["r_users"] == [U_GIT]
 
 
 async def test_cost_per_commit_uses_git_cohort_and_attributed_commits(mock_session):
@@ -134,7 +156,8 @@ async def test_cost_per_commit_uses_git_cohort_and_attributed_commits(mock_sessi
             _Result(scalar=0),
             _Result(scalar=3),
             _Result(scalar=0.0),
-            _Result(scalar=0.0),
+            _Result(rows=[]),
+            _Result(rows=[(U_GIT,)]),
             _Result(scalar=20.0),  # git_cohort_cost
         ]
     )

@@ -243,6 +243,9 @@ async def lifespan(app: FastAPI):
     await audit_logger.shutdown(timeout=10.0)
     logger.info("audit_logger.stopped", queue_size=audit_logger.queue_size, dropped=audit_logger.dropped_count)
     await engine.dispose()
+    from app.core.db import analytics_engine
+
+    await analytics_engine.dispose()
     logger.info("app.shutdown")
 
 

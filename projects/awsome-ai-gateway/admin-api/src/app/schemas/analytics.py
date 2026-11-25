@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from decimal import Decimal
 
 from pydantic import BaseModel, Field
@@ -112,6 +113,10 @@ class AnalyticsResponse(BaseModel):
     # AgentCore 웹 검색 — **모니터링 전용**, cost_summary.total_cost_usd(모델 비용)에 포함되지
     # 않는다. 같은 기간·scope·client 격리, status 무관(실패 요청의 검색도 과금됨).
     web_search: WebSearchUsage = Field(default_factory=WebSearchUsage)
+    # 하이브리드 롤업 읽기 메타(services/usage_rollup) — 사용한 롤업 중 가장 늦은 집계 시각
+    # (None = 롤업을 쓰지 않음, 전부 실시간)과 raw 로 읽은 과거 날짜(롤업 지연·실패).
+    data_as_of: datetime | None = None
+    delayed_days: list[str] = []
 
 
 class UsageByUserItem(BaseModel):
@@ -145,3 +150,5 @@ class UsageByUserResponse(BaseModel):
     period: str
     date: str
     items: list[UsageByUserItem]
+    data_as_of: datetime | None = None
+    delayed_days: list[str] = []

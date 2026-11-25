@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.audit import audit_logger
 from app.core.auth import CurrentUser, require_admin, require_human_admin
-from app.core.db import get_db_session
+from app.core.db import get_analytics_session, get_db_session
 from app.core.exceptions import NotFoundError
 from app.core.usage_filters import current_kst_period
 from app.models.auth import Team, User
@@ -99,7 +99,7 @@ async def _delete(request: Request, session: AsyncSession, admin: CurrentUser, s
 async def get_overview(
     period: str = Query(default=None, description="YYYY-MM (리포팅 TZ). 미지정 시 현재 월"),
     _admin: CurrentUser = Depends(require_admin),
-    session: AsyncSession = Depends(get_db_session),
+    session: AsyncSession = Depends(get_analytics_session),
 ):
     """조직 기본·팀 공용 풀(전 팀)·개인 덮어쓰기 + 이번 달 사용량."""
     return await WebSearchQuotaService(session).overview(period or current_kst_period())
@@ -109,7 +109,7 @@ async def get_overview(
 async def get_user_effective(
     user_id: uuid.UUID,
     _admin: CurrentUser = Depends(require_admin),
-    session: AsyncSession = Depends(get_db_session),
+    session: AsyncSession = Depends(get_analytics_session),
 ):
     user = (await session.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
     if user is None:
@@ -122,7 +122,7 @@ async def get_user_effective(
 async def get_team_effective(
     team_id: uuid.UUID,
     _admin: CurrentUser = Depends(require_admin),
-    session: AsyncSession = Depends(get_db_session),
+    session: AsyncSession = Depends(get_analytics_session),
 ):
     await _require_target(session, TEAM, team_id)
     return await WebSearchQuotaService(session).effective_for_team(team_id, current_kst_period())

@@ -111,7 +111,7 @@ async def _snapshot(with_web_search: bool) -> dict:
             req = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(redis=None)))
             snap = {
                 "kpi": await dashboard_kpi(req, period, None, admin, session),
-                "share": await client_share(period, admin, session),
+                "share": await client_share(req, period, admin, session),
                 # 웹 검색 섹션 — 전부 웹 검색 값이라 A/B 비교에서는 뺀다(아래 _strip).
                 "web_search_section": await dashboard_web_search(req, period, None, admin, session),
                 "mon": await monitoring_overview(req, admin, session),

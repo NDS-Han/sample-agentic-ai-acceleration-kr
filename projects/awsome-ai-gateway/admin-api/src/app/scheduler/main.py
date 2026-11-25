@@ -253,6 +253,7 @@ def main() -> None:
     settings = get_settings()
     logger.info(
         "scheduler.starting",
+        roi_enabled=settings.ROI_AGGREGATION_ENABLED,
         roi_cron=settings.ROI_AGGREGATION_CRON,
         key_expiry_cron=settings.KEY_EXPIRY_CRON,
         key_purge_cron=settings.KEY_PURGE_CRON,
@@ -269,13 +270,16 @@ def main() -> None:
     # (cost-recorder 의 AsyncIOScheduler 와 동일 규약).
     tz = settings.REPORTING_TIMEZONE
     scheduler = AsyncIOScheduler(event_loop=loop, timezone=tz)
-    scheduler.add_job(
-        run_aggregation,
-        CronTrigger.from_crontab(settings.ROI_AGGREGATION_CRON, timezone=tz),
-        id="roi_aggregation",
-        replace_existing=True,
-        **_JOB_DEFAULTS,
-    )
+    # ROI 집계(usage.roi_aggregations) 는 읽는 곳이 없다 — Analytics ROI 카드는 하이브리드 롤업에서
+    # 직접 계산한다. 기본 OFF(ROI_AGGREGATION_ENABLED). 코드·테이블은 남겨 두고 켜면 종전대로 돈다.
+    if settings.ROI_AGGREGATION_ENABLED:
+        scheduler.add_job(
+            run_aggregation,
+            CronTrigger.from_crontab(settings.ROI_AGGREGATION_CRON, timezone=tz),
+            id="roi_aggregation",
+            replace_existing=True,
+            **_JOB_DEFAULTS,
+        )
     scheduler.add_job(
         run_key_expiry,
         CronTrigger.from_crontab(settings.KEY_EXPIRY_CRON, timezone=tz),

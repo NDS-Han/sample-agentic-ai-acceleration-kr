@@ -137,7 +137,7 @@ async def _seed(dsn: str) -> None:
         await conn.execute(_DAILY_SQL, TZ, TODAY)
         await conn.execute(
             "INSERT INTO usage.daily_aggregate_days (date,tz,grain_version,dirty,aggregated_at) "
-            "SELECT g::date, $1, 2, false, now() - interval '2 hours' "
+            "SELECT g::date, $1, 3, false, now() - interval '2 hours' "
             "FROM generate_series('2026-09-01'::date, $2::date - 1, interval '1 day') g",
             TZ, TODAY)
         # 월 누적: 9월(이후 9-15 가 재집계돼 stale), 10월(정상), 11월 MTD(11-10 dirty 로 무효)
@@ -146,7 +146,8 @@ async def _seed(dsn: str) -> None:
                            (date(2026, 11, 1), date(2026, 11, 23))):
             await conn.execute(_MONTH_SQL, p, through)
             await conn.execute(
-                "INSERT INTO usage.monthly_aggregate_months VALUES ($1,$2,$3,now()-interval '1 hour')",
+                "INSERT INTO usage.monthly_aggregate_months (period,tz,covered_through,built_at,"
+                "grain_version) VALUES ($1,$2,$3,now()-interval '1 hour',3)",
                 p, TZ, through)
         # ── 신뢰할 수 없는 소스를 오염시킨다 — 하이브리드가 이것들을 읽으면 raw 와 달라진다.
         # 11-10: dirty (늦은 로그) — 일별 행 오염
@@ -172,7 +173,8 @@ async def _seed(dsn: str) -> None:
                            "WHERE period='2026-09-01'")
         # 오늘(11-24)의 롤업이 있어도 쓰이면 안 된다 — 오늘은 항상 raw.
         await conn.execute(
-            "INSERT INTO usage.daily_aggregate_days VALUES ($1,$2,2,false,now())", TODAY, TZ)
+            "INSERT INTO usage.daily_aggregate_days (date,tz,grain_version,dirty,aggregated_at) "
+            "VALUES ($1,$2,3,false,now())", TODAY, TZ)
         await conn.execute(
             "INSERT INTO usage.daily_aggregates (date,user_id,team_id,dept_id,model_alias,client,"
             "status,input_tokens,total_tokens) VALUES ($1,$2,$3,$4,'um-m0','claude-code',"
@@ -210,8 +212,11 @@ async def session(owned_dsn, monkeypatch):
 
     from app.services import user_model_usage as umu
 
+    from app.services import usage_rollup as ur
+
     monkeypatch.setattr(umu, "reporting_timezone", lambda: TZ)
     monkeypatch.setattr(umu, "_today", lambda tz: TODAY)
+    monkeypatch.setattr(ur, "reporting_timezone", lambda: TZ)
     engine = create_async_engine(owned_dsn)
     async with async_sessionmaker(engine, expire_on_commit=False)() as s:
         yield s
@@ -264,10 +269,12 @@ async def _hybrid(session, rng, *, teams=None, client=None):
 async def _kinds(session, rng) -> dict[date, str]:
     from sqlalchemy import text
 
+    from app.services import usage_rollup as ur
     from app.services import user_model_usage as umu
 
-    sql = f"WITH {umu._source_ctes(teams=False, client=False, user=False)} SELECT d, kind FROM src"
-    return {r.d: r.kind for r in (await session.execute(text(sql), umu._params(rng, None, None))).all()}
+    sc = umu._scope(rng, None, None)
+    sql = f"WITH {ur._class_ctes(False).lstrip()} SELECT d, kind FROM r_src"
+    return {r.d: r.kind for r in (await session.execute(text(sql), ur.bind(sc))).all()}
 
 
 @pytest.mark.parametrize("period,start,end", [
@@ -293,10 +300,11 @@ async def test_source_routing_uses_month_layer_only_when_trusted(session):
     kinds = await _kinds(session, umu.resolve_range(None, "2026-09-01", "2026-11-24"))
     assert {kinds[date(2026, 10, d)] for d in range(1, 32)} == {"m"}   # 10월 통째
     assert {kinds[date(2026, 9, d)] for d in range(1, 31)} == {"d"}    # stale 9월 → 일별
-    assert kinds[date(2026, 11, 10)] == "r"   # dirty
-    assert kinds[date(2026, 11, 15)] == "r"   # 레지스트리 없음
-    assert kinds[date(2026, 11, 5)] == "r"    # tz 다름
-    assert kinds[TODAY] == "r"                # 오늘
+    # 신뢰 불가 날짜·오늘 = 'h'(시간 롤업이 있으면 그것, 없으면 그 하루만 시간 버킷 raw)
+    assert kinds[date(2026, 11, 10)] == "h"   # dirty
+    assert kinds[date(2026, 11, 15)] == "h"   # 레지스트리 없음
+    assert kinds[date(2026, 11, 5)] == "h"    # tz 다름
+    assert kinds[TODAY] == "h"                # 오늘
     assert kinds[date(2026, 11, 20)] == "d"   # 11월 MTD 는 무효 → 일별
     # 구간이 달 중간에서 끝나면 그 달은 월 누적을 쓰지 않는다.
     part = await _kinds(session, umu.resolve_range(None, "2026-10-01", "2026-10-30"))

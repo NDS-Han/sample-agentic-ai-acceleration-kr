@@ -490,6 +490,9 @@ scheduler:
     # ⚠️ 이 값이 특히 중요하다: 1.0.67-roifix 가 고친 NameError 는 **스케줄러에서만** 터진다
     # (API 경로는 그 함수를 안 탄다). adminApi 만 올리고 여기를 두면 ROI 집계는 계속 실패한다.
     tag: "1.0.72-us20"
+  env:
+    # ROI 집계 잡 OFF(wave 2) — usage.roi_aggregations 는 읽는 곳이 없다. 코드·테이블은 남는다.
+    ROI_AGGREGATION_ENABLED: "false"
   resources:
     requests:
       cpu: "250m"  # Fargate 하한

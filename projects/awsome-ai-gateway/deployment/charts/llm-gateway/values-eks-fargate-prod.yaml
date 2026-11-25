@@ -439,6 +439,9 @@ scheduler:
     # provider enum 미러가 4라벨로 남아 0032 가 심은 BEDROCK_RUNTIME_OPENAI 행을 읽는 순간
     # LookupError 로 모델 카탈로그 조회 전체가 깨진다(조용히 실패하지 않고 크게 죽는다).
     tag: "1.0.72-us20"
+  env:
+    # ROI 집계 잡 OFF(wave 2) — usage.roi_aggregations 는 읽는 곳이 없다. 코드·테이블은 남는다.
+    ROI_AGGREGATION_ENABLED: "false"
   resources:
     requests:
       cpu: "250m"

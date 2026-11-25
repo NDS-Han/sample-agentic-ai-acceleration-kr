@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import uuid
 from decimal import Decimal
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy import func, select
@@ -119,27 +119,22 @@ def _admin(team_id: uuid.UUID | None = None) -> CurrentUser:
 
 def _recording_session() -> tuple[AsyncMock, list[str]]:
     """실행된 모든 statement 의 SQL 을 모아 두는 세션. 실제 DB 는 건드리지 않는다."""
-    seen: list[str] = []
+    from tests.rollup_double import recording_session
 
-    def _empty_result():
-        result = MagicMock()
-        result.scalar_one.return_value = 0
-        result.scalar.return_value = 0
-        result.all.return_value = []
-        result.first.return_value = None
-        result.__iter__ = MagicMock(return_value=iter([]))
-        scalars = MagicMock()
-        scalars.all.return_value = []
-        result.scalars.return_value = scalars
-        return result
+    session, seen_p = recording_session()
 
-    async def _execute(stmt, *args, **kwargs):
-        seen.append(str(stmt))
-        return _empty_result()
+    class _Seen(list):
+        def __iter__(self):
+            return iter([s for s, _ in seen_p])
 
-    session = AsyncMock()
-    session.execute = AsyncMock(side_effect=_execute)
-    return session, seen
+        def __bool__(self):
+            return bool(seen_p)
+
+        def __getitem__(self, i):
+            return [s for s, _ in seen_p][i]
+
+    session._seen_p = seen_p
+    return session, _Seen()
 
 
 @pytest.mark.asyncio
@@ -159,8 +154,8 @@ async def test_team_leader_without_a_team_is_refused_not_given_everything():
     assert "team" in str(exc.value).lower()
     # 인가 판정용 auth.teams 조회(리드 팀 확인)는 허용 — 데이터 테이블만 차단.
     assert not any(
-        "usage_logs" in q or "budget_usages" in q for q in seen
-    ), f"막기 전에 데이터 질의가 나갔다: {seen[:2]}"
+        "usage" in q or "budget_usages" in q for q in seen
+    ), f"막기 전에 데이터 질의가 나갔다: {list(seen)[:2]}"
 
 
 @pytest.mark.asyncio
@@ -174,7 +169,7 @@ async def test_csv_export_is_refused_too():
             session, format="csv", period="2026-09", group_by="user", actor=_leader(None)
         )
     assert not any(
-        "usage_logs" in q or "budget_usages" in q for q in seen
+        "usage" in q or "budget_usages" in q for q in seen
     )
 
 
@@ -196,50 +191,32 @@ async def test_team_leader_with_a_team_is_still_scoped_to_it():
 
     # 격리 경로는 테이블에 따라 둘이다. **어느 쪽도 없으면** 전사 데이터가 섞인다.
     #
-    #   usage_logs.team_id  — usage_logs 를 직접 읽는 질의
-    #   users.team_id       — budget_usages 를 읽는 질의. 이 테이블에는 team_id 컬럼이
-    #                         **없어서**(scope/scope_id/period/client 뿐) auth.users 로
-    #                         조인해 거르는 것이 유일한 방법이다.
+    #   하이브리드 롤업 읽기(services/usage_rollup) — 사용량 테이블(usage_logs·일/시간/월 롤업)을
+    #       읽는 **모든 분기**에 `team_id = ANY(:r_teams)` 가 붙고 바인드가 리더의 팀 집합이어야 한다
+    #   users.team_id — budget_usages 를 읽는 질의(이 테이블에는 team_id 컬럼이 없다)
     #
-    # ⚠️ 이 목록에 새 문자열을 추가할 때는 그것이 진짜 격리인지 확인할 것. "team" 이
-    #    들어간 아무 문자열이나 넣으면(예: GROUP BY teams.name) 가드가 통째로 공허해진다.
-    #    IN 은 scope_ids 리스트(소속 팀 1개 또는 다수)를 받는 경로의 동등한 격리다.
-    SCOPE_PREDICATES = (
-        "usage_logs.team_id = ",
-        "usage_logs.team_id IN ",
-        "users.team_id = ",
-        "users.team_id IN ",
-    )
-    # 인가 판정용 리드-팀 조회(auth.teams)와, 잔차 산출용 사용자-전체 실사용
-    # 집계(AS actual)는 의도적으로 무스코프다 — 후자는 budget_usages(사용자
-    # 전체 카운터)와 단위를 맞추기 위한 뺄 값이라 결과 행이 호출자에게
-    # 직접 나가지 않는다.
-    EXEMPT = ("auth.teams", "AS actual")
-    unscoped = [
-        s for s in seen
-        if not any(p in s for p in SCOPE_PREDICATES)
-        and not any(e in s for e in EXEMPT)
-    ]
-    assert not unscoped, (
-        f"team_id 격리가 없는 질의 {len(unscoped)}건 — 전사 데이터가 섞여 나온다. "
-        f"예: {unscoped[0][:400]}"
-    )
+    # 잔차 산출용 사용자-전체 실사용 집계(AS actual)는 의도적으로 무스코프다 — budget_usages
+    # (사용자 전체 카운터)와 단위를 맞추기 위한 뺄 값이라 결과 행이 호출자에게 나가지 않는다.
+    from tests.rollup_double import data_branches, team_isolated
 
-    # 대조군 — 두 경로가 **둘 다 실제로 등장**하는가. 한쪽이 사라지면 위 단정은
-    # 남은 한쪽만으로 통과하고, 없어진 질의의 격리 누락을 못 잡는다.
-    assert any(p in s for s in seen for p in SCOPE_PREDICATES[:2]), (
-        "usage_logs 격리 질의가 하나도 없다 — 가드의 전제가 깨졌다"
+    data_q = [(q, p) for q, p in session._seen_p if data_branches(q)]
+    assert data_q, "사용량 질의가 하나도 없다 — 가드의 전제가 깨졌다"
+    leaky = [q for q, p in data_q
+             if "AS actual" not in q and not team_isolated(q, p, [TEAM_A])]
+    assert not leaky, (
+        f"team_id 격리가 없는 사용량 질의 {len(leaky)}건 — 전사 데이터가 섞여 나온다. "
+        f"예: {leaky[0][:400]}"
     )
-    assert any("budget.budget_usages" in s for s in seen), (
+    budget_q = [q for q, _ in session._seen_p if "budget.budget_usages" in q]
+    assert budget_q, (
         "budget_usages 질의가 나가지 않았다 — seed 반영 경로가 사라졌다면 "
         "이 가드는 그 경로의 격리를 더 이상 검사하지 못한다"
     )
-    for q in seen:
-        if "budget.budget_usages" in q:
-            assert "users.team_id = " in q or "users.team_id IN " in q, (
-                "budget_usages 질의에 users.team_id 격리가 없다 — TEAM_LEADER 가 다른 팀 "
-                f"사용자의 이관 금액을 받아 간다: {q[:400]}"
-            )
+    for q in budget_q:
+        assert "users.team_id = " in q or "users.team_id IN " in q, (
+            "budget_usages 질의에 users.team_id 격리가 없다 — TEAM_LEADER 가 다른 팀 "
+            f"사용자의 이관 금액을 받아 간다: {q[:400]}"
+        )
 
 
 @pytest.mark.asyncio
@@ -257,10 +234,7 @@ async def test_admin_without_a_team_still_sees_everything():
     )
     assert res.cost_summary.total_cost_usd == Decimal("0")
     assert seen
-    assert all(
-        "usage_logs.team_id = " not in s and "usage_logs.team_id IN " not in s
-        for s in seen
-    ), "ADMIN 인데 팀 격리가 걸렸다 — 전사 집계가 아니다"
+    assert all(":r_teams" not in s for s in seen), "ADMIN 인데 팀 격리가 걸렸다 — 전사 집계가 아니다"
 
 
 @pytest.mark.asyncio

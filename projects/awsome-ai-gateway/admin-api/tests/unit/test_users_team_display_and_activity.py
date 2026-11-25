@@ -48,7 +48,9 @@ def _session(last_rows, ws_rows):
 async def test_activity_one_row_per_requested_id_with_defaults():
     a, b = uuid.uuid4(), uuid.uuid4()
     t = datetime(2026, 11, 6, 8, 50, tzinfo=UTC)
-    s = _session([(a, t), (b, None)], [(a, 3)])
+    from types import SimpleNamespace as _NS
+
+    s = _session([(a, t), (b, None)], [_NS(user_id=a, q=3)])
     r = await users_router.get_users_activity(user_id=[a, b, a], period="2026-11", admin=None, session=s)
     assert r.period == "2026-11"
     assert [(i.user_id, i.last_used_at, i.web_searches) for i in r.items] == [
@@ -57,6 +59,10 @@ async def test_activity_one_row_per_requested_id_with_defaults():
     ]
     # 중복 id 는 한 번만 조회
     assert s.execute.await_args_list[0].args[1] == {"ids": [a, b]}
+    # 웹 검색 수는 하이브리드 롤업 읽기 — 같은 사용자 집합·그 달로 좁힌다.
+    ws_params = s.execute.await_args_list[1].args[1]
+    assert ws_params["r_users"] == [str(a), str(b)]
+    assert str(ws_params["r_start"]) == "2026-11-01" and str(ws_params["r_end"]) == "2026-11-30"
 
 
 async def test_activity_defaults_to_current_period():

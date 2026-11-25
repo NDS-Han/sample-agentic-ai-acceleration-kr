@@ -18,14 +18,15 @@ import signal
 import sys
 
 import structlog
-from opentelemetry.metrics import Observation
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from opentelemetry.metrics import Observation
 
+from worker import daily_aggregator
 from worker.batch_flusher import BatchFlusher
 from worker.config import get_settings
-from worker.daily_aggregator import run_daily_aggregation, run_startup_backfill
-from worker.db import create_db_engine, create_session_factory
+from worker.daily_aggregator import run_daily_aggregation, run_hourly_rollup, run_startup_backfill
+from worker.db import create_aggregator_engine, create_db_engine, create_session_factory
 from worker.observability import WorkerMetrics, init_otel, shutdown_otel
 from worker.redis_client import create_redis_client
 from worker.stream_consumer import StreamConsumer
@@ -75,6 +76,9 @@ async def main() -> None:
     # 3. DB
     db_engine = create_db_engine(settings)
     session_factory = create_session_factory(db_engine)
+    # 롤업 집계 전용 엔진 — flush 풀/60s command_timeout 과 분리(daily_aggregator 주석).
+    agg_engine = create_aggregator_engine(settings)
+    agg_session_factory = create_session_factory(agg_engine)
 
     # 4. Auto-instrumentation (best-effort)
     try:
@@ -107,6 +111,13 @@ async def main() -> None:
     metrics.register_stream_pending_callback(
         lambda _opts: [Observation(consumer.last_pending)]
     )
+    daily_aggregator.set_metrics(metrics)
+    metrics.register_rollup_success_callback(
+        lambda _opts: [
+            Observation(ts, {"job": job})
+            for job, ts in daily_aggregator.STATUS.last_success.items()
+        ]
+    )
 
     # 7. APScheduler — daily aggregator cron + startup backfill
     scheduler = AsyncIOScheduler(timezone=settings.reporting_timezone)
@@ -114,16 +125,36 @@ async def main() -> None:
         run_daily_aggregation,
         CronTrigger.from_crontab(settings.daily_usage_agg_cron, timezone=settings.reporting_timezone),
         id="daily_usage_aggregation",
-        args=[session_factory],
+        args=[agg_session_factory],
         replace_existing=True,
         # 기본 misfire grace 는 1s — 00:10 실행이 조금이라도 늦으면 그날 집계가
         # 통째로 빠진다. 1시간 유예로 늦은 실행도 살린다(작업 자체는 멱등).
         misfire_grace_time=3600,
+        max_instances=1,
+        coalesce=True,
     )
+    if settings.hourly_rollup_enabled:
+        scheduler.add_job(
+            run_hourly_rollup,
+            CronTrigger.from_crontab(settings.hourly_rollup_cron,
+                                     timezone=settings.reporting_timezone),
+            id="hourly_usage_rollup",
+            args=[agg_session_factory],
+            replace_existing=True,
+            misfire_grace_time=1800,
+            max_instances=1,
+            coalesce=True,
+        )
     scheduler.start()
     # Backfill은 비차단으로 이벤트 루프에 스케줄 — startup 블로킹 금지.
     # bare create_task 는 약한 참조라 GC 되면 backfill 이 조용히 죽으므로 강한 참조 유지.
-    _BACKGROUND_TASKS.add(t := asyncio.create_task(run_startup_backfill(session_factory)))
+    # 기동 점검 뒤 오늘의 완료된 시간을 바로 채운다(다음 :05 를 기다리지 않게).
+    async def _startup() -> None:
+        await run_startup_backfill(agg_session_factory)
+        if settings.hourly_rollup_enabled:
+            await run_hourly_rollup(agg_session_factory)
+
+    _BACKGROUND_TASKS.add(t := asyncio.create_task(_startup()))
     t.add_done_callback(_BACKGROUND_TASKS.discard)
     logger.info(
         "daily_aggregator_scheduled",
@@ -170,6 +201,7 @@ async def main() -> None:
 
     scheduler.shutdown(wait=False)
     await redis.aclose()
+    await agg_engine.dispose()
     await db_engine.dispose()
     await shutdown_otel()
 
