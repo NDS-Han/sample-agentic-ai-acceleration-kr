@@ -30,7 +30,8 @@ from worker.db import create_aggregator_engine, create_db_engine, create_session
 from worker.observability import WorkerMetrics, init_otel, shutdown_otel
 from worker.pending_events import run_pending_drain
 from worker.reconciliation import LAST as RECON_LAST
-from worker.reconciliation import run_reconciliation
+from worker.reconciliation import LAST_SUCCESS as RECON_LAST_SUCCESS
+from worker.reconciliation import load_last_success, run_reconciliation
 from worker.redis_client import create_redis_client
 from worker.repricer import run_reprice
 from worker.stream_consumer import StreamConsumer
@@ -119,6 +120,12 @@ async def main() -> None:
     daily_aggregator.set_metrics(metrics)
     metrics.register_reconciliation_callback(
         lambda _opts: [Observation(v, {"check": k}) for k, v in RECON_LAST.items()]
+    )
+    # 마지막 성공 시각은 재시작 뒤에도 이어진다 — 표에서 읽어 둔다.
+    # (없으면 시리즈가 없다 → absent 알림)
+    await load_last_success(agg_session_factory)
+    metrics.register_reconciliation_success_callback(
+        lambda _opts: [Observation(ts) for ts in RECON_LAST_SUCCESS.values()]
     )
     metrics.register_rollup_success_callback(
         lambda _opts: [

@@ -145,6 +145,12 @@ class Settings(BaseSettings):
     reconciliation_estimated_warn_pct: float = 0.5
     #: dirty 날짜가 이 시간 넘게 남으면 불일치로 센다(R1).
     reconciliation_dirty_alert_hours: int = 48
+    #: wave 3c — R4(Redis vs DB) 허용 오차(USD). 차이가 이 값 이하면 일치로 본다. 0 = 정확 일치.
+    #: 기본 0.0001 — float64 카운터 + 0062 이전 NUMERIC(12,4) 원장에서 재구축된 카운터의
+    #: 반올림 잔차.
+    reconciliation_redis_epsilon_usd: float = 0.0001
+    #: wave 3c — R1 시간 모드: 끝난 시간에 시간 롤업이 이 초보다 오래 없으면 불일치(시간 잡은 :05).
+    reconciliation_hourly_stale_sec: int = 7200
 
     # ── wave 3b: 요청 시작 원장 sweeper(B2) / 게이트웨이 DB 폴백 소화(B3) ──
     #: sweeper 주기(초). 0 이면 끈다.

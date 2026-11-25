@@ -11,6 +11,10 @@
 R1 raw_vs_daily
     usage_logs 하루 vs daily_aggregates — 입도(user,team,dept,model,client,status)별
     토큰·비용·호출 수·웹 검색 수/비용. dirty 날짜는 48 h 까지 pending(불일치 아님).
+    진행 중인 날(오늘)과, 일 집계가 아직 없는 최근 날(시간 다리 bridge_days 안)은 일 집계 대신
+    **시간 롤업**(hourly_aggregates)과 시간 버킷별로 비교한다(wave 3c — state=hourly). 아직 끝나지
+    않은 시간은 빼고, 끝났지만 시간 롤업이 없는(또는 dirty) 시간은 pending —
+    reconciliation_hourly_stale_sec 보다 오래되면 불일치로 센다.
 R2 monthly_vs_daily
     monthly_aggregates vs Σ daily_aggregates [월초, covered_through] (월 누적이 있을 때).
 R3 budget_vs_raw
@@ -22,6 +26,8 @@ R4 redis_vs_db
     Redis 예산 카운터(usage − resvsum = 예약 제외 실지출) vs budget_usages.
     스트림에 미처리분이 있으면(lag>0) 건너뛴다(in-flight).
     Redis 에 키가 없으면 불일치가 아니다(다음 요청이 DB 에서 재구축한다).
+    허용 오차 reconciliation_redis_epsilon_usd(기본 $0.0001, wave 3c) — Redis 는 float64 이고,
+    0062 이전(NUMERIC(12,4)) 원장에서 재구축된 카운터는 4자리 반올림 잔차를 안고 있다.
 R6 pricing
     report_date 의 토큰>0·비용 0·pricing_missing=false 행(조용한 $0).
     단가로 다시 계산한 비용 ≠ 기록 비용 — 캐시 쓰기·웹 검색 행은 제외(행에 분해가 없다).
@@ -56,7 +62,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from worker.batch_flusher import _PER_APP_CLIENTS, DEFAULT_TEAM_ID
 from worker.config import get_settings
-from worker.daily_aggregator import GRAIN_VERSION, _day_window, _month_end, aggregation_lock
+from worker.daily_aggregator import (
+    GRAIN_VERSION,
+    _day_window,
+    _month_end,
+    aggregation_lock,
+    hour_buckets,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -64,6 +76,9 @@ RECONCILIATION_LOCK_KEY = 727_002
 
 #: 마지막 실행의 검사별 불일치 수 — 지표 게이지 콜백이 읽는다.
 LAST: dict[str, int] = {}
+#: 마지막 성공 실행(오류 없음) 의 unix 시각 — ``reconciliation_last_success_timestamp`` 게이지.
+#: 키 하나("ts")만 쓴다. 기동 시 load_last_success 가 표에서 채운다.
+LAST_SUCCESS: dict[str, float] = {}
 
 _GRAIN = "user_id, team_id, dept_id, model_alias, client, status"
 _VALS = ("i, o, cw, cr, c, n, wq, wc")
@@ -91,6 +106,48 @@ SELECT COUNT(*) AS mismatches,
 FROM raw FULL OUTER JOIN agg USING ({_GRAIN})
 WHERE (raw.i, raw.o, raw.cw, raw.cr, raw.c, raw.n, raw.wq, raw.wc)
       IS DISTINCT FROM (agg.i, agg.o, agg.cw, agg.cr, agg.c, agg.n, agg.wq, agg.wc)
+"""
+
+#: R1 시간 모드 — 신뢰 가능한 시간 버킷(:hs/:he 쌍)별 raw vs hourly_aggregates.
+_R1_HOURLY_SQL = f"""
+WITH h AS (
+  SELECT * FROM unnest(CAST(:hs AS timestamptz[]), CAST(:he AS timestamptz[])) AS h(hs, he)
+), raw AS (
+  SELECT h.hs, user_id, team_id, dept_id, model_alias, COALESCE(client, 'other') AS client, status,
+         SUM(input_tokens)::bigint AS i, SUM(output_tokens)::bigint AS o,
+         SUM(cache_creation_tokens)::bigint AS cw, SUM(cache_read_tokens)::bigint AS cr,
+         SUM(cost_usd) AS c, COUNT(*)::bigint AS n,
+         SUM(web_search_count)::bigint AS wq, SUM(web_search_cost_usd) AS wc
+  FROM usage.usage_logs l JOIN h ON l.requested_at >= h.hs AND l.requested_at < h.he
+  WHERE l.requested_at >= :start AND l.requested_at < :end
+  GROUP BY 1, 2, 3, 4, 5, 6, 7
+), agg AS (
+  SELECT hour_start AS hs, user_id, team_id, dept_id, model_alias, client::text AS client, status,
+         input_tokens AS i, output_tokens AS o, cache_creation_tokens AS cw,
+         cache_read_tokens AS cr, total_cost_usd AS c, call_count AS n,
+         web_search_count AS wq, web_search_cost_usd AS wc
+  FROM usage.hourly_aggregates WHERE hour_start = ANY(CAST(:hs AS timestamptz[]))
+)
+SELECT COUNT(*) AS mismatches,
+       COALESCE(SUM(COALESCE(raw.c, 0) - COALESCE(agg.c, 0)), 0) AS cost_diff
+FROM raw FULL OUTER JOIN agg USING (hs, {_GRAIN})
+WHERE (raw.i, raw.o, raw.cw, raw.cr, raw.c, raw.n, raw.wq, raw.wc)
+      IS DISTINCT FROM (agg.i, agg.o, agg.cw, agg.cr, agg.c, agg.n, agg.wq, agg.wc)
+"""
+
+#: 그날 시간 버킷별 raw 행 수·비용(끝난 버킷과 진행 중 버킷 모두).
+_R1_HOUR_ROWS_SQL = """
+SELECT h.hs, COUNT(l.id)::bigint AS n, COALESCE(SUM(l.cost_usd), 0) AS c
+FROM unnest(CAST(:hs AS timestamptz[]), CAST(:he AS timestamptz[])) AS h(hs, he)
+LEFT JOIN usage.usage_logs l ON l.requested_at >= h.hs AND l.requested_at < h.he
+GROUP BY h.hs
+"""
+
+#: 신뢰 가능한 시간 = 레지스트리 v3·같은 tz, 그리고 그 시간의 dirty 표시가 없다.
+_R1_GOOD_HOURS_SQL = """
+SELECT r.hour_start FROM usage.hourly_aggregate_hours r
+WHERE r.date = :day AND r.tz = :tz AND r.grain_version >= :grain
+  AND NOT EXISTS (SELECT 1 FROM usage.rollup_dirty_marks m WHERE m.hour_start = r.hour_start)
 """
 
 _DAY_STATE_SQL = """
@@ -253,10 +310,58 @@ def _f(v: Any) -> Any:
     return v
 
 
-async def _r1(session: AsyncSession, tz: str, day: date, stale_h: int) -> dict:
+async def _r1_hourly(session: AsyncSession, tz: str, day: date, *, now: datetime,
+                     stale_sec: int, hourly_enabled: bool, reason: str) -> dict:
+    """진행 중·일 집계 전 날 — 끝난 시간 버킷을 시간 롤업과 비교한다(모듈 docstring R1)."""
+    start, end = _day_window(ZoneInfo(tz), day)
+    buckets = hour_buckets(ZoneInfo(tz), day)
+    p = {"hs": [b[0] for b in buckets], "he": [b[1] for b in buckets]}
+    per_hour = {r.hs: r for r in await session.execute(text(_R1_HOUR_ROWS_SQL), p)}
+    raw_rows = sum(int(r.n) for r in per_hour.values())
+    raw_cost = sum((Decimal(r.c) for r in per_hour.values()), Decimal(0))
+    out: dict[str, Any] = {"state": "hourly", "reason": reason, "raw_rows": raw_rows,
+                           "raw_cost": _f(raw_cost)}
+    done = [(s, e) for s, e in buckets if e <= now]
+    open_rows = sum(int(per_hour[s].n) for s, e in buckets if e > now and s in per_hour)
+    out["hours_completed"] = len(done)
+    out["rows_in_open_hour"] = open_rows  # 아직 끝나지 않은 시간 — 비교하지 않는다
+    if not hourly_enabled:
+        out["state"] = "in_progress_excluded"
+        out["mismatches"] = 0
+        return out
+    good = {r[0] for r in await session.execute(text(_R1_GOOD_HOURS_SQL), {
+        "day": day, "tz": tz, "grain": GRAIN_VERSION})}
+    checked = [(s, e) for s, e in done if s in good]
+    pending = [(s, e) for s, e in done if s not in good and int(per_hour[s].n) > 0]
+    stale = [(s, e) for s, e in pending if (now - e).total_seconds() > stale_sec]
+    mm, diff = 0, Decimal(0)
+    if checked:
+        row = (await session.execute(text(_R1_HOURLY_SQL), {
+            "hs": [c[0] for c in checked], "he": [c[1] for c in checked],
+            "start": start, "end": end})).one()
+        mm, diff = int(row.mismatches), Decimal(row.cost_diff)
+    out.update({"hours_checked": len(checked), "keys_differing": mm, "cost_diff": _f(diff),
+                "hours_pending": len(pending), "hours_stale": len(stale),
+                "stale_sample": [s.isoformat() for s, _ in stale[:5]],
+                "mismatches": mm + len(stale)})
+    return out
+
+
+async def _r1(session: AsyncSession, tz: str, day: date, stale_h: int, *,
+              now: datetime | None = None, bridge_days: int = 2,
+              hourly_stale_sec: int = 7200, hourly_enabled: bool = True) -> dict:
+    now = now or datetime.now(UTC)
+    today = now.astimezone(ZoneInfo(tz)).date()
+    hourly = dict(now=now, stale_sec=hourly_stale_sec, hourly_enabled=hourly_enabled)
+    if day >= today:
+        # 진행 중인 날 — 일 집계는 아직 없다(있어도 계속 자라는 날이라 비교 대상이 아니다).
+        return await _r1_hourly(session, tz, day, reason="in_progress", **hourly)
     start, end = _day_window(ZoneInfo(tz), day)
     st = (await session.execute(text(_DAY_STATE_SQL),
                                 {"day": day, "tz": tz, "grain": GRAIN_VERSION})).one()
+    if not st.registered and day >= today - timedelta(days=bridge_days):
+        # 일 집계 전(야간 잡 00:10 전 등) — 시간 다리 창 안이면 시간 롤업으로 본다.
+        return await _r1_hourly(session, tz, day, reason="not_aggregated_yet", **hourly)
     row = (await session.execute(text(_R1_SQL), {"day": day, "start": start, "end": end})).one()
     out = {"raw_rows": int(row.raw_rows), "raw_cost": _f(row.raw_cost),
            "keys_differing": int(row.mismatches), "cost_diff": _f(row.cost_diff)}
@@ -268,7 +373,7 @@ async def _r1(session: AsyncSession, tz: str, day: date, stale_h: int) -> dict:
     pending = (not st.clean) or st.mark_since is not None
     if pending:
         since = st.mark_since or st.aggregated_at
-        age_h = ((datetime.now(UTC) - since).total_seconds() / 3600) if since else None
+        age_h = ((now - since).total_seconds() / 3600) if since else None
         out["state"] = "dirty"
         out["dirty_age_hours"] = round(age_h, 2) if age_h is not None else None
         # 48 h 안의 dirty 는 다음 시간 잡이 다시 집계한다 — 불일치로 세지 않는다.
@@ -326,6 +431,7 @@ def _redis_keys(scope: str, sid: str, client: str | None, period: str) -> tuple[
 
 
 async def _r4(session: AsyncSession, redis, settings, period: str) -> dict:
+    eps = Decimal(str(getattr(settings, "reconciliation_redis_epsilon_usd", 0) or 0))
     if redis is None:
         return {"state": "no_redis", "mismatches": 0}
     lag = await _stream_lag(redis, settings)
@@ -353,10 +459,12 @@ async def _r4(session: AsyncSession, redis, settings, period: str) -> dict:
             net = Decimal(u.decode() if isinstance(u, bytes) else str(u)) - Decimal(
                 (rv.decode() if isinstance(rv, bytes) else str(rv)) if rv is not None else "0")
             # Redis 는 INCRBYFLOAT(float64) — 6자리 반올림 뒤 비교(원장 정밀도와 같다).
+            # 차이가 eps 이하면 같다고 본다(0 이면 정확 일치 — wave 3 동작).
             q = Decimal("0.000001")
-            if net.quantize(q) != Decimal(r.used_usd).quantize(q):
+            if abs(net.quantize(q) - Decimal(r.used_usd).quantize(q)) > eps:
                 bad.append([r.scope, r.scope_id, r.client, str(r.used_usd), str(net)])
-    return {"state": "checked", "checked": checked, "absent_in_redis": absent,
+    return {"state": "checked", "epsilon_usd": str(eps), "checked": checked,
+            "absent_in_redis": absent,
             "lost_sentinel": lost, "mismatches": len(bad), "sample": bad[:20]}
 
 
@@ -392,8 +500,11 @@ async def reconcile(session_factory: async_sessionmaker[AsyncSession], redis=Non
             await session.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"))
             secs = int(max(1.0, float(settings.daily_usage_agg_command_timeout)))
             await session.execute(text(f"SET LOCAL statement_timeout = '{secs}s'"))
-            checks["raw_vs_daily"] = await _r1(session, tz, day,
-                                               settings.reconciliation_dirty_alert_hours)
+            checks["raw_vs_daily"] = await _r1(
+                session, tz, day, settings.reconciliation_dirty_alert_hours,
+                bridge_days=int(settings.daily_usage_agg_hourly_bridge_days),
+                hourly_stale_sec=int(settings.reconciliation_hourly_stale_sec),
+                hourly_enabled=bool(settings.hourly_rollup_enabled))
             checks["monthly_vs_daily"] = await _r2(session, tz, day.replace(day=1))
             checks["budget_vs_raw"] = await _r3(session, tz, period)
             checks["pricing"] = await _r6(session, tz, day,
@@ -426,12 +537,34 @@ async def reconcile(session_factory: async_sessionmaker[AsyncSession], redis=Non
         logger.exception("reconciliation_record_failed")
     LAST.clear()
     LAST.update({k: int(v.get("mismatches", 0)) for k, v in checks.items()})
+    if status != "error" and "run_id" in result:
+        LAST_SUCCESS["ts"] = time.time()
     if metrics is not None:
         metrics.reconciliation_runs.add(1, {"status": status})
+        for k, v in LAST.items():
+            metrics.reconciliation_mismatch_total.add(v, {"check": k})
     log = logger.error if status != "ok" else logger.info
     log("reconciliation_done", status=status, mismatches=mm, report_date=day.isoformat(),
         by_check=dict(LAST))
     return result
+
+
+_LAST_SUCCESS_SQL = """
+SELECT extract(epoch FROM max(finished_at)) FROM usage.reconciliation_runs WHERE status <> 'error'
+"""
+
+
+async def load_last_success(session_factory) -> None:
+    """기동 시 마지막 성공 시각을 표에서 읽는다 — 재시작이 게이지를 지우지 않게. 실패는 무시."""
+    try:
+        async with asyncio.timeout(10):
+            async with session_factory() as session:
+                ts = (await session.execute(text(_LAST_SUCCESS_SQL))).scalar_one_or_none()
+                await session.commit()
+        if ts is not None:
+            LAST_SUCCESS["ts"] = float(ts)
+    except Exception:  # noqa: BLE001 — 기동을 막지 않는다(다음 실행이 채운다)
+        logger.warning("reconciliation_last_success_load_failed")
 
 
 async def run_reconciliation(session_factory, redis=None, metrics=None) -> None:
