@@ -374,6 +374,8 @@ EKS_DB_CONN_BUDGET = int(EKS_DB_MAX_CONNECTIONS * EKS_DB_PROXY_PERCENT
 # deploy.sizing 서비스명 → (차트 키, 서비스별 overflow env 이름, 롤아웃 surge 규칙)
 # surge: "25%" = RollingUpdate maxSurge 25%(올림), "1" = maxSurge 1,
 #        "0" = Recreate(scheduler singleton). 차트 templates/*/deployment.yaml 과 동일.
+# 워커는 공통 DB_MAX_OVERFLOW 를 읽지 않는다 — 서비스별 override 가 없으면 코드 기본.
+EKS_WORKER_OVERFLOW_DEFAULT = {"notification-worker": 3, "cost-recorder-worker": 5}
 EKS_DB_SERVICES: dict[str, tuple[str, str, str]] = {
     "gateway-proxy":        ("gatewayProxy",       "DB_MAX_OVERFLOW",  "25%"),
     "admin-api":            ("adminApi",           "DB_MAX_OVERFLOW",  "25%"),
@@ -425,7 +427,8 @@ def eks_db_budget(cfg, values: dict) -> dict:
     서비스당 = (HPA max 또는 replicaCount + surge) × 프로세스 × (pool + overflow).
     프로세스: gateway-proxy 는 env WORKERS(Dockerfile 기본 4), 나머지는 1.
     pool/overflow 우선순위: <svc>.db → <svc>.env → 공통 database.external.
-    워커 overflow 는 서비스별 DB_POOL_OVERFLOW → 공통 DB_MAX_OVERFLOW 순이다.
+    워커 overflow 는 서비스별 DB_POOL_OVERFLOW → 코드 기본(cost 5 / notification 3)
+    이다 — 워커는 공통 DB_MAX_OVERFLOW 를 읽지 않는다.
     gateway-proxy 는 hot-path 풀(HOT_DB_*, 기본 4+2/프로세스)을 더한다.
 
     반환: {services: {svc: {pods, procs, pool, overflow, conns}}, hot, migration,
@@ -455,7 +458,8 @@ def eks_db_budget(cfg, values: dict) -> dict:
         db = sv.get("db") if isinstance(sv.get("db"), dict) else {}
         procs = _as_int(env.get("WORKERS"), 4) if svc == "gateway-proxy" else 1
         pool = _as_int(_first(db.get("poolSize"), env.get("DB_POOL_SIZE")), c_pool)
-        ovf = _as_int(_first(db.get("maxOverflow"), env.get(ovf_env)), c_ovf)
+        ovf = _as_int(_first(db.get("maxOverflow"), env.get(ovf_env)),
+                      EKS_WORKER_OVERFLOW_DEFAULT.get(svc, c_ovf))
         n = (pods + extra) * procs
         services[svc] = {"pods": pods + extra, "procs": procs, "pool": pool,
                          "overflow": ovf, "conns": n * (pool + ovf)}

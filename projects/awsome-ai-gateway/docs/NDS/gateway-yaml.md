@@ -233,7 +233,8 @@ deploy:
   `db_pool_timeout` 1..10, `db_pool_recycle` 60..1799. null·문자열·float·bool 은
   거부됩니다. 미선언 키/서비스는 공통 ConfigMap(`database.external.*`) 값을 씁니다.
   - 워커(cost-recorder/notification)는 env 이름이 다릅니다: overflow 는
-    `DB_POOL_OVERFLOW`(없으면 공통 `DB_MAX_OVERFLOW`, 그것도 없으면 코드 기본 5/3),
+    `DB_POOL_OVERFLOW`(없으면 코드 기본 cost 5 / notification 3 — 공통
+    `DB_MAX_OVERFLOW` 는 prod overflow 를 바꾸지 않으려고 의도적으로 읽지 않는다),
     timeout/recycle 은 `WORKER_DB_POOL_TIMEOUT`/`WORKER_DB_POOL_RECYCLE` 이고
     **선언했을 때만** 적용됩니다. 미선언이면 SQLAlchemy 기본(30s, recycle 없음) —
     공통 ConfigMap 의 `DB_POOL_TIMEOUT`/`DB_POOL_RECYCLE` 은 워커가 읽지 않습니다.

@@ -379,7 +379,7 @@ def test_eks_db_budget_no_note_for_dev_sizing(tmp_path):
 
 def test_eks_db_budget_math():
     """산식 고정: (HPA max|replicaCount + surge) × procs × (pool+overflow),
-    gateway hot pool, 워커 overflow 폴백(DB_POOL_OVERFLOW → 공통)."""
+    gateway hot pool, 워커 overflow 폴백(DB_POOL_OVERFLOW → 코드 기본 5/3, 공통 아님)."""
     from ..tiers import eks_db_budget
     cfg = schema.from_dict(BASE)
     vals = {
@@ -393,6 +393,11 @@ def test_eks_db_budget_math():
         "costRecorderWorker": {"replicaCount": 2, "db": {"maxOverflow": 1}},
     }
     b = eks_db_budget(cfg, vals)
+    # override 없는 워커는 공통 maxOverflow(20) 가 아니라 코드 기본
+    bare = eks_db_budget(cfg, {**vals, "notificationWorker": {"replicaCount": 1},
+                               "costRecorderWorker": {"replicaCount": 1}})["services"]
+    assert bare["notification-worker"]["overflow"] == 3
+    assert bare["cost-recorder-worker"]["overflow"] == 5
     s = b["services"]
     assert s["gateway-proxy"] == {"pods": 10, "procs": 2, "pool": 5, "overflow": 0,
                                   "conns": 100}

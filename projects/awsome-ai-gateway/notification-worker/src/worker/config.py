@@ -57,11 +57,11 @@ class Settings(BaseSettings):
     #    (values-eks-fargate-prod.yaml:40 `notificationWorkerUser: "gateway"`).
     db_url: str = "postgresql+asyncpg://gateway:gateway_dev_password@postgres:5432/gateway"
     db_pool_size: int = 5
-    # overflow 우선순위: 서비스별 DB_POOL_OVERFLOW(차트 <worker>.db.maxOverflow)
-    # → 공통 ConfigMap DB_MAX_OVERFLOW(database.external.maxOverflow) → 코드 기본
-    # 3. 예전에는 공통 DB_MAX_OVERFLOW 를 읽지 않아 차트 값이 조용히 무시됐다.
-    db_pool_overflow: int | None = None
-    db_max_overflow: int | None = None
+    # overflow 는 서비스별 DB_POOL_OVERFLOW(차트 <worker>.db.maxOverflow)만 읽는다 —
+    # 미설정이면 코드 기본 3. 공통 ConfigMap 의 DB_MAX_OVERFLOW 는 **의도적으로**
+    # 읽지 않는다: 읽으면 이미지 재빌드만으로 prod 워커 overflow 가 3→30 으로 바뀌어
+    # 커넥션 예산이 깨진다 (swe-fix round 2).
+    db_pool_overflow: int = 3
     # pool_timeout/pool_recycle 은 **명시 override 일 때만** 엔진에 넘긴다 — 미설정이면
     # SQLAlchemy 기본(timeout 30s, recycle 없음)으로 이 배선 이전과 동일하다.
     # 공통 ConfigMap 의 DB_POOL_TIMEOUT/DB_POOL_RECYCLE 은 모든 pod 에 들어가므로
@@ -127,15 +127,6 @@ class Settings(BaseSettings):
 
     # 이메일 템플릿 언어 (ko | en)
     notification_locale: str = "ko"
-
-    @property
-    def effective_pool_overflow(self) -> int:
-        """엔진 max_overflow — 서비스별 → 공통 → 코드 기본(3) 순."""
-        if self.db_pool_overflow is not None:
-            return self.db_pool_overflow
-        if self.db_max_overflow is not None:
-            return self.db_max_overflow
-        return 3
 
     @field_validator("reporting_timezone")
     @classmethod
