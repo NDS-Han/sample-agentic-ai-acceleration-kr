@@ -81,6 +81,10 @@ features:
   dev_login: false            # oidc 와 공존하는 개발자 로그인 — true 면 adminUi/adminApi 양쪽에 DEV_LOGIN_ENABLED=true 유지
   service_keys: false         # 서비스 계정(에이전트) 장기키 발급 — 기본 꺼짐. true 로 켜야 표지·발급 허용
 
+observability:                # eks 전용 — 클러스터 내 Alertmanager (상세: observability.md §10)
+  alerting:
+    enabled: false            # 기본 꺼짐 — 파드·전달 리소스 없음(게이트웨이 PrometheusRule 만 설치)
+    slack_secret_name: ""     # 비우면 alertmanager-slack-<env> (ns observability, key api_url)
 images:
   registry: ""                # 외부 레지스트리 — 비우면 ecs 가 ECR repo 자동 생성 (eks 는 필수)
   tag: ""                     # 기본 이미지 태그 — ecs/eks 는 tag 또는 tags 중 하나 필수 (명시적 핀)

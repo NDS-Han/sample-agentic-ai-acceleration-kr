@@ -2,6 +2,7 @@
 """eks 렌더러 테스트 — 오버레이가 관리 키만 담고 env values 와 레이어링."""
 from __future__ import annotations
 
+import json
 import re
 
 import yaml
@@ -637,3 +638,25 @@ def test_cognito_managed_login_overlay_only_when_on():
     assert "cognito_managed_login" not in off
     on = eks_render.render_tfvars(schema.from_dict(dict(BASE, branding={"managed_login": True})))
     assert "cognito_managed_login = true" in on
+
+
+def test_eks_observability_alerting_default_off_writes_env_false(tmp_path):
+    """observability.alerting 미선언 → observability.env 에 ALERTING_ENABLED=false.
+    차트 values 에는 아무것도 추가하지 않는다(Alertmanager 는 observability install 소관)."""
+    _, out, _ = _render(tmp_path, BASE)
+    env = (out / "observability.env").read_text()
+    assert "ALERTING_ENABLED=false" in env.splitlines()
+    assert "ALERT_SLACK_SECRET_NAME" not in env
+    v = yaml.safe_load((out / "values.yaml").read_text())
+    assert "alertmanager" not in json.dumps(v).lower()
+
+
+def test_eks_observability_alerting_enabled_with_secret_name(tmp_path):
+    doc = dict(BASE, observability={"alerting": {"enabled": True,
+                                                 "slack_secret_name": "am-slack-dev"}})
+    _, out, res = _render(tmp_path, doc)
+    notes = res["notes"]
+    lines = (out / "observability.env").read_text().splitlines()
+    assert "ALERTING_ENABLED=true" in lines
+    assert "ALERT_SLACK_SECRET_NAME=am-slack-dev" in lines
+    assert any("observability.alerting 켜짐" in n for n in notes)

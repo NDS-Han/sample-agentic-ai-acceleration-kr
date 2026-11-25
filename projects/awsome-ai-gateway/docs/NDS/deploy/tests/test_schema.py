@@ -1018,3 +1018,30 @@ def test_branding_managed_login_on_and_quoted_rejected():
 def test_branding_managed_login_compose_warns():
     cfg = schema.from_dict(minimal(branding={"managed_login": True}))
     assert any("managed_login" in w for w in cfg.warnings())
+
+
+def test_observability_alerting_defaults_off():
+    cfg = schema.from_dict(minimal(deploy={"target": "eks", "size_tier": "t3"},
+                                   images={"tag": "abc"}))
+    assert cfg.observability.alerting.enabled is False
+    assert cfg.observability.alerting.slack_secret_name == ""
+
+
+def test_observability_alerting_eks_only():
+    with pytest.raises(schema.SchemaError, match="eks 전용"):
+        schema.from_dict(minimal(observability={"alerting": {"enabled": True}}))
+
+
+@pytest.mark.parametrize("bad", [{"enabled": "yes"}, {"enabled": True, "slack_secret_name": 5},
+                                 {"enabled": True, "slack_secret_name": "Bad_Name"},
+                                 {"enabled": True, "webhook_url": "x"}])
+def test_observability_alerting_rejects_bad_values(bad):
+    with pytest.raises(schema.SchemaError):
+        schema.from_dict(minimal(deploy={"target": "eks", "size_tier": "t3"},
+                                 images={"tag": "abc"}, observability={"alerting": bad}))
+
+
+def test_observability_unknown_key_rejected():
+    with pytest.raises(schema.SchemaError, match="알 수 없는 키"):
+        schema.from_dict(minimal(deploy={"target": "eks", "size_tier": "t3"},
+                                 images={"tag": "abc"}, observability={"metrics": {}}))

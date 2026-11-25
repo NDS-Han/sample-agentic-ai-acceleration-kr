@@ -28,14 +28,18 @@ if [ -z "$CHART" ]; then
   CHART="prometheus-community/kube-prometheus-stack"
 fi
 
-render() {  # $1 = 출력 파일, 나머지 = 추가 helm 인자
+render() {  # $1 = 출력 파일, 나머지 = 추가 helm 인자 (install.sh 와 같은 레이어 순서)
   local out="$1"; shift
   helm template kps "$CHART" --version "$KPS_VERSION" --namespace observability \
-    -f values.yaml -f alerting-rules.yaml \
-    --set-string prometheus.prometheusSpec.externalLabels.env=check "$@" > "$out"
+    -f values.yaml -f alerting-rules.yaml "$@" > "$out"
 }
-render "$OUT/off.yaml"
-render "$OUT/slack.yaml" -f alertmanager-slack.yaml \
+ON=(-f values-alerting.yaml --set-string prometheus.prometheusSpec.externalLabels.env=check)
+# disabled = gateway.yaml observability.alerting 미설정/false (Alertmanager 없음, 규칙만)
+# off      = enabled 이지만 Slack Secret 없음 (전달 "null")
+# slack    = enabled + Secret
+render "$OUT/disabled.yaml"
+render "$OUT/off.yaml" "${ON[@]}"
+render "$OUT/slack.yaml" "${ON[@]}" -f alertmanager-slack.yaml \
   --set "alertmanager.alertmanagerSpec.volumes[0].name=slack-webhook" \
   --set-string "alertmanager.alertmanagerSpec.volumes[0].secret.secretName=alertmanager-slack-check" \
   --set "alertmanager.alertmanagerSpec.volumes[0].secret.optional=true"
@@ -43,6 +47,19 @@ render "$OUT/slack.yaml" -f alertmanager-slack.yaml \
 python3 - "$OUT" <<'EOF'
 import base64, os, sys, yaml
 out = sys.argv[1]
+
+# disabled: no Alertmanager / delivery resources; Prometheus not wired to an Alertmanager; gateway rules present.
+kinds = {}
+for d in yaml.safe_load_all(open(f"{out}/disabled.yaml")):
+    if d:
+        for x in (d.get("items") or [d]) if d.get("kind") == "List" else [d]:
+            kinds.setdefault(x.get("kind"), []).append(x.get("metadata", {}).get("name"))
+assert "Alertmanager" not in kinds, "disabled: Alertmanager rendered"
+for k, n in (("ServiceAccount", "kps-alertmanager"), ("Service", "kps-alertmanager"),
+             ("ServiceMonitor", "kps-alertmanager"), ("Secret", "alertmanager-kps-alertmanager")):
+    assert n not in kinds.get(k, []), f"disabled: {k}/{n} rendered"
+assert "kube-prometheus-stack-llm-gateway-alerts" in kinds.get("PrometheusRule", []), "disabled: gateway rules missing"
+print("[disabled] no Alertmanager/delivery resources; gateway PrometheusRule installed")
 
 def docs(path):
     for d in yaml.safe_load_all(open(path)):

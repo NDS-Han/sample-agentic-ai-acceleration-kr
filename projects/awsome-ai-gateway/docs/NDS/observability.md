@@ -306,6 +306,27 @@ aws cloudwatch put-metric-alarm --region <region> \
 
 ## 10. In-cluster 알림 — Alertmanager + Slack
 
+> **켜고 끄는 곳: `gateway.yaml` `observability.alerting`** (기본 꺼짐). `features.alerting`(terraform SNS/CloudWatch)과는
+> 다른 스위치다. `./deploy render` 가 `deployment/gen/<env>/eks/observability.env`(`ALERTING_ENABLED`,
+> `ALERT_SLACK_SECRET_NAME`)를 쓰고 `kube-prometheus-stack/install.sh`(install-eks.sh `ensure_observability`)가 읽는다.
+>
+> ```yaml
+> observability:
+>   alerting:
+>     enabled: true                 # Alertmanager 1 파드 + values-alerting.yaml
+>     slack_secret_name: ""         # 비우면 alertmanager-slack-<env>
+> ```
+>
+> | 상태 | 설치되는 것 |
+> |---|---|
+> | 키 없음 / `false` | 알림 도입 전과 같은 릴리즈 + 게이트웨이 PrometheusRule(`kube-prometheus-stack-llm-gateway-alerts`, Prometheus 에서만 보임). Alertmanager·Secret·Service·ServiceMonitor 없음, EKS 잡음 규칙/모니터 그대로 |
+> | `true`, Secret 없음 | Alertmanager 1 파드, 모든 알림 `"null"`(전달 꺼짐), EKS 잡음 규칙·컨트롤 플레인 모니터 끔, `env` 외부 라벨 |
+> | `true`, Secret 있음 | 위 + Slack 전달 |
+>
+> render 비교(nds/dev 대비, `helm template` kps 60.1.0): 꺼짐은 PrometheusRule 1개(List 로 감싼) 추가 외 동일, 켜짐은
+> Alertmanager 관련 6개 추가·컨트롤 플레인 ConfigMap/Service/ServiceMonitor/규칙 제거·Prometheus spec 변경.
+> 반영: gateway.yaml 수정 → `./deploy render` → observability install 재실행(Secret 을 나중에 만들었을 때도 재실행).
+
 ```
 앱(OTel) → otel-collector → Prometheus ─ PrometheusRule kube-prometheus-stack-llm-gateway-alerts
                                          └→ Alertmanager (kps-alertmanager, 1 파드) → Slack (env 별 webhook)
