@@ -72,6 +72,10 @@ async def readiness_check(request: Request) -> JSONResponse:
     local caches (auth, downgrade, web-search policy) and fails individual requests with a
     clear 503 only when it truly cannot answer. Dependency health is exported through
     the degradation metrics/logs and the fields below.
+
+    Startup warm-up (wave 1e) happens before ``started`` — bounded; ``warmup.state`` is
+    ``warm`` or ``degraded`` (window ended before every step succeeded; still warming in the
+    background). Reported only: a cold-started process is ready like before.
     """
     state = request.app.state
     dm: DegradationManager | None = getattr(state, "degradation_manager", None)
@@ -101,6 +105,11 @@ async def readiness_check(request: Request) -> JSONResponse:
     shutting_down = bool(getattr(state, "shutting_down", False))
     ready = started and not shutting_down
     listener = getattr(state, "auth_invalidation", None)
+    warmup = getattr(state, "startup_warmup", None)
+    try:
+        warmup_info = warmup.snapshot() if warmup is not None else None
+    except Exception:
+        warmup_info = {"state": "unknown"}
     return JSONResponse(
         status_code=200 if ready else 503,
         content={
@@ -114,5 +123,6 @@ async def readiness_check(request: Request) -> JSONResponse:
             "pool_saturated": pool_saturated,
             "pool": pool_info,
             "auth_invalidation_connected": bool(getattr(listener, "connected", False)),
+            "warmup": warmup_info,
         },
     )

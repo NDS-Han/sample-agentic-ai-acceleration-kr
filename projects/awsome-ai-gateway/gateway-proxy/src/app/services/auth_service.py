@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.auth import JwtPublicKey, User
 from app.models.model import TeamAllowedModel, UserAllowedModel
 from app.schemas.domain import AuthContext, AuthType, Role
+from app.services import recent_vk as _recent_vk
 from app.services.hot_path import HotDbUnavailable, run_db
 
 logger = structlog.get_logger(__name__)
@@ -187,6 +188,133 @@ async def _resolve_entitlements(
     return allowed_models, allowed_clients
 
 
+def _vk_auth_context(user, allowed_models, allowed_clients, key_prefix: str | None) -> AuthContext:
+    """VK 인증 결과 — 요청 경로(DB 해소)와 기동 시 사전 적재(wave 1e)가 같은 규칙을 쓴다."""
+    # roles: TEAM_LEADER 만 DB 역할을 실어준다 — /v1/usage/team/{id} 가
+    # "TEAM_LEADER(본인 팀) 또는 ADMIN" 계약인데 TEAM_LEADER 는 VK 만 가지므로
+    # USER 합성이면 자기 팀 usage 조차 403 이다. ADMIN 의 VK 는 USER 유지 —
+    # 유출된 admin 소유 VK 가 프록시 관리 표면까지 통과하지 않도록
+    # 최소권한을 유지한다(JWT 경로만 관리 역할을 준다).
+    vk_roles = [Role.TEAM_LEADER] if user.role == Role.TEAM_LEADER.value else [Role.USER]
+    return AuthContext(
+        user_id=str(user.id),
+        team_id=str(user.team_id) if user.team_id else "",
+        dept_id="",
+        roles=vk_roles,
+        auth_type=AuthType.VIRTUAL_KEY,
+        key_id=None,
+        key_prefix=key_prefix,
+        allowed_models=allowed_models,
+        allowed_clients=allowed_clients,
+        sso_subject=user.sso_subject,
+    )
+
+
+async def _resolve_entitlements_batch(
+    db: AsyncSession, users: dict[str, str | None]
+) -> dict[str, tuple[list[str] | None, list[str] | None]]:
+    """``_resolve_entitlements`` 의 일괄판 (기동 시 사전 적재 전용, wave 1e).
+
+    ``users``: user_id → team_id. 규칙은 단건판과 같다 — allowed_models: user > team > None,
+    allowed_clients: user > team > org > None. 단건판과 달리 **어떤 조회든 실패하면 예외를
+    그대로 올린다**(사전 적재를 통째로 포기한다 — 틀린 값을 캐시에 넣느니 비워 둔다).
+    쿼리는 인덱스(user_id / team_id)를 타는 IN 목록, 호출자가 크기를 자른다.
+    """
+    from sqlalchemy import bindparam
+
+    uids = list(users)
+    tids = sorted({t for t in users.values() if t})
+    if not uids:
+        return {}
+
+    def _group(rows) -> dict[str, list[str]]:
+        out: dict[str, list[str]] = {}
+        for k, v in rows:
+            out.setdefault(str(k), []).append(v)
+        return out
+
+    uam = _group((await db.execute(
+        select(UserAllowedModel.user_id, UserAllowedModel.model_alias)
+        .where(UserAllowedModel.user_id.in_(uids))
+    )).all())
+    uac = _group((await db.execute(
+        _sql_text("SELECT user_id, client FROM auth.user_allowed_clients WHERE user_id IN :ids")
+        .bindparams(bindparam("ids", expanding=True)), {"ids": uids},
+    )).all())
+    tam: dict[str, list[str]] = {}
+    tac: dict[str, list[str]] = {}
+    oac: dict[str, list[str]] = {}
+    if tids:
+        tam = _group((await db.execute(
+            select(TeamAllowedModel.team_id, TeamAllowedModel.model_alias)
+            .where(TeamAllowedModel.team_id.in_(tids))
+        )).all())
+        tac = _group((await db.execute(
+            _sql_text("SELECT team_id, client FROM auth.team_allowed_clients WHERE team_id IN :ids")
+            .bindparams(bindparam("ids", expanding=True)), {"ids": tids},
+        )).all())
+        oac = _group((await db.execute(
+            _sql_text(
+                "SELECT t.id, oac.client FROM auth.teams t"
+                " JOIN auth.departments d ON d.id = t.dept_id"
+                " JOIN auth.org_allowed_clients oac ON oac.org_id = d.org_id"
+                " WHERE t.id IN :ids"
+            ).bindparams(bindparam("ids", expanding=True)), {"ids": tids},
+        )).all())
+
+    out: dict[str, tuple[list[str] | None, list[str] | None]] = {}
+    for uid, tid in users.items():
+        if uam.get(uid):
+            models: list[str] | None = uam[uid]
+        elif tid:
+            models = tam.get(tid) or None
+        else:
+            models = None
+        if uac.get(uid):
+            clients: list[str] | None = uac[uid]
+        elif tid:
+            clients = tac.get(tid) or oac.get(tid) or None
+        else:
+            clients = None
+        out[uid] = (models, clients)
+    return out
+
+
+async def preload_vk_contexts(
+    db: AsyncSession, key_users: list[tuple[str, str]], *, chunk: int = 1000
+) -> tuple[dict[str, AuthContext], dict[str, bool]]:
+    """기동 시 사전 적재(wave 1e).
+
+    (key_hash, user_id) 목록 → (key_hash → AuthContext, user_id → is_active).
+
+    요청 경로의 ``_load_user`` + ``_vk_auth_context`` 와 같은 값을 만든다(key_prefix 는 None —
+    서빙할 때 토큰에서 채운다). 비활성/삭제된 사용자는 컨텍스트 없이 is_active=False 로만 남는다.
+    """
+    by_user: dict[str, list[str]] = {}
+    for h, uid in key_users:
+        by_user.setdefault(str(uid), []).append(h)
+    contexts: dict[str, AuthContext] = {}
+    active: dict[str, bool] = {}
+    uids = list(by_user)
+    for i in range(0, len(uids), chunk):
+        part = uids[i:i + chunk]
+        rows = (await db.execute(select(User).where(User.id.in_(part)))).scalars().all()
+        found = {str(u.id): u for u in rows}
+        live = {uid: (str(u.team_id) if u.team_id else None)
+                for uid, u in found.items() if u.is_active}
+        ents = await _resolve_entitlements_batch(db, live)
+        for uid in part:
+            u = found.get(uid)
+            if u is None or not u.is_active:
+                active[uid] = False
+                continue
+            active[uid] = True
+            models, clients = ents[uid]
+            for h in by_user[uid]:
+                contexts[h] = _vk_auth_context(u, models, clients, None)
+    return contexts, active
+
+
 def _is_jwt_token(token: str) -> bool:
     """JWT 형태 판별: '.' 구분 3-part."""
     parts = token.split(".")
@@ -220,8 +348,11 @@ class AuthLocalCaches:
         self.redis_fallback_timeout = redis_fallback_timeout
         self.db_timeout = db_timeout
         self.stale_served = 0
+        #: +1 per invalidation — the startup pre-load (wave 1e) discards values read before one.
+        self.generation = 0
 
     def invalidate(self, payload: dict) -> None:
+        self.generation += 1
         if payload.get("all"):
             self.active.clear()
             self.ctx.clear()
@@ -345,6 +476,7 @@ class VKAuthStrategy:
                 cached_ctx.key_prefix = key_prefix
                 if caches is not None:
                     caches.ctx.put(key_hash, cached_ctx)
+                _recent_vk.note(key_hash)
                 return cached_ctx
 
         # 2) VK→user_id 매핑 조회 (Admin API가 발급 시 저장). Redis 가 유일한
@@ -383,29 +515,7 @@ class VKAuthStrategy:
                 caches.active.put(str(user_id), False)
             raise PermissionError("User not found or inactive")
 
-        # roles: TEAM_LEADER 만 DB 역할을 실어준다 — /v1/usage/team/{id} 가
-        # "TEAM_LEADER(본인 팀) 또는 ADMIN" 계약인데 TEAM_LEADER 는 VK 만 가지므로
-        # USER 합성이면 자기 팀 usage 조차 403 이다. ADMIN 의 VK 는 USER 유지 —
-        # 유출된 admin 소유 VK 가 프록시 관리 표면까지 통과하지 않도록
-        # 최소권한을 유지한다(JWT 경로만 관리 역할을 준다).
-        vk_roles = (
-            [Role.TEAM_LEADER]
-            if user.role == Role.TEAM_LEADER.value
-            else [Role.USER]
-        )
-
-        auth_context = AuthContext(
-            user_id=str(user.id),
-            team_id=str(user.team_id) if user.team_id else "",
-            dept_id="",
-            roles=vk_roles,
-            auth_type=AuthType.VIRTUAL_KEY,
-            key_id=None,
-            key_prefix=key_prefix,
-            allowed_models=allowed_models,
-            allowed_clients=allowed_clients,
-            sso_subject=user.sso_subject,
-        )
+        auth_context = _vk_auth_context(user, allowed_models, allowed_clients, key_prefix)
         if caches is not None:
             caches.active.put(str(user.id), True)
             caches.ctx.put(key_hash, auth_context)
@@ -421,6 +531,7 @@ class VKAuthStrategy:
         except Exception:
             logger.warning("vk_auth_cache_write_failed")
 
+        _recent_vk.note(key_hash)
         return auth_context
 
     @staticmethod

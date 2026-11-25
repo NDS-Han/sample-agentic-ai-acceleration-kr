@@ -252,6 +252,29 @@ def _client_config_data(config) -> dict:
     }
 
 
+def _put_team_policy(team_id: str, config) -> None:
+    """TEAM 행(또는 None) → 정책 캐시. T=NULL 'D-only' 행은 행 없음과 같다(§3-1)."""
+    _bd.DEGRADED.policy.put(
+        _bd.PolicyCache.team_key(team_id),
+        None if config is None or config.max_budget_usd is None else _team_config_data(config),
+    )
+
+
+def _put_user_policy(user_id: str, rows: list) -> None:
+    """USER 활성 행 전체(총예산 + per-app) → 정책 캐시."""
+    total = next((r for r in rows if r.client is None), None)
+    apps = {r.client: r for r in rows if r.client}
+    pc = _bd.DEGRADED.policy
+    pc.put(
+        _bd.PolicyCache.user_key(user_id),
+        _user_config_data(total, sorted(apps)) if total is not None else None,
+    )
+    for c in PER_APP_BUDGET_CLIENTS:
+        row = apps.get(c)
+        pc.put(_bd.PolicyCache.client_key(user_id, c),
+               _client_config_data(row) if row is not None else None)
+
+
 def _period_bounds(period: str):
     """리포팅 TZ 'YYYY-MM' → [월초, 다음 월초) — ``requested_at`` 범위 조건(인덱스 사용)."""
     from app.services.web_search_quota import period_utc_range
@@ -1350,11 +1373,7 @@ class BudgetService:
             .where(BudgetConfig.is_active == True)  # noqa: E712
             .limit(1)
         )
-        config = result.scalar_one_or_none()
-        _bd.DEGRADED.policy.put(
-            _bd.PolicyCache.team_key(team_id),
-            None if config is None or config.max_budget_usd is None else _team_config_data(config),
-        )
+        _put_team_policy(team_id, result.scalar_one_or_none())
 
     async def _load_user_policy(self, db: AsyncSession, user_id: str) -> None:
         """백그라운드 재조회 — USER 총예산 + per-app 행 → 정책 캐시 (한 번의 조회)."""
@@ -1364,18 +1383,41 @@ class BudgetService:
             .where(BudgetConfig.scope_id == user_id)
             .where(BudgetConfig.is_active == True)  # noqa: E712
         )
-        rows = list(result.scalars().all())
-        total = next((r for r in rows if r.client is None), None)
-        apps = {r.client: r for r in rows if r.client}
-        pc = _bd.DEGRADED.policy
-        pc.put(
-            _bd.PolicyCache.user_key(user_id),
-            _user_config_data(total, sorted(apps)) if total is not None else None,
-        )
-        for c in PER_APP_BUDGET_CLIENTS:
-            row = apps.get(c)
-            pc.put(_bd.PolicyCache.client_key(user_id, c),
-                   _client_config_data(row) if row is not None else None)
+        _put_user_policy(user_id, list(result.scalars().all()))
+
+    @staticmethod
+    async def preload_policies(db: AsyncSession, user_ids: list[str], team_ids: list[str],
+                               *, chunk: int = 1000) -> int:
+        """기동 시 사전 적재(wave 1e) — 사용자·팀 예산 정책을 IN 목록 일괄 조회로 정책 캐시에.
+
+        ``_load_user_policy`` / ``_load_team_policy`` 와 같은 값을 넣는다(Redis 는 건드리지 않는다).
+        인덱스 ``idx_budget_configs_scope (scope, scope_id) WHERE is_active`` 를 탄다.
+        반환: 넣은 키 수.
+        """
+        n = 0
+        uids = [str(u) for u in dict.fromkeys(user_ids)]
+        tids = [str(t) for t in dict.fromkeys(team_ids) if t]
+        for scope, ids in ((BudgetScope.USER, uids), (BudgetScope.TEAM, tids)):
+            for i in range(0, len(ids), chunk):
+                part = ids[i:i + chunk]
+                rows = (await db.execute(
+                    select(BudgetConfig)
+                    .where(BudgetConfig.scope == scope)
+                    .where(BudgetConfig.scope_id.in_(part))
+                    .where(BudgetConfig.is_active == True)  # noqa: E712
+                )).scalars().all()
+                grouped: dict[str, list] = {x: [] for x in part}
+                for r in rows:
+                    grouped.setdefault(str(r.scope_id), []).append(r)
+                for ident, rs in grouped.items():
+                    if scope == BudgetScope.USER:
+                        _put_user_policy(ident, rs)
+                    else:
+                        # _load_team_policy 의 LIMIT 1 — 총예산 행(client IS NULL)을 우선한다.
+                        rs.sort(key=lambda r: r.client is not None)
+                        _put_team_policy(ident, rs[0] if rs else None)
+                    n += 1
+        return n
 
     async def reserve_budget(
         self,
