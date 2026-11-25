@@ -143,6 +143,10 @@ class ModelPricingSchema(BaseModel):
     # threshold 가 None 이면 티어 없음 → calculate_cost 가 아래 5개를 읽지 않는다(단일 요율).
     # long 단가가 None 이면 그 항은 short 로 폴백(fail-safe, 크래시 없음).
     long_context_threshold_tokens: int | None = None
+    #: 단가 행이 없어 0 단가로 채운 설정인가(wave 3 B7). 비용은 $0 으로 계산되지만 행에
+    #: ``pricing_missing=true`` 가 붙어 워커의 재가격 잡이 단가가 생기면 채운다 — "조용한 $0"
+    #: 이 아니다. 기본 False — 이 필드를 모르는 구 캐시 항목은 종전대로 읽힌다.
+    pricing_missing: bool = False
 
     @field_validator("long_context_threshold_tokens", mode="before")
     @classmethod

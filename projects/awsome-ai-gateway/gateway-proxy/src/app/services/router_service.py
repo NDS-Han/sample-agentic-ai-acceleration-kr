@@ -245,7 +245,10 @@ def _orm_to_schema(alias_row: ModelAlias, pricing_row: Optional[ModelPricing]) -
                 alias=alias_row.alias,
                 provider_model_id=alias_row.provider_model_id,
             )
-        p = ModelPricingSchema(input_per_1k=Decimal("0"), output_per_1k=Decimal("0"))
+        # B7 — $0 단가로 계속 서빙하되 표시한다: cost_recorder 가 행에 pricing_missing 을
+        # 싣고 gateway_pricing_missing_total 을 올리며, 워커 재가격 잡이 단가가 생기면 채운다.
+        p = ModelPricingSchema(input_per_1k=Decimal("0"), output_per_1k=Decimal("0"),
+                               pricing_missing=True)
 
     return ModelConfigSchema(
         provider_model_id=alias_row.provider_model_id,

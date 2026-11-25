@@ -474,6 +474,18 @@ export interface ServiceAccountUsageResponse {
  * ``cost_usd === null`` 은 "미추적"(비용 추적 이전 사용분) — $0(무료)으로 그리면 안 된다.
  * ``untracked_queries > 0`` 이면 ``cost_usd`` 는 추적된 부분만의 합계다.
  */
+/** Total (charged) — admin-api ChargedBreakdown(wave 3). 웹 검색 null = 미추적($0 아님). */
+export interface ChargedBreakdown {
+  success_usd: number;
+  /** ERROR + TIMEOUT 중 프로바이더가 토큰을 처리해 청구된 부분. */
+  failed_usd: number;
+  /** 클라이언트가 끊은 스트림(CANCELLED)의 청구분. */
+  cancelled_usd: number;
+  model_usd: number;
+  web_search_usd: number | null;
+  total_usd: number;
+}
+
 export interface WebSearchUsage {
   queries: number;
   cost_usd: number | null;

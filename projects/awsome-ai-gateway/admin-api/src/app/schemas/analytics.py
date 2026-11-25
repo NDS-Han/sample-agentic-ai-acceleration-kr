@@ -28,15 +28,38 @@ class ExportParams(BaseModel):
 # ── Responses ──
 
 
+class ChargedBreakdown(BaseModel):
+    """Total (charged) — 청구 총액과 분해(wave 3 DECISION 1/2).
+
+    model_usd = success + failed(ERROR+TIMEOUT) + cancelled — 프로바이더가 처리해 청구한 모델 토큰 비용.
+    web_search_usd = AgentCore 검색 비용(None = 이 기간 추적된 행 없음 — $0 이 아니다).
+    total_usd = model_usd + web_search_usd(미추적은 0 으로).
+    """
+
+    success_usd: float = 0.0
+    failed_usd: float = 0.0
+    cancelled_usd: float = 0.0
+    model_usd: float = 0.0
+    web_search_usd: float | None = None
+    total_usd: float = 0.0
+
+
 class CostSummary(BaseModel):
+    #: SUCCESS 호출 수.
     total_requests: int = 0
     # 성공 외 상태(ERROR+TIMEOUT) 요청 수 — 정책 차단은 usage_logs 에 행이 없어
-    # 상류/게이트웨이 장애만 잡힌다. 전체 요청수 = total_requests + error_requests.
+    # 상류/게이트웨이 장애만 잡힌다. 전체 요청수 = total_requests + error_requests + cancelled.
     error_requests: int = 0
+    #: 클라이언트가 끊은 스트림(CANCELLED, migration 0062).
+    cancelled_requests: int = 0
+    #: 청구 대상 호출 수(상태 무관 — 토큰·비용 > 0).
+    billable_requests: int = 0
     total_tokens: int = 0
+    #: 모델 토큰 비용 — 청구 대상 전 상태(wave 3 이전에는 SUCCESS 만). 웹 검색은 charged 에.
     total_cost_usd: Decimal = Decimal("0")
     active_users: int = 0
     avg_cost_per_user_usd: Decimal = Decimal("0")
+    charged: ChargedBreakdown = ChargedBreakdown()
 
 
 class TokenBreakdown(BaseModel):

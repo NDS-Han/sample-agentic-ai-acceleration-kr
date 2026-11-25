@@ -35,9 +35,15 @@ class CostStreamEntry(BaseModel):
     # Reasoning/thinking tokens — visibility submetric (already inside output_tokens
     # for GPT-5.x; Anthropic extended-thinking lands here too). NOT a billing input.
     reasoning_tokens: int = 0
-    # Server-side web search calls for this request — attribution metric, NOT billing.
+    # Server-side web search calls for this request.
     web_search_count: int = 0
     cost_usd: Decimal
+    # 이 요청의 AgentCore Web Search 비용(wave 3, DECISION 2 — 청구 총액의 일부). 게이트웨이가
+    # finalize 에서 한 번 계산해 Redis 예산 정산과 이 페이로드에 같은 값을 싣는다. None = 구
+    # 게이트웨이(워커가 자기 단가 스냅샷으로 계산 — 종전 동작). cost_usd(모델 토큰 비용)와 별개 열.
+    web_search_cost_usd: Decimal | None = None
+    # 단가 행이 없어 cost_usd=0 으로 계산된 행(B7) — 워커 재가격 잡 대상.
+    pricing_missing: bool = False
 
     @field_validator(
         "input_tokens", "output_tokens",
@@ -59,9 +65,11 @@ class CostStreamEntry(BaseModel):
             return min(max(iv, 0), 10**12)
         return v
 
-    @field_validator("cost_usd", mode="before")
+    @field_validator("cost_usd", "web_search_cost_usd", mode="before")
     @classmethod
     def _finite_cost(cls, v):
+        if v is None:
+            return v
         # 'NaN'/'Infinity' 는 Decimal 파싱을 통과하고 Postgres NUMERIC 에도
         # 저장 가능하다 — 그대로 흘러가면 원장(usage_logs/budget_usages)이
         # 영구 오염된다(16차 리뷰 F-5, worker 측 미러와 같은 규약).
@@ -139,6 +147,8 @@ class CostStreamEntry(BaseModel):
         cost_usd: Decimal,
         reasoning_tokens: int = 0,
         web_search_count: int = 0,
+        web_search_cost_usd: Decimal | None = None,
+        pricing_missing: bool = False,
         latency_ms: int,
         ttft_ms: int | None = None,
         is_streaming: bool,
@@ -175,6 +185,8 @@ class CostStreamEntry(BaseModel):
             cache_read_tokens=cache_read_tokens,
             reasoning_tokens=reasoning_tokens,
             web_search_count=web_search_count,
+            web_search_cost_usd=web_search_cost_usd,
+            pricing_missing=pricing_missing,
             cost_usd=cost_usd,
             latency_ms=latency_ms,
             ttft_ms=ttft_ms,

@@ -11,6 +11,8 @@ export function eventTone(type: string): BadgeTone {
     case 'TIMEOUT':
     case 'SLOW_REQUEST':
       return 'amber';
+    case 'CANCELLED':
+      return 'neutral';
     case 'SUCCESS':
       return 'teal';
     default:
@@ -23,6 +25,7 @@ export function eventTypeLabels(t: (_key: string) => string): Record<string, str
   return {
     ERROR: t('types.ERROR'),
     TIMEOUT: t('types.TIMEOUT'),
+    CANCELLED: t('types.CANCELLED'),
     SLOW_REQUEST: t('types.SLOW_REQUEST'),
     SUCCESS: t('types.SUCCESS'),
   };
@@ -34,6 +37,7 @@ export const EVENT_TYPE_FILTERS: MonitoringEventTypeFilter[] = [
   'success',
   'error',
   'timeout',
+  'cancelled',
   'slow',
   'abnormal',
 ];

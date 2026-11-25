@@ -95,7 +95,8 @@ class BudgetUsage(Base):
     scope_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
     period: Mapped[str] = mapped_column(String(7), nullable=False)  # YYYY-MM
     client: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    used_usd: Mapped[Decimal] = mapped_column(Numeric(12, 4), nullable=False, default=Decimal("0"))
+    # NUMERIC(16,6) since migration 0062 — same 6 decimals as the row cost.
+    used_usd: Mapped[Decimal] = mapped_column(Numeric(16, 6), nullable=False, default=Decimal("0"))
     limit_usd: Mapped[Decimal] = mapped_column(Numeric(12, 4), nullable=False)
     last_updated: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()

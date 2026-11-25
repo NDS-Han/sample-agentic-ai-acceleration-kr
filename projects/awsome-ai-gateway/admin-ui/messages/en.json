@@ -1522,6 +1522,7 @@
       "types": {
         "ERROR": "Error",
         "TIMEOUT": "Timeout",
+        "CANCELLED": "Cancelled",
         "SLOW_REQUEST": "Slow",
         "SUCCESS": "OK"
       },
@@ -1530,6 +1531,7 @@
         "success": "OK",
         "error": "Error",
         "timeout": "Timeout",
+        "cancelled": "Cancelled",
         "slow": "Slow (first token over 3s)",
         "abnormal": "Abnormal (error/timeout/slow)"
       },
@@ -2124,7 +2126,7 @@
     "avgCostPerUserWsNotTrackedDesc": "Based on {count} active users this month · web search not tracked",
     "dailyAvgWsNotTrackedDesc": "Daily average based on elapsed days · web search not tracked",
     "dailyAvgProjectionWsNotTracked": "Month-end projection {amount} (linear estimate) · web search not tracked",
-    "budgetUtilizationCombinedDesc": "Model cost vs budget · web search excluded",
+    "budgetUtilizationCombinedDesc": "Charged cost vs budget · incl. web search",
     "budgetModelCostOnly": "Model cost only — web search is not counted toward budgets.",
     "pricingTitle": "Web search pricing",
     "pricingDesc": "Amazon Bedrock AgentCore Web Search is billed per query. This price is used to show web search cost in monitoring; it never affects budgets or rate limits.",
@@ -2204,5 +2206,15 @@
     "invalidCap": "Enter a whole number from {min} to {max}.",
     "removeOverride": "Remove override",
     "resetOrg": "Reset to defaults"
+  },
+  "charged": {
+    "title": "Total (charged)",
+    "success": "Success",
+    "failed": "Failed (error/timeout)",
+    "cancelled": "Cancelled",
+    "webSearch": "Web search",
+    "notTracked": "Not tracked",
+    "notTrackedHint": "No web search cost was recorded in this period (not the same as $0).",
+    "hint": "Billed by the provider regardless of request outcome: any request whose tokens were processed is charged. Requests rejected before reaching Bedrock are $0."
   }
 }

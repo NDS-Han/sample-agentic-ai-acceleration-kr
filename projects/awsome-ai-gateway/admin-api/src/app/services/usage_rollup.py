@@ -21,8 +21,9 @@ rollup_dirty_marks)를 같은 문장 안에서 읽어 결정하므로 분류와 
   day: 리포팅 tz 날짜 — 월 누적 행은 NULL(by_day=True 면 월 누적을 쓰지 않으므로 항상 값이 있다)
   i/o/cw/cr = input/output/cache_creation/cache_read 토큰, c = 비용(모델), n = 호출 수(count(*)),
   rq = 계량 호출 수, lat = 지연 합, wq/wc/wu = 웹 검색 수 / 비용(추적 행이 없으면 NULL) / 미추적 수
-호출자는 ``WITH {ctes} SELECT … FROM x …`` 로 필요한 집계를 한다. 상태 구분은 호출자의 FILTER 다
-(비용·토큰·활성 사용자 = SUCCESS, 웹 검색·에러 수 = 전 status — 종전 raw 쿼리와 같은 정의).
+호출자는 ``WITH {ctes} SELECT … FROM x …`` 로 필요한 집계를 한다. 비용·토큰·활성 사용자 =
+**청구 대상(billable) 행, 상태 무관**(wave 3 DECISION 1 — core/usage_filters.BILLABLE_GRAIN_SQL),
+상태별 분해(성공·실패·취소)와 에러 수는 호출자의 FILTER 다.
 
 ## 값은 전부 바인드, 필터 조각은 고정 문자열
 사용자 입력이 SQL 텍스트에 들어가지 않는다. tz 는 Settings validator 가 검증한 IANA 이름(바인드).
@@ -44,7 +45,12 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import ValidationError
-from app.core.usage_filters import day_range_to_utc, period_to_utc_range, reporting_timezone
+from app.core.usage_filters import (
+    billable_row_sql,
+    day_range_to_utc,
+    period_to_utc_range,
+    reporting_timezone,
+)
 
 #: daily_aggregate_days / monthly_aggregate_months / hourly_aggregate_hours.grain_version 하한 —
 #: cost-recorder-worker daily_aggregator.GRAIN_VERSION 과 같다(3 = 웹 검색 열 포함, 0061).
@@ -120,7 +126,11 @@ class RollupScope:
     teams: tuple[uuid.UUID, ...] | None = None
     users: tuple[uuid.UUID, ...] | None = None
     client: str | None = None
-    success_only: bool = False
+    #: 청구 대상(billable) 입도 행만 — 상태 무관(DECISION 1). 비용·토큰·rq·웹 검색 합은 판정
+    #: 없이도 같다(비청구 행은 $0·0 토큰). ⚠️ 판정이 raw 분기는 행 단위, 롤업 분기는 입도 단위라
+    #: 이 스코프에서 n(count(*))·lat 는 소스에 따라 달라진다 — 호출 수는 rq 를 쓰고, 지연이
+    #: 필요한 질의는 billable_only 없이 HAVING 으로 거른다(usage_reads.model_detail).
+    billable_only: bool = False
     by_day: bool = False
     #: 테스트·벤치가 "오늘"·"지금" 을 고정할 수 있게 둔다. None = 리포팅 tz 의 오늘 / 현재 시각.
     today: date | None = None
@@ -138,12 +148,12 @@ class RollupScope:
 
     @staticmethod
     def of(rng: DayRange, *, teams=None, users=None, client: str | None = None,
-           success_only: bool = False, by_day: bool = False, **kw) -> RollupScope:
+           billable_only: bool = False, by_day: bool = False, **kw) -> RollupScope:
         return RollupScope(
             start=rng.start, end=rng.end,
             teams=tuple(teams) if teams is not None else None,
             users=tuple(users) if users is not None else None,
-            client=norm_client(client), success_only=success_only, by_day=by_day, **kw,
+            client=norm_client(client), billable_only=billable_only, by_day=by_day, **kw,
         )
 
     def cache_part(self) -> str:
@@ -151,7 +161,7 @@ class RollupScope:
         teams = ",".join(sorted(str(t) for t in self.teams)) if self.teams is not None else "*"
         users = ",".join(sorted(str(u) for u in self.users)) if self.users is not None else "*"
         return (f"{self.start}~{self.end}|t={teams}|u={users}|c={self.client or 'all'}"
-                f"|s={int(self.success_only)}|d={int(self.by_day)}")
+                f"|b={int(self.billable_only)}|d={int(self.by_day)}")
 
 
 def norm_client(client: str | None) -> str | None:
@@ -182,9 +192,10 @@ def _filters(scope: RollupScope) -> tuple[str, str]:
     if scope.client is not None:
         agg_f += " AND a.client = :r_client"
         raw_f += " AND COALESCE(l.client, 'other') = :r_client"
-    if scope.success_only:
-        agg_f += " AND a.status = 'SUCCESS'"
-        raw_f += " AND l.status = 'SUCCESS'"
+    if scope.billable_only:
+        # 같은 정의의 두 판 — 롤업 입도(계량 행 수·웹 검색 수)와 raw 행.
+        agg_f += " AND (a.request_count > 0 OR a.web_search_count > 0)"
+        raw_f += f" AND {billable_row_sql('l')}"
     return agg_f, raw_f
 
 

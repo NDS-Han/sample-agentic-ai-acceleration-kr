@@ -11,6 +11,8 @@ import { errorRateInfo } from '@/lib/utils/errorRate';
 import type { AnalyticsFilterForm } from '@/types/api';
 import { buildAnalyticsQuery, fetchAnalyticsOnce } from '@/lib/utils/analyticsQuery';
 import { ErrorState } from '@/components/common/ErrorState';
+import { ChargedBreakdown } from '@/components/common/ChargedBreakdown';
+import type { ChargedBreakdown as Charged } from '@/types/entities';
 
 interface ROIMetricsCardsProps {
   filter: AnalyticsFilterForm;
@@ -27,6 +29,9 @@ interface AnalyticsAPIResponse {
     total_cost_usd: number;
     active_users: number;
     avg_cost_per_user_usd: number;
+    cancelled_requests?: number;
+    /** Total (charged) — 성공 + 실패 + 취소 + 웹 검색(wave 3). */
+    charged?: Charged;
   };
   by_model: { model: string; requests: number; cost_usd: number }[];
   by_team: { team: string; team_id: string; cost_usd: number; active_users: number }[];
@@ -148,12 +153,15 @@ export async function ROIMetricsCards({ filter, latestMonth }: ROIMetricsCardsPr
   }
 
   return (
-    <div
-      className={`grid grid-cols-1 sm:grid-cols-2 gap-4 ${showWs ? 'lg:grid-cols-3 xl:grid-cols-5' : 'lg:grid-cols-4'}`}
-    >
-      {metrics.map((metric) => (
-        <MetricCard key={metric.label} {...metric} />
-      ))}
+    <div className="flex flex-col gap-4">
+      <div
+        className={`grid grid-cols-1 sm:grid-cols-2 gap-4 ${showWs ? 'lg:grid-cols-3 xl:grid-cols-5' : 'lg:grid-cols-4'}`}
+      >
+        {metrics.map((metric) => (
+          <MetricCard key={metric.label} {...metric} />
+        ))}
+      </div>
+      {await ChargedBreakdown({ charged: summary.charged })}
     </div>
   );
 }

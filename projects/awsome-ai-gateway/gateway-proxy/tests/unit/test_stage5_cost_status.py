@@ -169,8 +169,8 @@ async def test_anthropic_stream_idle_timeout_marks_timeout():
 
 
 @pytest.mark.asyncio
-async def test_anthropic_stream_disconnect_is_success():
-    """클라이언트 끊김 → 게이트웨이/상류 실패가 아니라 과금된 정상 건 → SUCCESS."""
+async def test_anthropic_stream_disconnect_is_cancelled():
+    """클라이언트 끊김 → CANCELLED(wave 3 B1). 드레인이 회수한 토큰은 그대로 청구된다."""
     outcome: dict = {}
     calls: list[TokenUsage] = []
 
@@ -191,8 +191,10 @@ async def test_anthropic_stream_disconnect_is_success():
     await gen.aclose()          # 클라이언트 끊김
     await drain_pending_tasks(timeout=2.0)
 
-    assert outcome["status"] == "success"
-    assert usage_status_of(outcome) == "SUCCESS"
+    assert outcome["status"] == "cancelled"
+    assert usage_status_of(outcome) == "CANCELLED"
+    # 드레인이 최종 usage(message_delta)까지 읽었다 — 추정이 아니다.
+    assert calls and calls[0].output_tokens == 7 and calls[0].estimated is False
 
 
 @pytest.mark.asyncio
@@ -209,8 +211,11 @@ async def test_anthropic_stream_disconnect_after_error_stays_error():
         FakeRequest(), gen_chunks(), idle_timeout=5.0,
         drain_timeout=0.2, outcome=outcome,
     )
+    seen = 0
     async for _ in gen:
-        break  # error 프레임까지는 소비됨 — 그다음 끊김
+        seen += 1
+        if seen == 2:
+            break  # error 프레임까지 소비 — 그다음 끊김
     await gen.aclose()
     await drain_pending_tasks(timeout=2.0)
     assert outcome["status"] == "error"

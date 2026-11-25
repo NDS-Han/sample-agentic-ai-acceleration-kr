@@ -142,7 +142,7 @@ class AnalyticsService:
     ) -> AnalyticsResponse:
         """Analytics 개요 — 하이브리드 롤업 읽기 2문장(합계·분해 + 일별 추이) + seed 잔차.
 
-        숫자의 정의는 종전 raw 집계와 같다(SUCCESS·리포팅 tz·앱·요청 시점 팀). scope_ids 를
+        숫자의 정의: 청구 대상(billable — 상태 무관, wave 3)·리포팅 tz·앱·요청 시점 팀. scope_ids 를
         넘기면(라우터가 캐시 키를 만들려고 이미 해석한 경우) 다시 해석하지 않는다.
         """
         # custom 날짜 구간 — 둘 다 있어야 적용. 한쪽만 오면 400 이다(조용한 월 fallback
@@ -177,10 +177,13 @@ class AnalyticsService:
         cost_summary = CostSummary(
             total_requests=t.total_requests,
             error_requests=t.error_requests,
+            cancelled_requests=t.cancelled_requests,
+            billable_requests=t.billable_requests,
             total_tokens=t.total_tokens,
             total_cost_usd=total_cost,
             active_users=active_users_count,
             avg_cost_per_user_usd=avg_cost,
+            charged=t.charged(),
         )
 
         # 비용 내림차순(+ alias) — 같은 페이지의 상세 표(cost DESC)와 같은 순서·같은 팔레트 index.
@@ -274,7 +277,7 @@ class AnalyticsService:
             tt.points.append(TrendItem(date=str(d), cost_usd=Decimal(str(c)), requests=int(n)))
         trends_by_team = list(_trend_rows.values())
 
-        # 웹 검색(모니터링 전용) — 같은 구간·scope·client, status 무관. 모델 비용에 더하지 않는다.
+        # 웹 검색 — 같은 구간·scope·client, status 무관. 청구 총액에는 cost_summary.charged 로 들어간다.
         web_search = ws_from_totals(t.ws_queries, t.ws_cost, t.ws_untracked,
                                     await ws_settings(session))
 
@@ -311,8 +314,9 @@ class AnalyticsService:
         """
         _roi_scope, scope_ids = await _resolve_scope(actor, scope, session)
         rng = ur.resolve_range(period, start_date, end_date)
-        sc = ur.RollupScope.of(rng, teams=scope_ids, client=client, success_only=True)
-        day_sc = ur.RollupScope.of(rng, teams=scope_ids, client=client, success_only=True,
+        # 상세 표는 지연(전 호출)이 필요해 판정은 SQL 안에서 한다(usage_reads.model_detail).
+        sc = ur.RollupScope.of(rng, teams=scope_ids, client=client)
+        day_sc = ur.RollupScope.of(rng, teams=scope_ids, client=client, billable_only=True,
                                    by_day=True)
         model_rows = await reads.model_detail(session, sc)
         daily_rows = await reads.model_daily(session, day_sc)
@@ -394,13 +398,13 @@ class AnalyticsService:
         period: str,
         date: str,
     ) -> UsageByUserResponse:
-        """User 단위 누적 (period 1일 ~ date, 리포팅 tz, SUCCESS only). Dashboard 요약 테이블용."""
+        """User 단위 누적 (period 1일 ~ date, 리포팅 tz, 청구 대상 전 상태). Dashboard 요약 테이블용."""
         import datetime as _dt
 
         _validate_period_date(period, date)
         month = ur.month_range(period)
         rng = ur.DayRange(month.start, _dt.date.fromisoformat(date), period)
-        sc = ur.RollupScope.of(rng, success_only=True)
+        sc = ur.RollupScope.of(rng, billable_only=True)
         rows = await reads.by_user_detail(session, sc)
         meta = await ur.fetch_meta(session, sc)
 
@@ -534,8 +538,19 @@ class AnalyticsService:
                     data.period, item.model, item.display_name or "",
                     item.requests, str(item.cost_usd),
                 ])
-        # 웹 검색 — 위 표의 cost_usd(모델 비용)와 **별개** 구획. 행 단위 열로 섞으면 스프레드시트
-        # 합계가 모델+검색을 섞어 예산 수치와 어긋난다. 비용 공란 = 미추적(무료 아님).
+        # Total (charged) 구획(wave 3) — 위 표의 cost_usd 는 모델 토큰 비용(청구 대상 전 상태)이다.
+        # 청구 총액 = 성공 + 실패 + 취소 + 웹 검색. 웹 검색 공란 = 미추적(무료 아님).
+        ch = data.cost_summary.charged
+        writer.writerow([])
+        writer.writerow(["period", "charged_success_usd", "charged_failed_usd",
+                         "charged_cancelled_usd", "charged_web_search_usd", "charged_total_usd"])
+        writer.writerow([
+            data.period, f"{ch.success_usd:.6f}", f"{ch.failed_usd:.6f}",
+            f"{ch.cancelled_usd:.6f}",
+            "" if ch.web_search_usd is None else f"{ch.web_search_usd:.6f}",
+            f"{ch.total_usd:.6f}",
+        ])
+        # 웹 검색 — 위 표의 cost_usd(모델 비용)와 **별개** 구획(행 단위 열로 섞지 않는다).
         # 화면과 같은 표시 규칙: 배포됐거나 기록 비용 > 0 일 때만 구획을 넣는다.
         ws = data.web_search
         if web_search_visible(ws):

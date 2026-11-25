@@ -62,7 +62,9 @@ def _total(queries, cost, requests, untracked=0):
     return SimpleNamespace(ws_queries=queries, ws_cost=cost, ws_untracked=untracked,
                            total_requests=requests, error_requests=0, total_cost=0,
                            active_users=0, input_tokens=0, output_tokens=0,
-                           cache_creation_tokens=0, cache_read_tokens=0)
+                           cache_creation_tokens=0, cache_read_tokens=0,
+                           cancelled_requests=0, billable_requests=requests,
+                           success_cost=0, failed_cost=0, cancelled_cost=0)
 
 
 @pytest.mark.asyncio

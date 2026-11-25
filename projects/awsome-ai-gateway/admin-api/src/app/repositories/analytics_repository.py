@@ -162,7 +162,7 @@ class AnalyticsRepository:
             .filter(UsageLog.status.in_([UsageStatus.ERROR, UsageStatus.TIMEOUT]))
             .label("errors"),
         ).where(
-            cost_where if cost_where is not None else cost_period_filter(period, success_only=False),
+            cost_where if cost_where is not None else cost_period_filter(period, billable_only=False),
         )
         stmt = self._apply_scope_filter(stmt, scope, scope_id, scope_ids)
         stmt = self._apply_client_filter(stmt, client)

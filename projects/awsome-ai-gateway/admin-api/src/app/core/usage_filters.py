@@ -1,20 +1,24 @@
 # Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
 
-"""비용 집계의 **정답 정의** — 단일 진실원 (DEVLOG §59).
+"""비용 집계의 **정답 정의** — 단일 진실원 (DEVLOG §59, wave 3 DECISION 1).
 
 대시보드·budget·analytics·my·chat 어디서 봐도 같은 숫자가 나오도록, "운영 비용
 집계"의 기준을 한 곳에 못박는다:
 
-  1. **SUCCESS 만 합산** — ERROR/TIMEOUT 호출은 비용에서 제외(유효 사용량 관점).
-     (실측: 이번 달 ERROR 26건 $2.32 + TIMEOUT 17건 $1.18 이 실패 호출에도 비용으로
-      쌓여 있어, status 필터 없으면 Top 사용자/팀이 부풀려졌었다.)
+  1. **청구 대상(billable) = 프로바이더가 실제로 처리해 청구한 행** — 상태와 무관하다
+     (SUCCESS·ERROR·TIMEOUT·CANCELLED). 판정: 토큰(input/output/cache) > 0 또는 비용 > 0
+     또는 웹 검색 > 0. Bedrock 도달 전 거절·Bedrock 이 처리 전 거절한 요청은 0 토큰·$0 이라
+     자연히 빠진다. 예산(budget_usages)이 원래 이 정의였다 — 대시보드만 SUCCESS 만 세서
+     "사용 $13 / 예산 소진 $963" 같은 불일치가 났다. ``BILLABLE_ROW_SQL`` /
+     ``billable_filter()`` / 롤업 ``BILLABLE_GRAIN_SQL`` 이 그 한 정의다.
+     청구 총액(Total charged) = 모델 토큰 비용(전 billable 행) + 웹 검색 비용(DECISION 2).
   2. **리포팅 타임존 월 경계** — 캘린더 경계는 REPORTING_TIMEZONE(기본 Asia/Seoul)
      기준. timestamptz 에 to_char 를 그냥 쓰면 DB 세션 TZ(UTC)로 잘려 KST 6/1 0~9시
      호출이 5월로 새는 9시간 오차가 생긴다 → 명시적 타임존 변환으로 강제.
      한국 밖 배포(US·India)는 env 로 배포 리전 타임존을 지정한다.
 
-⚠️ 이 필터는 **비용/사용량 표시용**에만 쓴다. 에러율·모니터링처럼 ERROR/TIMEOUT 을
-세야 하는 쿼리에는 success_only=False 로 쓰거나 쓰지 않는다.
+⚠️ 이 필터는 **비용/사용량 표시용**에만 쓴다. 에러율·모니터링처럼 0 토큰 실패 행까지
+세야 하는 쿼리에는 billable_only=False 로 쓰거나 쓰지 않는다.
 """
 
 from __future__ import annotations
@@ -23,15 +27,45 @@ import re
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import ColumnElement, and_, func, literal
+from sqlalchemy import ColumnElement, and_, func, literal, or_
 
 from app.core.config import get_settings
 from app.core.exceptions import DateRangeTooLongError, ValidationError
-from app.models.usage import UsageLog, UsageStatus
+from app.models.usage import UsageLog
 
 # 기본 리포팅 타임존(Asia/Seoul)의 고정 오프셋. 한국은 DST 가 없어 불변이다.
 # 경계 계산은 아래 _reporting_tz()(zoneinfo) 를 쓰고, 이 상수는 테스트·호환용 공개 이름이다.
 KST = timezone(timedelta(hours=9))
+
+
+#: usage_logs 한 행이 청구 대상인가 — 상태 무관(DECISION 1). ``{a}`` 는 테이블 별칭 접두
+#: (``"l."`` 등, 없으면 빈 문자열). 고정 문자열이라 바인드가 아니다.
+_BILLABLE_ROW_TMPL = (
+    "({a}input_tokens + {a}output_tokens + {a}cache_creation_tokens + {a}cache_read_tokens > 0"
+    " OR {a}cost_usd > 0 OR COALESCE({a}web_search_count, 0) > 0)"
+)
+
+
+def billable_row_sql(alias: str = "") -> str:
+    """raw usage_logs 행의 청구 대상 판정 SQL 조각(별칭 ``alias`` — 예: ``"l"``)."""
+    return _BILLABLE_ROW_TMPL.format(a=f"{alias}." if alias else "")
+
+
+BILLABLE_ROW_SQL = billable_row_sql()
+
+#: 롤업 입도 행(하이브리드 소스 ``x`` — usage_rollup 의 rq/wq 열)의 청구 대상 판정.
+#: rq = 계량 행 수(토큰>0 또는 비용>0), wq = 웹 검색 수. 같은 정의의 집계판이다.
+BILLABLE_GRAIN_SQL = "(rq > 0 OR wq > 0)"
+
+
+def billable_filter() -> ColumnElement:
+    """ORM(UsageLog) 판 — BILLABLE_ROW_SQL 과 같은 술어."""
+    return or_(
+        (UsageLog.input_tokens + UsageLog.output_tokens + UsageLog.cache_creation_tokens
+         + UsageLog.cache_read_tokens) > 0,
+        UsageLog.cost_usd > 0,
+        func.coalesce(UsageLog.web_search_count, 0) > 0,
+    )
 
 
 def reporting_timezone() -> str:
@@ -257,25 +291,32 @@ def kst_day_range_filter(start_day: str, end_day: str) -> ColumnElement:
 
 
 def cost_date_range_filter(
-    start_day: str, end_day: str, *, success_only: bool = True
+    start_day: str, end_day: str, *, billable_only: bool = True,
+    success_only: bool | None = None,
 ) -> ColumnElement:
-    """`cost_period_filter` 의 임의 일자 구간 버전 — [start_day, end_day](리포팅 tz, end 포함) + SUCCESS.
+    """`cost_period_filter` 의 임의 일자 구간 버전 — [start_day, end_day](리포팅 tz, end 포함)
+    + 청구 대상(billable).
 
     Analytics '직접 입력(custom)' 기간에 쓴다. 경계는 `kst_day_range_filter` 와 동일하게
     파라미터 쪽 UTC 반개구간이라 `requested_at` 인덱스를 탄다. `end_day` 는 그 날
     하루 전체를 포함한다.
     """
+    if success_only is not None:  # 구 인자명 — 뜻은 "청구 대상만"(wave 3)
+        billable_only = success_only
     conds: list[ColumnElement] = [kst_day_range_filter(start_day, end_day)]
-    if success_only:
-        conds.append(UsageLog.status == UsageStatus.SUCCESS)
+    if billable_only:
+        conds.append(billable_filter())
     return and_(*conds)
 
 
-def cost_period_filter(period: str, *, success_only: bool = True) -> ColumnElement:
-    """비용 집계 표준 WHERE — KST 월 경계 + (기본) SUCCESS 만.
+def cost_period_filter(period: str, *, billable_only: bool = True,
+                       success_only: bool | None = None) -> ColumnElement:
+    """비용 집계 표준 WHERE — 리포팅 tz 월 경계 + (기본) 청구 대상(billable) 행만.
 
-    기존 `func.to_char(UsageLog.requested_at, "YYYY-MM") == period` (UTC 암묵 +
-    status 무필터)을 대체. success_only=False 면 status 필터 생략(전체 호출).
+    wave 3(DECISION 1): 예전 기본은 SUCCESS 만이었다. 이제 상태와 무관하게 프로바이더가 처리한
+    행(토큰·비용·웹 검색 > 0)이다 — 비용 합계는 실패·취소 건의 청구분까지 포함한다.
+    billable_only=False 면 판정을 생략(0 토큰 실패 마커 행까지 — 에러 수 집계용).
+    ``success_only`` 는 구 인자명(같은 뜻으로 받는다).
 
     **sargable 형태로 구현한다.** 과거엔 `kst_month_expr() == period`, 즉
     `to_char(timezone('Asia/Seoul', requested_at),'YYYY-MM') = :period` 였다.
@@ -300,13 +341,15 @@ def cost_period_filter(period: str, *, success_only: bool = True) -> ColumnEleme
     KST 월 경계 의미는 그대로 유지된다. 경계 계산을 SQL 함수에서 파이썬
     파라미터로 옮긴 것뿐이다(period_to_utc_range).
     """
+    if success_only is not None:
+        billable_only = success_only
     start_utc, end_utc = period_to_utc_range(period)
     conds: list[ColumnElement] = [
         UsageLog.requested_at >= start_utc,
         UsageLog.requested_at < end_utc,
     ]
-    if success_only:
-        conds.append(UsageLog.status == UsageStatus.SUCCESS)
+    if billable_only:
+        conds.append(billable_filter())
     return and_(*conds)
 
 

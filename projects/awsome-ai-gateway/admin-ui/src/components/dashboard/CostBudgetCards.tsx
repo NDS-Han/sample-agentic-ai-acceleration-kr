@@ -1,7 +1,10 @@
 // Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
 
 /**
- * 대시보드 COST & BUDGET 카드 4장.
+ * 대시보드 COST & BUDGET 카드 4장 + Total (charged) 분해(wave 3).
+ *
+ * Usage This Month = Total (charged) — 프로바이더가 처리해 청구한 전 상태(성공·실패·취소)의 모델 비용
+ * + 웹 검색 비용. 아래 ChargedBreakdown 이 분해를 보여준다.
  *
  * 웹 검색 표시 규칙(배포됐거나 기록 비용 > 0)이 참이면:
  *  - Usage This Month = 모델 + 웹 검색, 부제 "Model $X · Web search $Y (all users)"
@@ -16,6 +19,7 @@
 import { BarChart3, CalendarClock, DollarSign, Users } from 'lucide-react';
 import { getTranslations } from 'next-intl/server';
 
+import { ChargedBreakdown } from '@/components/common/ChargedBreakdown';
 import { KPICard } from '@/components/common/KPICard';
 import type { DashboardKPI } from '@/lib/actions/dashboard';
 import { alertLevelOf } from '@/lib/utils/alertLevel';
@@ -51,6 +55,7 @@ export async function CostBudgetCards({
   const usd = (n: number) => fmtUsd(n, { subCent: 'significant' });
 
   return (
+    <div className="flex flex-col gap-4">
     <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4" data-testid="cost-budget-cards">
       <KPICard
         title={t('usageThisMonth')}
@@ -113,6 +118,9 @@ export async function CostBudgetCards({
         }
         href={`/analytics?period=${period}${clientSuffix}`}
       />
+    </div>
+    {/* Total (charged) 분해 — 백엔드가 charged 를 줄 때만(배포 전 백엔드 호환). */}
+    {await ChargedBreakdown({ charged: kpi?.charged })}
     </div>
   );
 }

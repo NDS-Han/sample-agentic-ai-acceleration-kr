@@ -37,7 +37,7 @@ def _utc(s: str) -> datetime:
 
 
 @pytest.mark.unit
-def test_cost_date_range_filter_is_sargable_and_success_only():
+def test_cost_date_range_filter_is_sargable_and_billable_only():
     stmt = (
         select(func.count())
         .select_from(UsageLog)
@@ -48,7 +48,8 @@ def test_cost_date_range_filter_is_sargable_and_success_only():
     assert "to_char" not in sql.lower()
     assert "timezone(" not in sql.lower()
     assert "requested_at >=" in sql and "requested_at <" in sql
-    assert "status" in sql
+    # 청구 대상 판정(wave 3 DECISION 1) — 상태가 아니라 토큰·비용·웹 검색.
+    assert "status" not in sql and "cost_usd >" in sql and "web_search_count" in sql
 
 
 @pytest.mark.unit

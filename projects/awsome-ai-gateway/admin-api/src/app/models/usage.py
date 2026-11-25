@@ -19,6 +19,8 @@ class UsageStatus(str, enum.Enum):
     SUCCESS = "SUCCESS"
     ERROR = "ERROR"
     TIMEOUT = "TIMEOUT"
+    #: 클라이언트가 끊은 스트림(migration 0062) — 처리된 토큰은 청구 대상이다.
+    CANCELLED = "CANCELLED"
 
 
 class ROIScope(str, enum.Enum):
@@ -66,9 +68,10 @@ class UsageLog(Base):
     # (not a token count). Written by the cost-recorder-worker; read-only here to
     # attribute AgentCore WebSearch usage ($7/1k) per client on the dashboard.
     web_search_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
-    # AgentCore Web Search cost (migration 0058) — MONITORING ONLY, never part of
-    # cost_usd or any budget/limit. Frozen by the cost-recorder-worker at write time
-    # (web_search_count × price/1000). NULL = not tracked (pre-feature row), 0 = tracked.
+    # AgentCore Web Search cost (migration 0058). Part of the billed total since wave 3
+    # (DECISION 2): budgets/enforcement include it; it stays its own column (not inside
+    # cost_usd = model token cost). Frozen at write time (web_search_count × price/1000).
+    # NULL = not tracked (pre-feature row), 0 = tracked.
     web_search_cost_usd: Mapped[Decimal | None] = mapped_column(Numeric(14, 6), nullable=True)
     cost_usd: Mapped[Decimal] = mapped_column(Numeric(10, 6), nullable=False)
     latency_ms: Mapped[int] = mapped_column(Integer, nullable=False)

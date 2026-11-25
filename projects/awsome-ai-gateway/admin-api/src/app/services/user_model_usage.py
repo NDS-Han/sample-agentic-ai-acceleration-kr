@@ -3,7 +3,7 @@
 """Analytics 사용자 × 모델 토큰 사용량 (By User 모드 표·상세 드로어·CSV).
 
 ## 숫자의 정의 — Total Tokens KPI 와 같은 집합
-SUCCESS 만, 리포팅 타임존(REPORTING_TIMEZONE) 일자 구간, `COALESCE(client,'other')` 앱 필터,
+청구 대상(billable — 상태 무관, wave 3) 행, 리포팅 타임존(REPORTING_TIMEZONE) 일자 구간, `COALESCE(client,'other')` 앱 필터,
 요청 시점 team_id 스코프. 즉 `/admin/analytics` 의 token_bucket_totals 와 같은 행 집합이다.
 
 ## 소스
@@ -47,13 +47,18 @@ resolve_range = ur.resolve_range
 
 
 def _um(scope: ur.RollupScope) -> str:
-    """하이브리드 CTE + `um`(user, model) 합계. scope 는 success_only 여야 한다."""
-    assert scope.success_only
+    """하이브리드 CTE + `um`(user, model) 합계 — 청구 대상(DECISION 1, 상태 무관) (user, model) 만.
+
+    n = 청구 대상 호출 수(rq), 비용·토큰 = 전 상태 합(비청구 행은 0), l/calls = 그 (user, model)
+    의 **모든** 호출의 지연 합/호출 수(평균 지연). 판정을 HAVING 으로 하므로 scope 는 billable_only 가
+    아니어야 한다 — 행 단위(raw) 판정과 입도 단위(롤업) 판정이 calls·l 에서 갈린다."""
+    assert not scope.billable_only
     return f"""{ur.head(scope)},
 um AS (
   SELECT user_id, model_alias, sum(i) AS i, sum(o) AS o, sum(cr) AS cr, sum(cw) AS cw,
-         sum(c) AS c, sum(n) AS n, sum(lat) AS l
+         sum(c) AS c, sum(rq) AS n, sum(lat) AS l, sum(n) AS calls
   FROM x GROUP BY user_id, model_alias
+  HAVING COALESCE(sum(rq), 0) > 0 OR COALESCE(sum(wq), 0) > 0
 )"""
 
 
@@ -88,7 +93,7 @@ def detail_sql(scope: ur.RollupScope) -> str:
     return f"""{_um(scope)}
 SELECT u.id AS user_id, u.display_name, u.email, t.name AS team_name, u.team_id,
   (SELECT COALESCE(json_agg(json_build_array(um.model_alias, ma.display_name, um.n, um.i, um.o,
-                                             um.cr, um.cw, um.c, um.l)
+                                             um.cr, um.cw, um.c, um.l, um.calls)
                             ORDER BY um.i + um.o + um.cr + um.cw DESC, um.model_alias), '[]')
      FROM um LEFT JOIN model.model_aliases ma ON ma.alias = um.model_alias)::text AS models
 FROM auth.users u LEFT JOIN auth.teams t ON t.id = u.team_id
@@ -114,7 +119,7 @@ def _today(tz: str) -> date:
 def _scope(rng: DayRange, scope_ids, client: str | None,
            uid: uuid.UUID | None = None) -> ur.RollupScope:
     tz = reporting_timezone()
-    return ur.RollupScope.of(rng, teams=scope_ids, client=client, success_only=True,
+    return ur.RollupScope.of(rng, teams=scope_ids, client=client,
                              users=[uid] if uid is not None else None, today=_today(tz), tz=tz)
 
 
@@ -309,21 +314,24 @@ async def get_user_detail(
     total = {"requests": 0, "input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0,
              "cache_write_tokens": 0, "total_tokens": 0, "cost_usd": 0.0, "avg_latency_ms": None}
     lat_sum = 0
-    for alias, dn, n, i, o, cr, cw, c, lat in models_raw:
+    calls_sum = 0
+    for alias, dn, n, i, o, cr, cw, c, lat, calls in models_raw:
         n, i, o, cr, cw, lat = int(n), int(i), int(o), int(cr), int(cw), int(lat or 0)
+        calls = int(calls or 0)
         cell = _cell(i, o, cr, cw, float(c), n)
         models.append({"model": alias, "display_name": dn, "requests": n,
                        "input_tokens": i, "output_tokens": o, "cache_read_tokens": cr,
                        "cache_write_tokens": cw, "total_tokens": cell["total_tokens"],
                        "cost_usd": cell["cost_usd"],
-                       "avg_latency_ms": round(lat / n) if n else None})
+                       "avg_latency_ms": round(lat / calls) if calls else None})
         for k in ("requests", "input_tokens", "output_tokens", "cache_read_tokens",
                   "cache_write_tokens", "total_tokens"):
             total[k] += models[-1][k]
         total["cost_usd"] = round(total["cost_usd"] + cell["cost_usd"], 6)
         lat_sum += lat
-    if total["requests"]:
-        total["avg_latency_ms"] = round(lat_sum / total["requests"])
+        calls_sum += calls
+    if calls_sum:
+        total["avg_latency_ms"] = round(lat_sum / calls_sum)
     return {
         "user_id": str(row.user_id), "name": row.display_name, "email": row.email,
         "team_name": row.team_name, "period": rng.label, "timezone": reporting_timezone(),

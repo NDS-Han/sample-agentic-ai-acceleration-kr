@@ -134,6 +134,18 @@ class Settings(BaseSettings):
     # admin-api 의 REPORTING_TIMEZONE 과 동일 값으로 맞춰야 한다 — 안 그러면
     # daily_aggregates(이 값 기준)와 usage_logs 실시간 집계(admin-api 기준)가
     # 서로 다른 날짜 경계를 갖게 된다.
+    # ── wave 3: 재가격(B7) / 비용 대조(B8) ──
+    #: pricing_missing 행 재가격 주기(초). 0 이면 끈다.
+    reprice_interval_sec: int = 600
+    reprice_batch_size: int = 500
+    #: 야간 비용 대조 — 리포팅 tz 01:00(일 롤업 00:10 이후). 자기 advisory lock 727_002.
+    reconciliation_enabled: bool = True
+    reconciliation_cron: str = "0 1 * * *"
+    #: 추정 행 비율 경고 임계(%) — 넘으면 checks.estimated_share.warn=true(불일치로 세지 않는다).
+    reconciliation_estimated_warn_pct: float = 0.5
+    #: dirty 날짜가 이 시간 넘게 남으면 불일치로 센다(R1).
+    reconciliation_dirty_alert_hours: int = 48
+
     reporting_timezone: str = "Asia/Seoul"
 
     @field_validator("reporting_timezone")

@@ -307,7 +307,7 @@ async def get_my_usage(
         *ws_columns(),
     ).where(
         UsageLog.user_id == user.user_id,
-        cost_period_filter(period, success_only=False),
+        cost_period_filter(period, billable_only=False),
     )
     srow = (await session.execute(summary_stmt)).one()
 

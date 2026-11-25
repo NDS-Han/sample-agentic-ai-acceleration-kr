@@ -522,6 +522,14 @@ async def enforce_rate_limits(
             min(max_output, _res_out_cap) if _res_out_cap else max_output,
             tier_input=estimated_input_billing,
         )
+        # 웹 검색 비용도 월예산 청구액이다(DECISION 2) — 웹 검색 루프가 켜진 요청은 요청당
+        # 검색 상한 × 단가만큼 더 예약한다(라우터가 state 에 상한을 심는다). 실비 정산은 finalize.
+        _ws_q = state.get("_ws_reserve_queries")
+        if isinstance(_ws_q, int) and _ws_q > 0:
+            from app.services.web_search_price import PRICE as _WS_PRICE
+            from app.services.web_search_price import web_search_cost
+
+            worst_cost += web_search_cost(_ws_q, _WS_PRICE.current())
         if state.get("budget_degraded") == "grace":
             # 예산 미들웨어가 정책·상태를 몰라 유예 창으로 통과시킨 요청(wave 1c) — Redis 에
             # 팀 설정이 없을 수 있어 reserve 가 team_budget_unset 으로 다시 막는다. 예약 없이

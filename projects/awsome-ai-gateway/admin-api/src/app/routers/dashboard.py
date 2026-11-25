@@ -129,8 +129,12 @@ async def dashboard_summary(
             "period": period,
             "total_requests": t.total_requests,
             "error_requests": t.error_requests,
+            "cancelled_requests": t.cancelled_requests,
+            "billable_requests": t.billable_requests,
             "total_tokens": t.total_tokens,
+            # 모델 토큰 비용 — 청구 대상 전 상태(wave 3). 청구 총액·분해는 charged.
             "total_cost_usd": round(float(t.total_cost), 4),
+            "charged": t.charged(),
             "active_users": active_users,
             "cost_per_user_usd": round(float(cost_per_user), 4),
             **meta.as_dict(),
@@ -165,8 +169,8 @@ async def model_share(
     cache_key = _cache_key("model-share", period=period, team_id=team_filter, client=client)
 
     async def compute():
-        # §59 비용 집계 표준: SUCCESS 만 + 리포팅 tz 월 경계.
-        scope = ur.RollupScope.of(rng, teams=teams, client=client, success_only=True)
+        # 비용 집계 표준: 청구 대상(상태 무관, wave 3) + 리포팅 tz 월 경계.
+        scope = ur.RollupScope.of(rng, teams=teams, client=client, billable_only=True)
         rows = await reads.model_share(session, scope)
         meta = await ur.fetch_meta(session, scope)
         total = sum(float(r.cost_usd or 0) for r in rows)
@@ -203,19 +207,17 @@ async def client_share(
     """앱별(client) 비용 점유율 — claude-code / cowork / codex / other(legacy NULL 포함).
 
     롤업 client 는 이미 COALESCE(client,'other') 로 접혀 있다(raw 분기도 같은 식).
-    §59 비용 집계 표준(SUCCESS + 리포팅 tz 월 경계) 동일 적용. admin-ui ClientShareResponse 형태.
+    비용 집계 표준(청구 대상 전 상태 + 리포팅 tz 월 경계) 동일 적용. admin-ui ClientShareResponse 형태.
     """
     period, rng = _month(period)
     cache_key = _cache_key("client-share", period=period)
 
     async def compute():
-        # 모델 비용·호출 수는 SUCCESS 만(§59). 웹 검색은 모델 호출이 실패해도 이미 실행·과금됐으므로
-        # ERROR/TIMEOUT 행의 검색까지 센다(services/web_search_cost) — 그래서 status 로 거르지 않는다.
+        # 모델 비용·호출 수는 청구 대상(상태 무관, wave 3). 웹 검색도 전 status(실행·과금됨).
         scope = ur.RollupScope.of(rng)
         rows = [
             r for r in await reads.client_share(session, scope)
-            # 실패 호출만 있던 앱은 종전처럼 숨긴다 — 단 그 실패 호출이 검색을 썼으면 비용이
-            # 있으므로 남긴다.
+            # 청구가 없는 앱(0 토큰 실패 마커만)은 숨긴다 — 검색을 썼으면 비용이 있으므로 남긴다.
             if (r.call_count or 0) > 0 or (r.ws_queries or 0) > 0
         ]
         settings = await ws_settings(session)
@@ -230,12 +232,12 @@ async def client_share(
             clients.append({
                 "client": r.client,
                 # 6자리 — 소액 호출이 4자리 반올림에서 0 으로 사라진다(model-share 와 동일).
-                # 모델 비용만 — 점유율(share_pct)도 모델 비용 기준이다.
+                # 모델 비용(청구 대상 전 상태) — 점유율(share_pct)도 모델 비용 기준이다.
                 "cost_usd": round(cost, 6),
                 "share_pct": round(share, 2),
                 "call_count": int(r.call_count or 0),
                 "web_search_count": ws.queries,
-                # 모니터링 전용 웹 검색 비용(모델 비용·예산과 별개). None = 미추적.
+                # 웹 검색 비용(청구 총액의 일부, 자기 줄). None = 미추적.
                 "web_search_cost_usd": ws.cost_usd,
                 "web_search_untracked_count": ws.untracked_queries,
             })
@@ -273,7 +275,7 @@ async def top_users(
     _admin: CurrentUser = Depends(require_admin),
     session: AsyncSession = Depends(get_analytics_session),
 ):
-    """실제 비용 기준 상위 사용자(§60.8) — SUCCESS+리포팅 tz 월 집계를 cost 내림차순.
+    """실제 비용 기준 상위 사용자(§60.8) — 청구 대상(전 상태)+리포팅 tz 월 집계를 cost 내림차순.
 
     ⚠️ 기존 대시보드 'Top 사용자 by 비용' 위젯은 budgets/summary(예산설정된 사용자만)를
     써서 예산 없는 헤비유저를 누락했다(라벨='비용'인데 실제론 예산설정자 중 사용액).
@@ -284,7 +286,7 @@ async def top_users(
     cache_key = _cache_key("top-users", period=period, client=client, limit=limit)
 
     async def compute():
-        scope = ur.RollupScope.of(rng, client=client, success_only=True)
+        scope = ur.RollupScope.of(rng, client=client, billable_only=True)
         rows = await reads.top_users(session, scope, limit)
         meta = await ur.fetch_meta(session, scope)
         return {
@@ -319,7 +321,7 @@ async def top_teams(
     _admin: CurrentUser = Depends(require_admin),
     session: AsyncSession = Depends(get_analytics_session),
 ):
-    """실제 비용 기준 상위 팀(§60.9) — SUCCESS+리포팅 tz 월 집계를 cost 내림차순.
+    """실제 비용 기준 상위 팀(§60.9) — 청구 대상(전 상태)+리포팅 tz 월 집계를 cost 내림차순.
 
     **팀 귀속은 요청 시점 team_id**(롤업 입도에 그대로 있다 — users.team_id 경유 금지:
     팀 이동 사용자의 과거 비용 오귀속 방지).
@@ -328,7 +330,7 @@ async def top_teams(
     cache_key = _cache_key("top-teams", period=period, client=client, limit=limit)
 
     async def compute():
-        scope = ur.RollupScope.of(rng, client=client, success_only=True)
+        scope = ur.RollupScope.of(rng, client=client, billable_only=True)
         rows = await reads.top_teams(session, scope, limit)
         meta = await ur.fetch_meta(session, scope)
         return {
@@ -501,8 +503,12 @@ async def dashboard_kpi(
             "period": period,
             "total_requests": t.total_requests,
             "error_requests": t.error_requests,
+            "cancelled_requests": t.cancelled_requests,
+            "billable_requests": t.billable_requests,
             "total_tokens": t.total_tokens,
+            # 모델 토큰 비용 — 청구 대상 전 상태(wave 3). Total (charged) 와 분해는 charged.
             "total_cost_usd": round(float(t.total_cost), 4),
+            "charged": t.charged(),
             "active_users": active_users,
             "cost_per_user_usd": (
                 round(float(t.total_cost / active_users), 4) if active_users else 0.0),
@@ -513,7 +519,8 @@ async def dashboard_kpi(
             "budget_utilization_pct": round(utilization, 2) if utilization is not None else None,
             "active_keys": active_keys or 0,
             "active_models": active_models or 0,
-            # 모니터링 전용 — total_cost_usd·budget_* 에 포함되지 않는다(예산 제외).
+            # 웹 검색 — total_cost_usd(모델) 에는 없고 charged.total_usd 와 budget_*(wave 3 이후
+            # 기록분)에 들어간다.
             "web_search": ws_from_totals(t.ws_queries, t.ws_cost, t.ws_untracked,
                                          settings).model_dump(mode="json"),
             **meta.as_dict(),
@@ -534,7 +541,7 @@ async def dashboard_web_search(
     요청당 검색 수. **모니터링 전용**(예산·한도와 무관).
 
     - 검색 수·비용은 status 무관(실패 요청의 검색도 과금 — services/web_search_cost).
-    - ``queries_per_request`` = 검색 수 / **성공** 요청 수(KPI 의 total_requests 와 같은 모집단),
+    - ``queries_per_request`` = 검색 수 / 성공 요청 수(KPI 의 total_requests 와 같은 모집단),
       소수 8자리(작은 값도 0 이 되지 않게).
     - ``avg_queries_per_day`` = 검색 수 / 경과일(리포팅 TZ; 당월은 오늘까지, 지난 달은 그 달 일수).
     - ``daily`` 는 검색이 있었던 날만 — 빈 날·미래 날 채우기는 UI(비용 추이와 같은 규칙).

@@ -1,6 +1,10 @@
 # Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
 
-"""Regression: 웹 검색 비용은 예산·한도·모델 비용 어디에도 섞이지 않는다 (실 PG).
+"""Regression: 웹 검색 비용은 모델 비용(cost_usd 계열)에 섞이지 않고 자기 줄로만 나간다 (실 PG).
+
+wave 3(DECISION 2) 이후: 청구 총액(``charged.total_usd``)과 예산 원장(budget_usages — 워커가
+쓰는 쪽)에는 웹 검색 비용이 들어간다. 읽는 쪽 API 가 모델 비용 필드에 검색 비용을 더하지 않는지,
+그리고 charged 가 정확히 검색 비용만큼 다른지를 본다.
 
 같은 사용량을 두 번 만든다 — (A) 웹 검색 없음, (B) 같은 요청에 검색 수·비용만 추가
 (추적 행·미추적 NULL 행·실패 요청의 검색 포함). 그리고 실제 라우터/서비스 함수를 같은
@@ -131,7 +135,7 @@ def _strip_web_search(snap: dict) -> dict:
     """웹 검색 필드를 뺀 나머지 — 이게 A/B 에서 같아야 한다."""
     out = {}
     for k, v in snap.items():
-        if k.startswith("web_search") or k == "timestamp":
+        if k.startswith("web_search") or k in ("timestamp", "charged"):
             continue
         if isinstance(v, dict):
             out[k] = _strip_web_search(v)
@@ -151,6 +155,15 @@ async def test_budget_limit_and_model_cost_identical_with_and_without_web_search
     assert plain["kpi"]["budget_used_usd"] > 0 and plain["kpi"]["budget_limit_usd"] > 0
     assert plain["my_budget"]["team"]["used_usd"] > 0
     assert _strip_web_search(plain) == _strip_web_search(searched)
+    # Total (charged) = 모델(같음) + 웹 검색(추적분 0.014 + 0.007, 미추적 NULL 은 0) — DECISION 2.
+    for key in ("kpi",):
+        a, b = plain[key]["charged"], searched[key]["charged"]
+        assert a["model_usd"] == b["model_usd"]
+        assert round(b["total_usd"] - a["total_usd"], 6) == round(
+            (b["web_search_usd"] or 0) - (a["web_search_usd"] or 0), 6)
+        assert (b["web_search_usd"] or 0) - (a["web_search_usd"] or 0) >= 0.021 - 1e-9
+    a, b = plain["analytics"]["cost_summary"]["charged"], searched["analytics"]["cost_summary"]["charged"]
+    assert a["model_usd"] == b["model_usd"] and b["total_usd"] > a["total_usd"]
 
     # 웹 검색은 별도 객체로만 — 추적분 합(0.014+0+0.007), 미추적(NULL) 5건은 따로.
     for ws in (searched["kpi"]["web_search"], searched["my_usage"]["web_search"],

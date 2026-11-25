@@ -1522,6 +1522,7 @@
       "types": {
         "ERROR": "오류",
         "TIMEOUT": "타임아웃",
+        "CANCELLED": "취소",
         "SLOW_REQUEST": "지연",
         "SUCCESS": "정상"
       },
@@ -1530,6 +1531,7 @@
         "success": "정상",
         "error": "오류",
         "timeout": "타임아웃",
+        "cancelled": "취소",
         "slow": "지연 (첫 응답 3s 초과)",
         "abnormal": "이상 (오류/타임아웃/지연)"
       },
@@ -2124,7 +2126,7 @@
     "avgCostPerUserWsNotTrackedDesc": "이번달 활성 사용자 {count}명 기준 · 웹 검색 미추적",
     "dailyAvgWsNotTrackedDesc": "경과일 기준 일평균 · 웹 검색 미추적",
     "dailyAvgProjectionWsNotTracked": "월말 예상 {amount} (선형 추정) · 웹 검색 미추적",
-    "budgetUtilizationCombinedDesc": "예산 대비 모델 비용 · 웹 검색 제외",
+    "budgetUtilizationCombinedDesc": "청구 비용 대비 예산 · 웹 검색 포함",
     "budgetModelCostOnly": "모델 비용만 집계 — 웹 검색 비용은 예산에 포함되지 않습니다.",
     "pricingTitle": "웹 검색 단가",
     "pricingDesc": "Amazon Bedrock AgentCore 웹 검색은 검색 건수로 과금됩니다. 이 단가는 모니터링의 웹 검색 비용 표시에만 쓰이며 예산·요청 한도에는 영향을 주지 않습니다.",
@@ -2204,5 +2206,15 @@
     "invalidCap": "{min}~{max} 사이의 정수를 입력하세요.",
     "removeOverride": "지정 해제",
     "resetOrg": "기본값으로 되돌리기"
+  },
+  "charged": {
+    "title": "총 청구액 (charged)",
+    "success": "성공",
+    "failed": "실패 (에러/타임아웃)",
+    "cancelled": "취소",
+    "webSearch": "웹 검색",
+    "notTracked": "미추적",
+    "notTrackedHint": "이 기간에 기록된 웹 검색 비용이 없습니다($0 과 다릅니다).",
+    "hint": "요청 결과와 무관하게 프로바이더가 토큰을 처리한 요청은 청구됩니다. Bedrock 도달 전 거절된 요청은 $0 입니다."
   }
 }

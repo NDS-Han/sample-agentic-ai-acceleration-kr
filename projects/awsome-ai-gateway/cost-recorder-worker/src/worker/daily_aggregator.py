@@ -620,13 +620,15 @@ _DAILY_AGG_LOCK_KEY = 727_001
 
 
 @contextlib.asynccontextmanager
-async def aggregation_lock(engine: AsyncEngine, wait_seconds: float = 0) -> AsyncIterator[bool]:
+async def aggregation_lock(engine: AsyncEngine, wait_seconds: float = 0,
+                           key: int = _DAILY_AGG_LOCK_KEY) -> AsyncIterator[bool]:
     """advisory lock 을 **전용 AUTOCOMMIT 커넥션**에서 잡는다.
 
     ⚠️ advisory lock 은 커넥션 레벨이다 — 집계 세션이 날짜마다 commit 하면 커넥션이
        풀로 돌아가 unlock 이 다른 커넥션에서 실행될 수 있다(실측: 락 고착 → 전 replica
        영구 스킵). 전용 커넥션이 닫히면 락도 풀리므로 고착 경로가 없다.
     wait_seconds>0 이면 그동안 5초 간격으로 다시 시도한다(야간 잡·백필 CLI).
+    key — 기본은 롤업 락(727_001). 비용 대조 잡(reconciliation)은 자기 락(727_002)을 쓴다.
     """
     async with engine.connect() as conn:
         conn = await conn.execution_options(isolation_level="AUTOCOMMIT")
@@ -634,7 +636,7 @@ async def aggregation_lock(engine: AsyncEngine, wait_seconds: float = 0) -> Asyn
         while True:
             got = (
                 await conn.execute(
-                    text("SELECT pg_try_advisory_lock(:k)"), {"k": _DAILY_AGG_LOCK_KEY}
+                    text("SELECT pg_try_advisory_lock(:k)"), {"k": key}
                 )
             ).scalar()
             if got or asyncio.get_running_loop().time() >= deadline:
@@ -646,7 +648,7 @@ async def aggregation_lock(engine: AsyncEngine, wait_seconds: float = 0) -> Asyn
             if got:
                 try:
                     await conn.execute(
-                        text("SELECT pg_advisory_unlock(:k)"), {"k": _DAILY_AGG_LOCK_KEY}
+                        text("SELECT pg_advisory_unlock(:k)"), {"k": key}
                     )
                 except Exception:
                     # 락 커넥션이 끊겼으면 서버 측에서 이미 해제됐다(R23 r3 N-6).

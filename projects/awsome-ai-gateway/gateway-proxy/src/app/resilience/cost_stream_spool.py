@@ -34,10 +34,13 @@ logger = structlog.get_logger(__name__)
 class CostStreamSpool:
     """Bounded in-memory buffer of cost:stream XADD payloads pending re-publish."""
 
-    def __init__(self, stream_key: str, maxlen: int = 10_000, maxlen_field: int = 100_000) -> None:
+    def __init__(self, stream_key: str, maxlen: int = 10_000,
+                 maxlen_field: int | None = None) -> None:
         self._stream_key = stream_key
         self._maxlen = maxlen
-        self._maxlen_field = maxlen_field  # XADD MAXLEN approx trim on re-publish
+        # Re-publish XADD MAXLEN — None(기본) = 트림 없음(wave 3 B4). MAXLEN 은 미소비 entry 도
+        # 잘라 청구 기록을 잃는다. 크기 제어는 워커의 XTRIM MINID(소비된 것만)가 한다.
+        self._maxlen_field = maxlen_field
         # PLAIN deque (NOT deque(maxlen=...)). The bound is enforced explicitly in
         # enqueue() so that overflow eviction is a deliberate, counted action — and
         # crucially so that a concurrent append can NEVER auto-evict the in-flight
@@ -99,12 +102,9 @@ class CostStreamSpool:
                 payload = self._buf.popleft()  # remove into local; safe from eviction
                 published = False
                 try:
-                    await redis.xadd(
-                        self._stream_key,
-                        {"payload": payload},
-                        maxlen=self._maxlen_field,
-                        approximate=True,
-                    )
+                    trim = ({"maxlen": self._maxlen_field, "approximate": True}
+                            if self._maxlen_field else {})
+                    await redis.xadd(self._stream_key, {"payload": payload}, **trim)
                     published = True
                 except Exception:
                     # Redis still unhealthy — finally re-buffers, then we stop.

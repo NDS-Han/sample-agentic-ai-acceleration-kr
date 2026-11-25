@@ -43,7 +43,7 @@ _INSERT_USAGE_LOGS = text(
         cost_usd, latency_ms, ttft_ms, status, requested_at, completed_at,
         is_streaming, estimated_usage, downgraded_from, availability_fallback_from,
         sso_subject, bedrock_request_id, client, context_tier, key_prefix,
-        session_id
+        session_id, pricing_missing
     ) VALUES (
         gen_random_uuid(),
         :request_id,
@@ -71,7 +71,7 @@ _INSERT_USAGE_LOGS = text(
         :availability_fallback_from,
         :sso_subject,
         :bedrock_request_id,
-        :client, :context_tier, :key_prefix, :session_id
+        :client, :context_tier, :key_prefix, :session_id, :pricing_missing
     )
     ON CONFLICT (request_id) DO NOTHING
     -- ⚠️ RETURNING 이 없으면 "ON CONFLICT 로 건너뛴" 행과 "실제 삽입된" 행을
@@ -93,7 +93,7 @@ _PER_APP_CLIENTS = ("claude-code", "cowork", "codex")
 #: 이 집합 밖 값을 거부한다. 게이트웨이도 발행 전 정규화하지만, enum 에 나중에 값이
 #: 추가되거나 스키마가 어긋난 배포 조합에서는 여기서 한 번 더 걸러야 poison
 #: retry 루프가 안 생긴다.
-_VALID_USAGE_STATUSES = frozenset({"SUCCESS", "ERROR", "TIMEOUT"})
+_VALID_USAGE_STATUSES = frozenset({"SUCCESS", "ERROR", "TIMEOUT", "CANCELLED"})
 
 #: 재시도해도 절대 성공하지 않는 "영구" 실패 계열. 이들은 배치 단위로도 per-row
 #: 로도 재처리해도 같은 결과라, 걸러내지 않으면 한 poison entry 가 flush 를
@@ -164,6 +164,59 @@ def _usage_status(entry: CostStreamEntry) -> str:
     return s
 
 
+#: 게이트웨이 VK 인증이 dept 를 모를 때 싣는 기본 부서/팀 센티널(cost_recorder._publish_to_stream).
+DEFAULT_DEPT_ID = "00000000-0000-4000-a000-000000000002"
+DEFAULT_TEAM_ID = "00000000-0000-4000-a000-000000000003"
+_UUID_RE = __import__("re").compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+
+_SELECT_TEAM_DEPTS = text(
+    "SELECT id::text, dept_id::text FROM auth.teams WHERE id = ANY(CAST(:ids AS uuid[]))"
+)
+
+_INSERT_DEAD_LETTER = text(
+    """
+    INSERT INTO usage.cost_dead_letters
+        (request_id, stream_id, reason, sqlstate, error, payload)
+    VALUES (:request_id, :stream_id, :reason, :sqlstate, :error, :payload)
+    ON CONFLICT (request_id) WHERE request_id IS NOT NULL DO NOTHING
+    """
+)
+
+
+def _sqlstate_of(exc: BaseException) -> str | None:
+    cur: BaseException | None = getattr(exc, "orig", None) or exc
+    seen = 0
+    while cur is not None and seen < 6:
+        st = getattr(cur, "sqlstate", None)
+        if st:
+            return str(st)[:5]
+        cur = getattr(cur, "__cause__", None) or getattr(cur, "__context__", None)
+        seen += 1
+    return None
+
+
+def _dl_text(v: str | None, limit: int | None = None) -> str | None:
+    """dead-letter 행이 그 자체로 실패하지 않게 — NUL 제거(PG text 불가) + 길이 상한."""
+    if v is None:
+        return None
+    v = v.replace("\x00", "")
+    return v[:limit] if limit else v
+
+
+def ws_cost_of(entry: CostStreamEntry, price: Decimal) -> Decimal:
+    """이 행의 웹 검색 비용 — 게이트웨이가 계산해 실었으면 그 값(Redis 예산과 같은 숫자), 아니면
+    워커 단가 스냅샷으로 계산(구 게이트웨이)."""
+    if entry.web_search_cost_usd is not None:
+        return entry.web_search_cost_usd
+    return web_search_cost(entry.web_search_count, price)
+
+
+def charged_of(entry: CostStreamEntry, price: Decimal) -> Decimal:
+    """예산 원장(budget_usages)에 더할 청구액 = 모델 토큰 비용 + 웹 검색 비용(DECISION 2)."""
+    return entry.cost_usd + ws_cost_of(entry, price)
+
+
 def _has_metered_usage(entry: CostStreamEntry) -> bool:
     """budget_usages 가산과 usage:daily:* 카운터에 올릴 가치가 있는 행인가.
 
@@ -177,6 +230,8 @@ def _has_metered_usage(entry: CostStreamEntry) -> bool:
         or entry.cache_creation_tokens
         or entry.cache_read_tokens
         or entry.cost_usd
+        # 실행된 웹 검색은 청구된다 — 토큰 0 실패 요청이라도 예산에 들어간다(DECISION 2).
+        or entry.web_search_count
     )
 
 #: threshold 알림의 "현재 사용액" 조회 — 해당 스코프의 기간 누적 총합(client=NULL 행).
@@ -356,9 +411,98 @@ class BatchFlusher:
         self._session_factory = session_factory
         self._redis = redis
         self._metrics = metrics
-        #: AgentCore Web Search 단가 스냅샷(모니터링 전용 web_search_cost_usd). None 이면
-        #: 정가 고정 — 운영 배선(main.py)은 system_settings 를 읽는 공급자를 넘긴다.
+        #: AgentCore Web Search 단가 스냅샷 — 게이트웨이가 비용을 싣지 않은(구) 행에만 쓴다.
+        #: None 이면 정가 고정 — 운영 배선(main.py)은 system_settings 를 읽는 공급자를 넘긴다.
         self._ws_pricing = web_search_pricing
+        #: team_id → (dept_id, 읽은 시각). VK 인증 행의 dept 를 팀에서 해석한다(B5).
+        self._team_dept: dict[str, tuple[str, float]] = {}
+        self._team_dept_ttl = 300.0
+
+    async def _resolve_depts(self, entries: list[CostStreamEntry]) -> None:
+        """dept_id 가 기본 센티널(또는 빈 값)인 행을 그 팀의 부서로 고친다(B5).
+
+        VK 인증의 AuthContext.dept_id 는 비어 있어 게이트웨이가 기본 부서를 실었다 — 모든 VK 행이
+        기본 부서로 귀속됐고, 그 FK 대상이 없는 배포에서는 행이 영구 오류로 버려졌다. 팀은 행에
+        있으므로(요청 시점 귀속) 그 팀의 dept_id 를 쓴다. 조회 실패는 기록을 막지 않는다
+        (센티널 그대로 진행 — FK 오류면 dead-letter 로 간다). 별도 세션이라 usage 트랜잭션과
+        분리된다.
+        """
+        import time as _time
+
+        now = _time.monotonic()
+        need: set[str] = set()
+        for e in entries:
+            if (not e.dept_id or e.dept_id == DEFAULT_DEPT_ID) and _UUID_RE.match(e.team_id or ""):
+                hit = self._team_dept.get(e.team_id)
+                if hit is None or now - hit[1] > self._team_dept_ttl:
+                    need.add(e.team_id)
+        if need:
+            try:
+                async with self._session_factory() as session:
+                    rows = (await session.execute(
+                        _SELECT_TEAM_DEPTS, {"ids": sorted(need)})).all()
+                for tid, did in rows:
+                    self._team_dept[tid] = (did, now)
+            except Exception:
+                logger.warning("team_dept_lookup_failed", teams=len(need), exc_info=True)
+        resolved = 0
+        for e in entries:
+            if not e.dept_id or e.dept_id == DEFAULT_DEPT_ID:
+                hit = self._team_dept.get(e.team_id)
+                if hit is not None and hit[0] != e.dept_id:
+                    e.dept_id = hit[0]
+                    resolved += 1
+                elif not e.dept_id:
+                    e.dept_id = DEFAULT_DEPT_ID
+        if resolved and self._metrics is not None and hasattr(self._metrics, "dept_resolved"):
+            self._metrics.dept_resolved.add(resolved, {"outcome": "team"})
+
+    async def _store_dead_letters(self, items: list[tuple[CostStreamEntry | None, str | None,
+                                                          str, BaseException | str]]) -> None:
+        """영구 오류 행을 usage.cost_dead_letters 에 **원본 페이로드**로 남긴다(B5).
+
+        예전에는 ACK 후 로그 한 줄만 남기고 버렸다. 이 쓰기가 실패하면 예외를 올린다 — 호출자는
+        XACK 하지 않고 배치는 PEL 에 남는다(버리지 않는다). items = (entry|None, raw|None,
+        reason, exc|message).
+        """
+        if not items:
+            return
+        params = []
+        for entry, raw, reason, err in items:
+            payload = raw if raw is not None else (
+                entry._raw if entry is not None and entry._raw else
+                entry.model_dump_json() if entry is not None else "")
+            params.append({
+                "request_id": _dl_text(entry.request_id, 128) if entry is not None else None,
+                "stream_id": _dl_text(entry._stream_id if entry is not None else None, 64),
+                "reason": reason[:32],
+                "sqlstate": _sqlstate_of(err) if isinstance(err, BaseException) else None,
+                "error": _dl_text(str(err), 2000),
+                "payload": _dl_text(payload) or "",
+            })
+        async with self._session_factory() as session:
+            await session.execute(_INSERT_DEAD_LETTER, params)
+            await session.commit()
+        if self._metrics is not None and hasattr(self._metrics, "dead_lettered"):
+            for p in params:
+                self._metrics.dead_lettered.add(1, {"reason": p["reason"]})
+        logger.error("cost_rows_dead_lettered", count=len(params),
+                     reasons=sorted({p["reason"] for p in params}))
+
+    async def store_undecodable(self, items: list[tuple[str, str | None, str]]) -> None:
+        """디코드 불가 스트림 메시지(stream_id, raw, error)를 dead-letter 에 남긴다."""
+        if not items:
+            return
+        params = [{
+            "request_id": None, "stream_id": _dl_text(sid, 64), "reason": "parse_failed",
+            "sqlstate": None, "error": _dl_text(err, 2000), "payload": _dl_text(raw) or "",
+        } for sid, raw, err in items]
+        async with self._session_factory() as session:
+            await session.execute(_INSERT_DEAD_LETTER, params)
+            await session.commit()
+        if self._metrics is not None and hasattr(self._metrics, "dead_lettered"):
+            self._metrics.dead_lettered.add(len(params), {"reason": "parse_failed"})
+        logger.error("cost_stream_undecodable_dead_lettered", count=len(params))
 
     async def _web_search_price(self) -> Decimal:
         """이번 flush 의 단가 스냅샷. 배치 안 모든 행이 같은 단가로 고정된다."""
@@ -378,6 +522,8 @@ class BatchFlusher:
 
         # 배치 안 중복을 먼저 접는다 — 크래시 없이도 spool 재발행으로 생긴다.
         entries = _dedup_in_batch(entries)
+        # VK 행의 dept_id 를 팀에서 해석한다(B5) — 트랜잭션 밖(별도 세션).
+        await self._resolve_depts(entries)
 
         # ⚠️ recorded: DB에 **실제로 기록된** entries 만 모은다. 일별 카운터와
         #    threshold 알림은 반드시 recorded 기준으로 돌려야 한다 — 예전엔 원본
@@ -415,7 +561,7 @@ class BatchFlusher:
                 #    창에서 다른 소비자가 먼저 같은 request_id 를 커밋했으면 우리 INSERT 는
                 #    no-op(RETURNING 없음)인데, 그 행까지 더하면 이중청구다.
                 written = [e for e in fresh if e.request_id in inserted_ids]
-                await self._upsert_budget_usages(session, written)
+                await self._upsert_budget_usages(session, written, ws_price)
                 await self._mark_late_days_dirty(session, written)
                 await session.commit()
                 recorded = written
@@ -484,26 +630,24 @@ class BatchFlusher:
                         continue
                     inserted_ids = await self._insert_usage_logs(session, [e], ws_price)
                     if e.request_id in inserted_ids:
-                        await self._upsert_budget_usages(session, [e])
+                        await self._upsert_budget_usages(session, [e], ws_price)
                         await self._mark_late_days_dirty(session, [e])
                         written.append(e)
                     await session.commit()
             except Exception as ie:
                 if not _is_permanent_flush_error(ie):
                     raise
-                # 영구 오류(FK 위반·깨진 uuid/날짜 등)만 스킵 — 재시도해도 같은
-                # 결과라 ACK 해도 된다.
+                # 영구 오류(FK 위반·깨진 uuid/날짜 등) — 재시도해도 같은 결과라 스트림은 진행하되,
+                # 원본 페이로드를 dead-letter 표에 남긴다(B5 — 예전에는 로그만 남기고 버렸다).
+                # 이 쓰기가 실패하면 예외가 올라가 배치는 XACK 되지 않는다.
                 skipped += 1
                 logger.warning(
-                    "row_skipped_integrity_error",
+                    "row_dead_lettered_integrity_error",
                     request_id=e.request_id,
                     user_id=e.user_id,
                     reason=str(ie)[:120],
                 )
-                if self._metrics:
-                    self._metrics.entries_dropped.add(
-                        1, {"reason": "permanent_row_error"}
-                    )
+                await self._store_dead_letters([(e, None, "permanent_row_error", ie)])
             # ⚠️ 영구 오류 외(직렬화 실패·데드락·일시적 DB 끊김)는 전파한다.
             #    여기서 삼키고 호출자가 XACK 하면 그 비용은 **영구 유실**(미청구)이다.
             #    전파하면 배치가 unacked 로 남아 PEL reclaim 으로 재처리되고,
@@ -557,7 +701,7 @@ class BatchFlusher:
                     inserted_ids = await self._insert_usage_logs(session, [e], ws_price)
                     inserted = e.request_id in inserted_ids
                     if inserted:
-                        await self._upsert_budget_usages(session, [e])
+                        await self._upsert_budget_usages(session, [e], ws_price)
                         await self._mark_late_days_dirty(session, [e])
                     await session.commit()
                     # 실제로 커밋된 행만 written 에 센다 — commit 실패(영구
@@ -574,6 +718,8 @@ class BatchFlusher:
                     user_id=e.user_id,
                     error=str(exc)[:200],
                 )
+                # 원본 페이로드 보존(B5). 실패하면 전파 — 배치는 PEL 에 남는다.
+                await self._store_dead_letters([(e, None, "grace_permanent_error", exc)])
             # 영구 오류 외(연결·데드락·타임아웃)는 전파 — 배치가 PEL 에 남아
             # DB 복구 뒤 재처리된다. 여기서 삼키면 장애 기간 내내 배치 단위
             # 과소청구 유실이 된다.
@@ -607,9 +753,10 @@ class BatchFlusher:
                 "cache_read_tokens": e.cache_read_tokens,
                 "reasoning_tokens": e.reasoning_tokens,
                 "web_search_count": e.web_search_count,
-                # 모니터링 전용 — cost_usd·budget_usages 와 별개(예산·한도 무관).
+                # 웹 검색 비용 — 청구 총액의 일부(budget_usages 에도 같은 값, DECISION 2).
                 # 0 = 추적 중·검색 없음(NULL 은 이 기능 이전 행에만 남는다).
-                "web_search_cost_usd": str(web_search_cost(e.web_search_count, ws_price)),
+                "web_search_cost_usd": str(ws_cost_of(e, ws_price)),
+                "pricing_missing": bool(e.pricing_missing),
                 "cost_usd": str(e.cost_usd),
                 "latency_ms": e.latency_ms,
                 "ttft_ms": e.ttft_ms,
@@ -659,7 +806,8 @@ class BatchFlusher:
                         hours=len([m for m in marks if m[1] is not None]))
 
     async def _upsert_budget_usages(
-        self, session: AsyncSession, entries: list[CostStreamEntry]
+        self, session: AsyncSession, entries: list[CostStreamEntry],
+        ws_price: Decimal = DEFAULT_PRICE_PER_1K,
     ) -> None:
         """USER + TEAM 총합, 그리고 per-app 하위 행을 그룹별 합산 UPSERT.
 
@@ -675,13 +823,15 @@ class BatchFlusher:
         for e in entries:
             if not _has_metered_usage(e):
                 continue  # 0 토큰·0 비용 마커 행 — 예산 스냅샷 행을 만들지 않는다
-            user_sums[(e.user_id, e.period)] += e.cost_usd
+            # 청구액 = 모델 비용 + 웹 검색 비용(DECISION 2) — 게이트웨이 Redis 정산과 같은 값.
+            charged = charged_of(e, ws_price)
+            user_sums[(e.user_id, e.period)] += charged
             # 팀 없는 사용자 — team_id 는 default team 센티널이다. TEAM 스코프에
             # 더하면 그 팀의 한도가 타인 지출로 소진돼 엉뚱한 팀이 hard_block 된다.
             if not e.teamless:
-                team_sums[(e.team_id, e.period)] += e.cost_usd
+                team_sums[(e.team_id, e.period)] += charged
             if e.client in _PER_APP_CLIENTS:
-                app_sums[(e.user_id, e.period, e.client)] += e.cost_usd
+                app_sums[(e.user_id, e.period, e.client)] += charged
 
         # ⚠️ 행 잠금 순서 고정 — multi-replica 에서 두 트랜잭션이 같은 행 집합을
         #    반대 순서로 잠그면 데드락이다. 데드락은 재시도로 풀리지만 그동안

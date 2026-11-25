@@ -12,7 +12,7 @@ import math
 from decimal import Decimal
 
 import structlog
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, PrivateAttr, field_validator
 
 logger = structlog.get_logger(__name__)
 
@@ -36,6 +36,17 @@ class CostStreamEntry(BaseModel):
     # Persisted to usage_logs.web_search_count for per-client AgentCore search analytics.
     web_search_count: int = 0
     cost_usd: Decimal
+    # 게이트웨이가 finalize 에서 계산해 Redis 예산 정산에 쓴 웹 검색 비용(wave 3, DECISION 2).
+    # 워커는 이 값을 usage_logs·budget_usages 에 그대로 쓴다(두 원장이 같은 숫자). None = 구
+    # 게이트웨이 — 워커 단가 스냅샷으로 계산(종전 동작).
+    web_search_cost_usd: Decimal | None = None
+    # 단가 행 없이 cost_usd=0 으로 계산된 행(B7) — repricer 가 단가가 생기면 채운다.
+    pricing_missing: bool = False
+
+    #: 스트림 원본(JSON 문자열)과 스트림 id — 영구 오류 행을 dead-letter 표에 **원본 그대로**
+    #: 남기기 위해(B5). 직렬화 대상이 아니다.
+    _raw: str | None = PrivateAttr(default=None)
+    _stream_id: str | None = PrivateAttr(default=None)
 
     @field_validator(
         "input_tokens", "output_tokens",
@@ -59,9 +70,11 @@ class CostStreamEntry(BaseModel):
             return min(max(iv, 0), 10**12)
         return v
 
-    @field_validator("cost_usd", mode="before")
+    @field_validator("cost_usd", "web_search_cost_usd", mode="before")
     @classmethod
     def _finite_cost(cls, v):
+        if v is None:
+            return v
         # 'NaN'/'Infinity' 는 Decimal 파싱을 통과하고 Postgres NUMERIC 에도
         # 저장 가능하다 — 그대로 INSERT/UPSERT 되면 budget_usages.used_usd
         # 행이 영구 NaN 이 돼 이후의 rebuild 가 전부 db=0 으로 읽는다
@@ -86,7 +99,7 @@ class CostStreamEntry(BaseModel):
     estimated_usage: bool = False
     downgraded_from: str | None = None
     availability_fallback_from: str | None = None
-    # usage_logs.status — 요청 종결 상태. SUCCESS|ERROR|TIMEOUT (usage_status enum).
+    # usage_logs.status — 요청 종결 상태. SUCCESS|ERROR|TIMEOUT|CANCELLED (usage_status enum).
     # 구버전(schema_version<3) 엔트리는 부재 → 기본 SUCCESS. INSERT 전에
     # batch_flusher._usage_status 가 enum 밖 값을 방어적으로 걸러낸다.
     status: str = "SUCCESS"

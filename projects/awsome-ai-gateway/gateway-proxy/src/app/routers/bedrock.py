@@ -135,6 +135,10 @@ def _scan_bedrock_stream_chunk(chunk: bytes, path_suffix: str, state: dict) -> N
 
     ``state`` 는 스트림 수명 동안 유지되는 누적 dict. usage 필드를 본 순간
     ``state["hit"]=True`` 가 된다 — 호출자는 이 플래그로 TokenUsage 를 만든다.
+    ``state["final"]`` 은 **최종** usage(message_delta / invocationMetrics / converse
+    metadata)를 봤다는 뜻이다. message_start 의 output_tokens(=1)는 자리표시자라 final 이
+    아니다 — final 없이 끝난 스트림은 ``state["text"]``(전달된 출력 델타)로 출력 토큰을
+    역산하고 estimated 로 표시한다(B1).
     """
     try:
         data = json.loads(chunk)
@@ -153,6 +157,18 @@ def _scan_bedrock_stream_chunk(chunk: bytes, path_suffix: str, state: dict) -> N
             if key.endswith("Exception"):
                 state["error_type"] = key
                 return
+        # B1: 전달된 출력(text·reasoning·tool 인자) — 종결 metadata 없이 끊기면 역산 재료.
+        delta = (data.get("contentBlockDelta") or {}).get("delta") or {}
+        if isinstance(delta, dict):
+            piece = delta.get("text") or ""
+            rc = delta.get("reasoningContent")
+            if isinstance(rc, dict):
+                piece += rc.get("text") or ""
+            tu = delta.get("toolUse")
+            if isinstance(tu, dict) and isinstance(tu.get("input"), str):
+                piece += tu["input"]
+            if piece:
+                state.setdefault("text", []).append(piece)
         usage = (data.get("metadata") or {}).get("usage")
         if isinstance(usage, dict) and usage:
             state["input_tokens"] = usage.get("inputTokens", 0)
@@ -160,6 +176,7 @@ def _scan_bedrock_stream_chunk(chunk: bytes, path_suffix: str, state: dict) -> N
             state["cache_read"] = usage.get("cacheReadInputTokens", 0)
             state["cache_write"] = usage.get("cacheWriteInputTokens", 0)
             state["hit"] = True
+            state["final"] = True
         return
 
     # invoke-with-response-stream — Anthropic 이벤트 JSON
@@ -184,11 +201,19 @@ def _scan_bedrock_stream_chunk(chunk: bytes, path_suffix: str, state: dict) -> N
             state.get("output_tokens", 0), u.get("output_tokens", 0)
         )
         state["hit"] = True
+    elif ev_type == "content_block_delta":
+        # B1: 전달된 출력(text·thinking·input_json) — message_delta 없이 끊기면 역산 재료.
+        from app.services.streaming import anthropic_delta_text
+
+        if piece := anthropic_delta_text(data.get("delta") or {}):
+            state.setdefault("text", []).append(piece)
     elif ev_type == "message_delta":
         u = data.get("usage") or {}
         if "output_tokens" in u:
             state["output_tokens"] = u["output_tokens"]
             state["hit"] = True
+            # message_delta.usage.output_tokens 는 누적 최종값 — message_start 의 1 은 자리표시자다.
+            state["final"] = True
     elif ev_type == "message_stop":
         m = data.get("amazon-bedrock-invocationMetrics") or {}
         if m:
@@ -206,6 +231,7 @@ def _scan_bedrock_stream_chunk(chunk: bytes, path_suffix: str, state: dict) -> N
                 "cacheWriteInputTokenCount", state.get("cache_write", 0)
             )
             state["hit"] = True
+            state["final"] = True
 
 
 async def _get_request_body(request: Request) -> bytes:
@@ -458,6 +484,8 @@ async def _handle_bedrock(request: Request, model_id: str, path_suffix: str, str
             await _enqueue_body_log("error")
             raise
 
+        _tokenizer = getattr(request.app.state, "tokenizer", None)
+
         async def stream_with_cost():
             """Bedrock `/model/*` pass-through: 원본 바이트 유지 + 포맷별 usage 추출.
 
@@ -481,12 +509,19 @@ async def _handle_bedrock(request: Request, model_id: str, path_suffix: str, str
                 _resolve_timeouts,
                 _spawn,
                 _try_extract_usage,
+                heuristic_tokens,
+                mark_cancelled,
                 mark_outcome,
+                settle_shielded,
+                shield_upstream,
                 usage_status_of,
             )
 
             idle_timeout, drain_timeout = _resolve_timeouts(None, None)
-            iterator = chunk_iter.__aiter__()
+            # 상류 읽기를 클라이언트 취소에서 보호한다 — 없으면 disconnect 시 진행 중이던
+            # __anext__ 가 함께 취소돼 상류 제너레이터가 닫히고, 드레인이 즉시 끝나
+            # message_start 의 output_tokens=1 로 청구됐다(B1, 로컬 실측 185/185).
+            iterator = shield_upstream(chunk_iter)
             bedrock_usage: dict = {}
             usage_fired = False  # 과금 멱등 가드 — 다른 SSE 경로와 동일 계약
             client_disconnected = False
@@ -535,12 +570,53 @@ async def _handle_bedrock(request: Request, model_id: str, path_suffix: str, str
                     if u:
                         usage = u
 
+            async def _estimated_output() -> int | None:
+                """최종 usage 없이 끝난 스트림의 출력 토큰 — 전달된(+드레인한) 출력 델타로 역산(B1).
+
+                None = 역산할 출력이 없다. 토크나이저(Bedrock CountTokens → tiktoken)가 실패하면
+                문자 수 근사 — 0 으로 두면 이미 생성·청구된 출력이 무료가 된다.
+                """
+                text = "".join(bedrock_usage.get("text") or [])
+                if not text:
+                    return None
+                n = None
+                if _tokenizer is not None:
+                    try:
+                        n = await _tokenizer.estimate_output_tokens(
+                            text, provider=ProviderType.BEDROCK, model_id=bedrock_model_id
+                        )
+                    except Exception:
+                        logger.warning("bedrock_passthrough_estimate_failed")
+                        n = None
+                return n if n and n > 0 else heuristic_tokens(text)
+
             async def _fire_finalize() -> None:
-                """정확히 1회만 정산한다(정상 종료/타임아웃/드레인 완료 어디서든)."""
+                """정확히 1회만 정산한다(정상 종료/타임아웃/드레인 완료 어디서든).
+
+                클라이언트 취소가 정산 도중에 들어와도 끝까지 돈다(settle_shielded — B1).
+                """
                 nonlocal usage_fired
                 if usage_fired or not auth_context:
                     return
                 usage_fired = True
+                await settle_shielded(_finalize_once(), outcome)
+
+            async def _finalize_once() -> None:
+                nonlocal usage
+                # 최종 usage 를 못 본 채 끝났다(끊김·드레인 타임아웃·미드스트림 오류) —
+                # message_start 의 자리표시자(1) 대신 전달된 출력으로 역산하고 표시한다(B1).
+                if not bedrock_usage.get("final") and (
+                    bedrock_usage.get("hit") or bedrock_usage.get("text")
+                ):
+                    est = await _estimated_output()
+                    base = usage or TokenUsage()
+                    if est is not None or bedrock_usage.get("hit"):
+                        out = max(int(base.output_tokens or 0), int(est or 0))
+                        usage = base.model_copy(update={
+                            "output_tokens": out,
+                            "total_tokens": int(base.input_tokens or 0) + out,
+                            "estimated": True,
+                        })
                 # pop — 정산 완료 표시. 누군가 먼저 release 했으면 None 이 돼
                 # 이중 정산이 막힌다(E2E S3-H1/S4 계약).
                 _rl_state = state.pop("rate_limit_state", None)
@@ -603,8 +679,9 @@ async def _handle_bedrock(request: Request, model_id: str, path_suffix: str, str
                 except Exception:
                     logger.exception("bedrock_passthrough_drain_error")
                 finally:
-                    await _fire_finalize()
+                    # 상류를 먼저 닫는다 — 정산 중에 읽지 않은 출력이 더 생기지 않게(B1).
                     await _aclose_iter(iterator)
+                    await _fire_finalize()
                     # disconnect 드레인 경로도 본문 레코드를 남긴다 — 정상 종료
                     # finally 는 이미 지나갔으므로 여기가 마지막 enqueue 기회.
                     await _enqueue_body_log(
@@ -637,9 +714,9 @@ async def _handle_bedrock(request: Request, model_id: str, path_suffix: str, str
             except (asyncio.CancelledError, GeneratorExit):
                 # 클라이언트 끊김 — 종결 usage 가 아직 안 왔을 수 있으므로
                 # 백그라운드 드레인으로 잔여 청크를 스캔한 뒤 정산한다.
-                # 클라이언트 측 종결이라 성공 건과 동일 취급(상류 오류가 선행했으면 유지).
+                # 상태는 CANCELLED(B1) — 상류 오류가 선행했으면 그 판정(ERROR) 유지.
                 client_disconnected = True
-                outcome.setdefault("status", "success")
+                mark_cancelled(outcome)
                 _spawn(_drain_remaining())
                 # guard(release 0)와의 경쟁 방지 — drain이 정산 소유. _spawn 성공
                 # 후에만 마킹(스폰 실패 시 마커만 남아 guard 가 헛기다린다).
@@ -669,13 +746,15 @@ async def _handle_bedrock(request: Request, model_id: str, path_suffix: str, str
             if rls:
                 rls.pop("estimated_input", None)
 
+        _gen = stream_with_cost()
         return StreamingResponse(
-            stream_with_cost(),
+            _gen,
             status_code=status,
             media_type=headers.get("Content-Type", "application/octet-stream"),
             # nginx ingress 버퍼링으로 event-stream 이 막히지 않게(E2E S4).
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-            background=unsettled_reservation_guard(state),
+            # 첫 바이트 전 끊김이면 제너레이터를 깨워 정산한다(B1 — fallback_loop 주석).
+            background=unsettled_reservation_guard(state, stream_gen=_gen),
         )
     else:
         try:

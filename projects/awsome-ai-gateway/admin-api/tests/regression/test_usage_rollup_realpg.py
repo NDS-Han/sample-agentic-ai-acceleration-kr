@@ -10,7 +10,7 @@ admin-api 하이브리드 읽기(services/usage_rollup·usage_reads)가 usage_lo
   * 리포팅 tz = Asia/Kolkata(+05:30) — 날짜·시간 버킷이 UTC 정시와 어긋난다. 날짜 경계(자정 ±1s),
     월 경계(10-31/11-01), 시간 경계 탐침 행
   * custom 구간(≤366일, 9월 이전 빈 날짜 포함) · 월 period · 앱(client, NULL→other) · 팀 스코프
-    (1팀·여러 팀, 월중 팀 이동 사용자) · success_only · by_day
+    (1팀·여러 팀, 월중 팀 이동 사용자) · billable_only · by_day
   * 신뢰할 수 없는 소스를 **오염**시켜 둔다 — 쓰이면 raw 와 달라진다:
       늦은 행(날짜·시간 표시), 실패한 날짜(failed_at, 레지스트리 aggregated_at 없음), grain 2 날짜,
       tz 다른 날짜, dirty 플래그, 월 재구성 뒤 다시 집계된 날짜(월 누적 stale), 표시된 시간의 시간 롤업
@@ -51,7 +51,10 @@ TEAMS = [uuid.UUID(f"c2222222-2222-2222-2222-22222222222{i}") for i in range(3)]
 USERS = [uuid.UUID(f"c1111111-1111-1111-1111-11111111111{i}") for i in range(6)]
 MODELS = ["hp-m0", "hp-m1", "hp-m2", "hp-m3"]
 CLIENTS = ["claude-code", "cowork", "codex", None]
-STATUSES = ["SUCCESS"] * 7 + ["ERROR", "TIMEOUT"]
+STATUSES = ["SUCCESS"] * 7 + ["ERROR", "TIMEOUT", "CANCELLED"]
+#: wave 3 정의(core/usage_filters) — 계량 행(롤업 rq) / 청구 대상 행.
+MET = "(input_tokens+output_tokens+cache_creation_tokens+cache_read_tokens > 0 OR cost_usd > 0)"
+BILL = f"({MET[1:-1]} OR web_search_count > 0)"
 
 #: 신뢰할 수 없게 만든 과거 날짜(→ delayed_days 와 정확히 같아야 한다).
 LATE_DAY = date(2026, 11, 10)       # 늦은 행 + 날짜·시간 표시
@@ -102,6 +105,17 @@ def _row(rng: random.Random, at: datetime, *, user=None, team=None, late=False):
         t = team
     ws = rng.choice([0, 0, 0, 1, 2])
     tracked = rng.random() < 0.6
+    if rng.random() < 0.08:
+        # 0 토큰 실패 마커(Bedrock 도달 전 거절 등) — 청구 대상이 아니다(DECISION 1).
+        return {
+            "request_id": f"hp-{uuid.uuid4()}", "user_id": u, "team_id": t,
+            "model_alias": rng.choice(MODELS) if not late else "hp-late",
+            "client": rng.choice(CLIENTS), "status": rng.choice(["ERROR", "TIMEOUT"]),
+            "input_tokens": 0, "output_tokens": 0, "cache_creation_tokens": 0,
+            "cache_read_tokens": 0, "cost_usd": Decimal(0),
+            "latency_ms": rng.randrange(100, 9000), "web_search_count": 0,
+            "web_search_cost_usd": Decimal(0) if tracked else None, "requested_at": at,
+        }
     return {
         "request_id": f"hp-{uuid.uuid4()}", "user_id": u, "team_id": t,
         "model_alias": rng.choice(MODELS) if not late else "hp-late",
@@ -355,8 +369,10 @@ async def _raw(session, sc):
     if sc.client is not None:
         extra += " AND COALESCE(client,'other') = :client"
         p["client"] = sc.client
-    if sc.success_only:
-        extra += " AND status = 'SUCCESS'"
+    if sc.billable_only:
+        from app.core.usage_filters import BILLABLE_ROW_SQL
+
+        extra += f" AND {BILLABLE_ROW_SQL}"
     day = "(requested_at AT TIME ZONE :tz)::date AS day," if sc.by_day else ""
     gb = "1,2,3,4,5,6" if sc.by_day else "1,2,3,4,5"
     rows = (await session.execute(text(_RAW_GRAIN.format(day=day, extra=extra, gb=gb)), p)).all()
@@ -372,13 +388,13 @@ async def _hyb(session, sc):
     return _norm(rows, sc.by_day)
 
 
-def _scope(start, end, *, teams=None, users=None, client=None, success_only=False, by_day=False):
+def _scope(start, end, *, teams=None, users=None, client=None, billable_only=False, by_day=False):
     from app.services import usage_rollup as ur
 
     return ur.RollupScope(start=start, end=end,
                           teams=tuple(teams) if teams is not None else None,
                           users=tuple(users) if users is not None else None,
-                          client=client, success_only=success_only, by_day=by_day,
+                          client=client, billable_only=billable_only, by_day=by_day,
                           today=TODAY, tz=TZ, now=NOW)
 
 
@@ -402,16 +418,31 @@ def _random_scopes(n: int, seed: int = 11):
         users = rng.choice([None, None, None, [rng.choice(USERS)]])
         client = rng.choice([None, None, "claude-code", "cowork", "codex", "other"])
         out.append(_scope(s, e, teams=teams, users=users, client=client,
-                          success_only=rng.random() < 0.4, by_day=rng.random() < 0.5))
+                          billable_only=rng.random() < 0.4, by_day=rng.random() < 0.5))
     return out
 
 
 # ── 속성: x == raw (입도 단위) ──────────────────────────────────────────────
 
 
+#: billable_only 에서 소스 무관하게 같아야 하는 측정치 — 호출 수 n·지연 lat 는 판정이 행 단위(raw)와
+#: 입도 단위(롤업)로 갈려 원리적으로 다르다(usage_rollup.RollupScope.billable_only 주석).
+_BILLABLE_INVARIANT = ("i", "o", "cw", "cr", "c", "rq", "wq", "wc", "wu")
+
+
+def _project(d: dict, keep: tuple[str, ...]) -> dict:
+    idx = [_MEASURES.index(k) for k in keep]
+    return {k: tuple(v[i] for i in idx) for k, v in d.items()
+            if any(v[_MEASURES.index(m)] for m in ("rq", "wq"))}
+
+
 @pytest.mark.parametrize("sc", _random_scopes(60), ids=lambda sc: sc.cache_part()[:60])
 async def test_hybrid_grain_equals_raw_random(session, sc):
-    assert await _hyb(session, sc) == await _raw(session, sc)
+    got, want = await _hyb(session, sc), await _raw(session, sc)
+    if sc.billable_only:
+        assert _project(got, _BILLABLE_INVARIANT) == _project(want, _BILLABLE_INVARIANT)
+    else:
+        assert got == want
 
 
 @pytest.mark.parametrize("start,end", [
@@ -529,16 +560,25 @@ async def test_totals_client_share_top_users_ws_daily_equal_raw(session):
             want = await _raw_scalar(session, f"""
                 SELECT count(*) FILTER (WHERE status='SUCCESS') ok,
                        count(*) FILTER (WHERE status IN ('ERROR','TIMEOUT')) err,
-                       COALESCE(sum(cost_usd) FILTER (WHERE status='SUCCESS'),0) cost,
-                       count(DISTINCT user_id) FILTER (WHERE status='SUCCESS') au,
-                       COALESCE(sum(input_tokens+output_tokens+cache_creation_tokens+cache_read_tokens)
-                                FILTER (WHERE status='SUCCESS'),0) tok,
+                       COALESCE(sum(cost_usd),0) cost,
+                       count(DISTINCT user_id) FILTER (WHERE {BILL}) au,
+                       COALESCE(sum(input_tokens+output_tokens+cache_creation_tokens+cache_read_tokens),0) tok,
                        COALESCE(sum(web_search_count),0) wq, sum(web_search_cost_usd) wc,
-                       COALESCE(sum(web_search_count) FILTER (WHERE web_search_cost_usd IS NULL),0) wu
+                       COALESCE(sum(web_search_count) FILTER (WHERE web_search_cost_usd IS NULL),0) wu,
+                       count(*) FILTER (WHERE status='CANCELLED') can,
+                       count(*) FILTER (WHERE {MET}) billable,
+                       COALESCE(sum(cost_usd) FILTER (WHERE status='SUCCESS'),0) sc,
+                       COALESCE(sum(cost_usd) FILTER (WHERE status IN ('ERROR','TIMEOUT')),0) fc,
+                       COALESCE(sum(cost_usd) FILTER (WHERE status='CANCELLED'),0) cc
                 FROM usage.usage_logs WHERE requested_at >= :s AND requested_at < :e {f}""", **p)
             t = await reads.totals(session, sc)
             assert (t.total_requests, t.error_requests, t.total_cost, t.active_users,
-                    t.total_tokens, t.ws_queries, t.ws_cost, t.ws_untracked) == tuple(want)
+                    t.total_tokens, t.ws_queries, t.ws_cost, t.ws_untracked,
+                    t.cancelled_requests, t.billable_requests, t.success_cost, t.failed_cost,
+                    t.cancelled_cost) == tuple(want)
+            # Total (charged) = 성공 + 실패 + 취소 + 웹 검색(DECISION 1/2).
+            assert t.charged_total == want.cost + (want.wc or 0)
+            assert t.success_cost + t.failed_cost + t.cancelled_cost == t.total_cost
 
             day_sc = _scope(sc.start, sc.end, teams=teams, client=client, by_day=True)
             want_daily = (await session.execute(text(f"""
@@ -556,20 +596,21 @@ async def test_totals_client_share_top_users_ws_daily_equal_raw(session):
             p["t"] = [str(t) for t in teams]
         want_cs = (await session.execute(text(f"""
             SELECT COALESCE(client,'other') client,
-                   COALESCE(sum(cost_usd) FILTER (WHERE status='SUCCESS'),0) cost,
-                   count(*) FILTER (WHERE status='SUCCESS') n, COALESCE(sum(web_search_count),0) wq
+                   COALESCE(sum(cost_usd),0) cost,
+                   count(*) FILTER (WHERE {MET}) n, COALESCE(sum(web_search_count),0) wq
             FROM usage.usage_logs l WHERE requested_at >= :s AND requested_at < :e {f}
-            GROUP BY 1 ORDER BY sum(cost_usd) FILTER (WHERE status='SUCCESS') DESC, 1"""), p)).all()
+            GROUP BY 1 ORDER BY COALESCE(sum(cost_usd),0) DESC, 1"""), p)).all()
         got_cs = await reads.client_share(session, sc)
         assert [(r.client, r.cost_usd, r.call_count, r.ws_queries) for r in got_cs] == \
             [tuple(r) for r in want_cs]
 
         want_top = (await session.execute(text(f"""
-            SELECT l.user_id, sum(cost_usd) c, count(*) n FROM usage.usage_logs l
-            WHERE requested_at >= :s AND requested_at < :e AND status='SUCCESS' {f}
+            SELECT l.user_id, sum(cost_usd) c, count(*) FILTER (WHERE {MET}) n
+            FROM usage.usage_logs l
+            WHERE requested_at >= :s AND requested_at < :e AND {BILL} {f}
             GROUP BY 1 ORDER BY 2 DESC, 1 LIMIT 3"""), p)).all()
         got_top = await reads.top_users(
-            session, _scope(sc.start, sc.end, teams=teams, success_only=True), 3)
+            session, _scope(sc.start, sc.end, teams=teams, billable_only=True), 3)
         assert [(r.user_id, r.cost_usd, r.call_count) for r in got_top] == \
             [tuple(r) for r in want_top]
 
@@ -591,10 +632,11 @@ async def test_analytics_overview_and_model_detail_equal_raw(session):
              else (date(2026, 11, 30) if kw["period"] == "2026-11" else date(2026, 10, 31)))
         lo, hi = _bounds(s, min(e, TODAY))
         p = {"s": lo, "e": hi}
-        base = "FROM usage.usage_logs WHERE requested_at >= :s AND requested_at < :e AND status='SUCCESS'"
+        allrows = "FROM usage.usage_logs WHERE requested_at >= :s AND requested_at < :e"
+        base = f"{allrows} AND {BILL}"
         by_model = (await session.execute(text(
-            f"SELECT model_alias, sum(cost_usd) c, count(*) n {base} GROUP BY 1 "
-            f"ORDER BY 2 DESC, 1"), p)).all()
+            f"SELECT model_alias, sum(cost_usd) c, count(*) FILTER (WHERE {MET}) n {base} "
+            f"GROUP BY 1 ORDER BY 2 DESC, 1"), p)).all()
         assert [(b.model, b.cost_usd, b.requests) for b in res.by_model] == \
             [(r.model_alias, r.c, r.n) for r in by_model]
         by_team = (await session.execute(text(
@@ -604,7 +646,7 @@ async def test_analytics_overview_and_model_detail_equal_raw(session):
             [tuple(r) for r in by_team]
         trends = (await session.execute(text(
             f"SELECT (requested_at AT TIME ZONE 'Asia/Kolkata')::date d, sum(cost_usd) c, "
-            f"count(*) n {base} GROUP BY 1 ORDER BY 1"), p)).all()
+            f"count(*) FILTER (WHERE {MET}) n {base} GROUP BY 1 ORDER BY 1"), p)).all()
         assert [(t.date, t.cost_usd, t.requests) for t in res.trends] == \
             [(str(r.d), r.c, r.n) for r in trends]
         tok = (await session.execute(text(
@@ -619,9 +661,11 @@ async def test_analytics_overview_and_model_detail_equal_raw(session):
         assert set(res.delayed_days) == {d.isoformat() for d in UNTRUSTED if s <= d <= e}
 
         md = await svc.get_model_cost_detail(session, actor=admin, **kw)
+        # 상세: 요청 수 = 계량 행, 비용·토큰 = 전 상태, 지연 = 그 모델의 모든 호출(DECISION 1).
         want = (await session.execute(text(
-            f"SELECT model_alias, count(*) n, round(sum(cost_usd), 4) c, sum(input_tokens) i, "
-            f"round(avg(latency_ms)) lat {base} GROUP BY 1 ORDER BY sum(cost_usd) DESC, 1"),
+            f"SELECT model_alias, count(*) FILTER (WHERE {MET}) n, round(sum(cost_usd), 4) c, "
+            f"sum(input_tokens) i, round(avg(latency_ms)) lat {allrows} GROUP BY 1 "
+            f"HAVING bool_or({BILL}) ORDER BY sum(cost_usd) DESC, 1"),
             p)).all()
         assert [(m["model_alias"], m["request_count"], m["total_cost_usd"], m["input_tokens"],
                  m["avg_latency_ms"]) for m in md["models"]] == \
@@ -653,8 +697,8 @@ async def test_user_models_table_equals_raw(session):
             p["c"] = client
         want = {(r.u, r.m): (r.n, r.i, Decimal(r.c).quantize(Decimal("0.000001")))
                 for r in (await session.execute(text(f"""
-                    SELECT user_id::text u, model_alias m, count(*) n, sum(input_tokens) i,
-                           sum(cost_usd) c FROM usage.usage_logs
-                    WHERE requested_at >= :s AND requested_at < :e AND status='SUCCESS' {f}
-                    GROUP BY 1,2"""), p)).all()}
+                    SELECT user_id::text u, model_alias m, count(*) FILTER (WHERE {MET}) n,
+                           sum(input_tokens) i, sum(cost_usd) c FROM usage.usage_logs
+                    WHERE requested_at >= :s AND requested_at < :e {f}
+                    GROUP BY 1,2 HAVING bool_or({BILL})"""), p)).all()}
         assert got == want

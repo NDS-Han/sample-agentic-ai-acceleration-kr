@@ -844,7 +844,7 @@ export function cacheTokenParts(
 /** 표의 빈 셀 — 다른 열과 같은 em dash. */
 export const EMPTY_CELL = '—';
 
-const KNOWN_CALL_STATUS = new Set(['ERROR', 'TIMEOUT', 'SLOW_REQUEST', 'SUCCESS']);
+const KNOWN_CALL_STATUS = new Set(['ERROR', 'TIMEOUT', 'CANCELLED', 'SLOW_REQUEST', 'SUCCESS']);
 
 /** 호출 상태 배지 — 요청 상세와 같은 톤·번역 라벨(OK/Error/Timeout). 없으면 —. */
 export function CallStatusBadge({ status }: { status: string | null | undefined }) {
@@ -944,6 +944,7 @@ export function BodyRecordContent({
   const STATUS_LABELS: Record<string, string> = {
     ERROR: tev('types.ERROR'),
     TIMEOUT: tev('types.TIMEOUT'),
+    CANCELLED: tev('types.CANCELLED'),
     SLOW_REQUEST: tev('types.SLOW_REQUEST'),
     SUCCESS: tev('types.SUCCESS'),
   };

@@ -339,7 +339,7 @@ async def get_productivity_analytics(
     union_stmt = select(func.count()).select_from(dev_prod.union(dev_git).subquery())
     active_devs = (await session.execute(union_stmt)).scalar_one() or 0
 
-    # Cost data for ROI calculation — §59 비용 집계 표준(SUCCESS + 리포팅 tz 월), 하이브리드 롤업.
+    # Cost data for ROI — 청구 총액(청구 대상 전 상태 모델 비용 + 웹 검색, wave 3) · 리포팅 tz 월, 하이브리드 롤업.
     # R25-N13/R2-N8 — "산출물당 비용" 의 분자가 전사 비용이고 분모는 계측 사용자의
     # 산출물이면 비계측 비용이 얹혀 부풀려진다. 지표별로 분모와 같은 코호트의
     # 비용을 분자로 쓴다(라인→productivity 이벤트 사용자, 커밋→git 이벤트 사용자).
@@ -347,7 +347,7 @@ async def get_productivity_analytics(
     from app.services import usage_rollup as ur
 
     rng = ur.month_range(period)
-    total_cost = float(await reads.success_cost(session, ur.RollupScope.of(rng)))
+    total_cost = float(await reads.charged_cost(session, ur.RollupScope.of(rng)))
     prod_users = [
         r[0] for r in (await session.execute(
             select(ProductivityEvent.user_id).distinct()
@@ -362,11 +362,11 @@ async def get_productivity_analytics(
         )).all()
     ]
     prod_cohort_cost = (
-        float(await reads.success_cost(session, ur.RollupScope.of(rng, users=prod_users)))
+        float(await reads.charged_cost(session, ur.RollupScope.of(rng, users=prod_users)))
         if prod_users else 0.0
     )
     git_cohort_cost = (
-        float(await reads.success_cost(session, ur.RollupScope.of(rng, users=git_users)))
+        float(await reads.charged_cost(session, ur.RollupScope.of(rng, users=git_users)))
         if git_users else 0.0
     )
 

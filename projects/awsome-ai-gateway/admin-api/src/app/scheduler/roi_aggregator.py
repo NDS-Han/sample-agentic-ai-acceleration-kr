@@ -140,9 +140,10 @@ async def _aggregate_productivity(session: AsyncSession, period: str) -> dict:
     acceptance_rate = Decimal(str(round(acc_events / gen_events * 100, 2))) if gen_events > 0 else None
     lines_per_session = Decimal(str(round(lines_gen / sessions, 2))) if sessions > 0 else None
 
-    # Total cost for ROI — §59 비용 집계 표준(SUCCESS + KST).
+    # Total cost for ROI — 청구 총액(청구 대상 전 상태 + 웹 검색, wave 3) · 리포팅 tz 월.
     from app.core.usage_filters import cost_period_filter
-    cost_stmt = select(func.coalesce(func.sum(UsageLog.cost_usd), 0)).where(
+    cost_stmt = select(func.coalesce(func.sum(
+        UsageLog.cost_usd + func.coalesce(UsageLog.web_search_cost_usd, 0)), 0)).where(
         cost_period_filter(period)
     )
     total_cost = (await session.execute(cost_stmt)).scalar_one() or Decimal("0")
