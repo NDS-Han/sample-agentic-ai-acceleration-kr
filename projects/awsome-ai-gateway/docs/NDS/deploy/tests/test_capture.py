@@ -639,6 +639,85 @@ def test_eks_capture_sizing_band_match(monkeypatch):
     assert "sizing" not in doc["deploy"]
 
 
+def _capture_vals(monkeypatch, vals):
+    monkeypatch.setattr(capture, "_helm_values", lambda *a, **kw: vals)
+    monkeypatch.setattr(capture, "_kubectl_json", lambda *a, **kw: {})
+    monkeypatch.setattr(capture, "_helm_app_version", lambda *a, **kw: "")
+    return capture.capture_eks()
+
+
+def test_eks_capture_db_pool_round_trip(monkeypatch, tmp_path):
+    """P2-3: 라이브 <svc>.db 를 deploy.sizing.<svc>.db_* 로 역매핑 — 밴드 일치로
+    capacity_tier 가 기록돼도 db sizing 은 보존되고, 다시 렌더하면 같은 db 블록."""
+    from .. import schema
+    from ..render import eks as eks_render
+    db = {
+        "gatewayProxy": {"poolSize": 5, "maxOverflow": 0, "poolRecycle": 1500},
+        "adminApi": {"poolSize": 5, "maxOverflow": 5, "poolTimeout": 10},
+        "scheduler": {"poolSize": 2, "maxOverflow": 3},
+        "notificationWorker": {"poolSize": 2, "maxOverflow": 3, "poolRecycle": 1500},
+        "costRecorderWorker": {"poolSize": "5", "maxOverflow": 5},
+    }
+    vals = {
+        "global": {"environment": "t", "imageRegistry": "r"},
+        "aws": {"region": "r"}, "ingress": {},
+        "gatewayProxy": {"autoscaling": {"minReplicas": 1, "maxReplicas": 3},
+                         "env": {}, "db": db["gatewayProxy"]},
+        "redis": {"poolSize": 150},
+        "adminApi": {"env": {}, "db": db["adminApi"]},
+        "scheduler": {"db": db["scheduler"]},
+        "notificationWorker": {"db": db["notificationWorker"]},
+        "costRecorderWorker": {"db": db["costRecorderWorker"]},
+    }
+    doc, notes = _capture_vals(monkeypatch, vals)
+    assert doc["deploy"]["capacity_tier"] == "500"
+    s = doc["deploy"]["sizing"]
+    assert s == {
+        "gateway-proxy": {"db_pool_size": 5, "db_max_overflow": 0,
+                          "db_pool_recycle": 1500},
+        "admin-api": {"db_pool_size": 5, "db_max_overflow": 5, "db_pool_timeout": 10},
+        "scheduler": {"db_pool_size": 2, "db_max_overflow": 3},
+        "notification-worker": {"db_pool_size": 2, "db_max_overflow": 3,
+                                "db_pool_recycle": 1500},
+        "cost-recorder-worker": {"db_pool_size": 5, "db_max_overflow": 5},
+    }
+    # 왕복: 캡처본 → schema → render 의 db 블록 == 라이브 db (정수화)
+    cfg = schema.from_dict({"version": 1, "env": "dev", "aws": {"region": "ap-south-1"},
+                            "deploy": doc["deploy"], "images": {"tag": "x"}})
+    v = eks_render.desired_values(cfg)
+    for hk, want in db.items():
+        assert v[hk]["db"] == {k: int(x) for k, x in want.items()}, hk
+
+
+def test_eks_capture_db_pool_off_band_merges_with_hpa(monkeypatch):
+    vals = {
+        "global": {"environment": "t"}, "aws": {"region": "r"}, "ingress": {},
+        "gatewayProxy": {"autoscaling": {"minReplicas": 2, "maxReplicas": 7},
+                         "env": {}, "db": {"poolSize": 4}},
+        "redis": {"poolSize": 200},
+        "adminApi": {"env": {}, "db": {}},
+    }
+    doc, _ = _capture_vals(monkeypatch, vals)
+    assert doc["deploy"]["sizing"]["gateway-proxy"] == {
+        "min_replicas": 2, "max_replicas": 7, "db_pool_size": 4}
+    assert "admin-api" not in doc["deploy"]["sizing"]
+
+
+def test_eks_capture_db_pool_out_of_bounds_noted_not_recorded(monkeypatch):
+    """스키마 범위 밖 라이브 값(recycle 3600 등)은 기록하면 채택본이 validate 에서
+    깨진다 — 노트만 남기고 env values 소유로 둔다. null/비정수도 건너뛴다."""
+    vals = {
+        "global": {"environment": "t"}, "aws": {"region": "r"}, "ingress": {},
+        "gatewayProxy": {"autoscaling": {"enabled": False}, "env": {},
+                         "db": {"poolRecycle": 3600, "poolSize": None,
+                                "maxOverflow": "abc", "poolTimeout": True}},
+        "adminApi": {"env": {}},
+    }
+    doc, notes = _capture_vals(monkeypatch, vals)
+    assert "gateway-proxy" not in doc["deploy"].get("sizing", {})
+    assert any("gatewayProxy.db.poolRecycle=3600" in n for n in notes)
+
+
 def test_eks_capture_sizing_off_band(monkeypatch):
     """밴드 불일치 → 명시 deploy.sizing 으로 실측 기록."""
     vals = {

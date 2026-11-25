@@ -291,31 +291,123 @@ def test_eks_sizing_absent_emits_nothing(tmp_path):
         assert "db" not in v.get(svc, {})
 
 
+# deploy.sizing 서비스 → 차트 키 (차트 values.yaml 의 최상위 키와 같아야 helm 이 읽는다)
+_DB_CHART_KEYS = {
+    "gateway-proxy": "gatewayProxy", "admin-api": "adminApi",
+    "scheduler": "scheduler", "notification-worker": "notificationWorker",
+    "cost-recorder-worker": "costRecorderWorker",
+}
+_DB_KEYS = {"db_pool_size": "poolSize", "db_max_overflow": "maxOverflow",
+            "db_pool_timeout": "poolTimeout", "db_pool_recycle": "poolRecycle"}
+
+
+def _all_db_sizing() -> dict:
+    """5개 서비스 × 4개 키, 서비스·키마다 다른 값 (매핑이 섞이면 잡히게)."""
+    return {svc: {"db_pool_size": 1 + i, "db_max_overflow": i,
+                  "db_pool_timeout": 2 + i, "db_pool_recycle": 1000 + i}
+            for i, svc in enumerate(_DB_CHART_KEYS)}
+
+
 def test_eks_sizing_db_pool_renders_chart_db_block(tmp_path):
     """deploy.sizing 의 db_* 키(snake)가 차트 db: 확장점(camel)으로 렌더 —
-    서비스별 SQLAlchemy pool 상한을 gateway.yaml 이 소유한다. 미선언 키는
-    차트 공통 ConfigMap 값을 승계하도록 만들지 않는다."""
+    5개 서비스 × 4개 키의 전체 {chartKey: {camel: int}} 맵을 고정한다.
+    db_max_overflow 0(첫 서비스)도 0 으로 남아야 한다(falsy 로 빠지면 안 됨)."""
+    sizing = _all_db_sizing()
+    doc = dict(BASE, deploy={**BASE["deploy"], "sizing": sizing})
+    _, out, _ = _render(tmp_path, doc)
+    v = yaml.safe_load((out / "values.yaml").read_text())
+    got = {hk: v[hk]["db"] for hk in _DB_CHART_KEYS.values() if "db" in v.get(hk, {})}
+    want = {_DB_CHART_KEYS[svc]: {_DB_KEYS[k]: val for k, val in kv.items()}
+            for svc, kv in sizing.items()}
+    assert got == want
+    assert v["gatewayProxy"]["db"]["maxOverflow"] == 0
+    for hk in want:
+        assert all(type(x) is int for x in v[hk]["db"].values()), hk
+
+
+def test_eks_sizing_db_pool_partial_keys_and_services(tmp_path):
+    """미선언 서비스는 db 블록 자체가 없고, 미선언 키는 만들지 않는다 —
+    공통 ConfigMap 값을 승계한다."""
     doc = dict(BASE, deploy={**BASE["deploy"], "sizing": {
-        "gateway-proxy": {"db_pool_size": 5, "db_max_overflow": 5,
-                          "db_pool_recycle": 1500},
-        "notification-worker": {"db_pool_size": 2, "db_max_overflow": 3,
-                                "db_pool_recycle": 1500},
-        "scheduler": {"db_pool_size": 2, "db_max_overflow": 3,
-                      "db_pool_recycle": 1500},
+        "scheduler": {"db_pool_size": 2, "db_max_overflow": 3},
     }})
     _, out, _ = _render(tmp_path, doc)
     v = yaml.safe_load((out / "values.yaml").read_text())
-    assert v["gatewayProxy"]["db"] == {
-        "poolSize": 5, "maxOverflow": 5, "poolRecycle": 1500}
-    assert v["notificationWorker"]["db"] == {
-        "poolSize": 2, "maxOverflow": 3, "poolRecycle": 1500}
-    assert v["scheduler"]["db"] == {
-        "poolSize": 2, "maxOverflow": 3, "poolRecycle": 1500}
-    # 미선언 서비스는 db 블록 자체가 없어야 env overlay/ConfigMap 승계
-    assert "db" not in v.get("adminApi", {})
-    assert "db" not in v.get("costRecorderWorker", {})
-    # poolTimeout 미선언 → 키 자체를 만들지 않는다
-    assert "poolTimeout" not in v["gatewayProxy"]["db"]
+    assert v["scheduler"]["db"] == {"poolSize": 2, "maxOverflow": 3}
+    for hk in ("gatewayProxy", "adminApi", "notificationWorker", "costRecorderWorker"):
+        assert "db" not in v.get(hk, {}), hk
+
+
+def test_eks_db_chart_keys_exist_in_chart_values():
+    """렌더가 쓰는 차트 키가 실제 차트 values.yaml 의 <svc>.db 와 일치 —
+    오타(adminAPI 등)는 helm 이 조용히 무시한다."""
+    chart = yaml.safe_load((eks_render.REPO_ROOT / eks_render.CHART_DIR
+                            / "values.yaml").read_text())
+    for hk in _DB_CHART_KEYS.values():
+        assert chart[hk]["db"] == {}, hk
+
+
+def _budget_notes(res) -> list[str]:
+    return [n for n in res["notes"] if "DB 커넥션 worst-case" in n]
+
+
+def test_eks_db_budget_note_when_over(tmp_path):
+    """P1-1: 병합 values 기준 worst-case 가 기준(518)을 넘으면 render 노트."""
+    doc = dict(BASE, deploy={**BASE["deploy"], "sizing": {
+        "gateway-proxy": {"max_replicas": 10, "db_pool_size": 50,
+                          "db_max_overflow": 50},
+    }})
+    _, _, res = _render(tmp_path, doc)
+    notes = _budget_notes(res)
+    assert len(notes) == 1
+    # gateway 10 pod + surge 3 = 13 × WORKERS 2 × (50+50) = 2600
+    assert "gateway-proxy 13pod×2×(50+50)=2600" in notes[0]
+
+
+def test_eks_db_budget_no_note_for_dev_sizing(tmp_path):
+    """dev 사이징(5+5, 2+3, capacity_tier 500)은 기준 안 — 노트 없음."""
+    doc = dict(BASE, deploy={**BASE["deploy"], "capacity_tier": "500", "sizing": {
+        "gateway-proxy": {"db_pool_size": 5, "db_max_overflow": 5},
+        "admin-api": {"db_pool_size": 5, "db_max_overflow": 5},
+        "cost-recorder-worker": {"db_pool_size": 5, "db_max_overflow": 5},
+        "notification-worker": {"db_pool_size": 2, "db_max_overflow": 3},
+        "scheduler": {"db_pool_size": 2, "db_max_overflow": 3},
+    }})
+    _, _, res = _render(tmp_path, doc)
+    assert _budget_notes(res) == []
+
+
+def test_eks_db_budget_math():
+    """산식 고정: (HPA max|replicaCount + surge) × procs × (pool+overflow),
+    gateway hot pool, 워커 overflow 폴백(DB_POOL_OVERFLOW → 코드 기본 5/3, 공통 아님)."""
+    from ..tiers import eks_db_budget
+    cfg = schema.from_dict(BASE)
+    vals = {
+        "database": {"external": {"poolSize": 10, "maxOverflow": 20}},
+        "gatewayProxy": {"env": {"WORKERS": "2", "HOT_DB_POOL_SIZE": "1"},
+                         "autoscaling": {"enabled": True, "maxReplicas": 8},
+                         "db": {"poolSize": 5, "maxOverflow": 0}},
+        "adminApi": {"replicaCount": 3, "autoscaling": {"enabled": False}},
+        "scheduler": {"replicaCount": 5},
+        "notificationWorker": {"replicaCount": 1, "env": {"DB_POOL_OVERFLOW": "3"}},
+        "costRecorderWorker": {"replicaCount": 2, "db": {"maxOverflow": 1}},
+    }
+    b = eks_db_budget(cfg, vals)
+    # override 없는 워커는 공통 maxOverflow(20) 가 아니라 코드 기본
+    bare = eks_db_budget(cfg, {**vals, "notificationWorker": {"replicaCount": 1},
+                               "costRecorderWorker": {"replicaCount": 1}})["services"]
+    assert bare["notification-worker"]["overflow"] == 3
+    assert bare["cost-recorder-worker"]["overflow"] == 5
+    s = b["services"]
+    assert s["gateway-proxy"] == {"pods": 10, "procs": 2, "pool": 5, "overflow": 0,
+                                  "conns": 100}
+    assert s["admin-api"] == {"pods": 4, "procs": 1, "pool": 10, "overflow": 20,
+                              "conns": 120}
+    assert s["scheduler"]["pods"] == 1 and s["scheduler"]["conns"] == 30
+    assert s["notification-worker"]["conns"] == 2 * (10 + 3)
+    assert s["cost-recorder-worker"]["conns"] == 3 * (10 + 1)
+    assert b["hot"] == 10 * 2 * (1 + 2)
+    assert b["total"] == 100 + 120 + 30 + 26 + 33 + 60 + 1
 
 
 def test_eks_capacity_tier_expands_preset(tmp_path):

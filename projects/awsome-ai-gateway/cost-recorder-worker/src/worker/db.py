@@ -21,14 +21,20 @@ def create_db_engine(settings: Settings) -> AsyncEngine:
     connect_args["timeout"] = settings.db_connect_timeout
     connect_args["command_timeout"] = settings.db_command_timeout
 
+    pool_kwargs: dict = {}
+    # 명시 override 일 때만 — 미설정이면 SQLAlchemy 기본(30s, recycle 없음) 유지.
+    if settings.worker_db_pool_timeout is not None:
+        pool_kwargs["pool_timeout"] = settings.worker_db_pool_timeout
+    if settings.worker_db_pool_recycle is not None:
+        pool_kwargs["pool_recycle"] = settings.worker_db_pool_recycle
+
     return create_async_engine(
         settings.db_url,
         pool_size=settings.db_pool_size,
         max_overflow=settings.db_pool_overflow,
-        pool_timeout=settings.db_pool_timeout,
-        pool_recycle=settings.db_pool_recycle,
         pool_pre_ping=True,
         connect_args=connect_args,
+        **pool_kwargs,
     )
 
 

@@ -336,9 +336,14 @@ EKS_CAPACITY_TIERS: dict[str, dict] = {
 def eks_capacity_sizing(cfg) -> dict:
     """deploy.capacity_tier 프리셋 + deploy.sizing 개별 오버라이드 병합.
 
-    반환 shape 은 render/eks.py 의 sizing 소비와 동일:
-    {"gateway-proxy": {min_replicas, max_replicas, bedrock_thread_pool_size?},
-     "redis": {pool_size}}. 프리셋이 바닥, sizing 의 명시 키가 이긴다."""
+    반환 shape 은 render/eks.py 의 sizing 소비와 동일 (키는 schema.EKS_SIZING):
+    {"gateway-proxy": {min_replicas, max_replicas, bedrock_thread_pool_size?,
+                       db_*?},
+     "admin-api" | "scheduler" | "notification-worker" | "cost-recorder-worker":
+         {db_pool_size?, db_max_overflow?, db_pool_timeout?, db_pool_recycle?},
+     "redis": {pool_size}}.
+    프리셋(capacity_tier)은 gateway-proxy/redis 만 채운다. 프리셋이 바닥,
+    sizing 의 명시 키가 이긴다."""
     merged: dict[str, dict] = {}
     tier = getattr(cfg.deploy, "capacity_tier", "") or ""
     if tier:
@@ -349,3 +354,137 @@ def eks_capacity_sizing(cfg) -> dict:
     for svc, kv in (cfg.deploy.sizing or {}).items():
         merged.setdefault(svc, {}).update(kv)
     return merged
+
+
+# ── eks DB 커넥션 예산 (rv-swe P1-1 — ecs_db_budget 의 eks 판) ─────────────────
+# eks 는 인스턴스 크기를 스키마가 모르므로(기존 인프라 승계) 차단이 아니라 경고다.
+# 절대 상한은 schema.EKS_DB_POOL_BOUNDS 가 validate 에서 건다. 수요 합산은 env
+# overlay 의 replica 값이 필요해 render(eks) 단계에서 노트로 낸다.
+#
+# 기준 천장: dev Aurora Serverless v2 max 4 ACU. max_connections 공식
+# LEAST({DBInstanceClassMemory/9531392},5000) 의 AWS 표값은 4 ACU 에서 823–844
+# (플랫폼 버전별) → 하한 823 × RDS Proxy MaxConnectionsPercent 90% ≈ 741 사용 가능
+# → 그 70% ≈ 518. 더 큰 클러스터(prod)라면 이 경고는 보수적이다.
+EKS_DB_MAX_CONNECTIONS = 823
+EKS_DB_PROXY_PERCENT = 0.9
+EKS_DB_TARGET_RATIO = 0.7
+EKS_DB_CONN_BUDGET = int(EKS_DB_MAX_CONNECTIONS * EKS_DB_PROXY_PERCENT
+                         * EKS_DB_TARGET_RATIO)          # 518
+
+# deploy.sizing 서비스명 → (차트 키, 서비스별 overflow env 이름, 롤아웃 surge 규칙)
+# surge: "25%" = RollingUpdate maxSurge 25%(올림), "1" = maxSurge 1,
+#        "0" = Recreate(scheduler singleton). 차트 templates/*/deployment.yaml 과 동일.
+# 워커는 공통 DB_MAX_OVERFLOW 를 읽지 않는다 — 서비스별 override 가 없으면 코드 기본.
+EKS_WORKER_OVERFLOW_DEFAULT = {"notification-worker": 3, "cost-recorder-worker": 5}
+EKS_DB_SERVICES: dict[str, tuple[str, str, str]] = {
+    "gateway-proxy":        ("gatewayProxy",       "DB_MAX_OVERFLOW",  "25%"),
+    "admin-api":            ("adminApi",           "DB_MAX_OVERFLOW",  "25%"),
+    "scheduler":            ("scheduler",          "DB_MAX_OVERFLOW",  "0"),
+    "notification-worker":  ("notificationWorker", "DB_POOL_OVERFLOW", "1"),
+    "cost-recorder-worker": ("costRecorderWorker", "DB_POOL_OVERFLOW", "1"),
+}
+# gateway-proxy hot-path 전용 풀 (app/config.py hot_db_pool_size/max_overflow 기본).
+# db:/deploy.sizing 으로는 못 바꾸고 gatewayProxy.env.HOT_DB_* 로만 바뀐다.
+EKS_HOT_POOL_DEFAULT = (4, 2)
+# migration Job — psql init → alembic 순차 실행이라 동시 1 커넥션.
+EKS_MIGRATION_CONNS = 1
+
+
+def _deep_merge(base: dict, over: dict) -> dict:
+    out = dict(base)
+    for k, v in (over or {}).items():
+        if isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = _deep_merge(out[k], v)
+        else:
+            out[k] = v
+    return out
+
+
+def _as_int(v, default: int) -> int:
+    if isinstance(v, bool):
+        return default
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return default
+
+
+def _first(*vals):
+    for v in vals:
+        if v is not None:
+            return v
+    return None
+
+
+def eks_db_budget(cfg, values: dict) -> dict:
+    """eks worst-case DB 커넥션 수요 (롤아웃 surge 포함).
+
+    values: 차트 values.yaml → env overlay → gen 을 helm 과 같은 순서로 병합한
+    values. env overlay 의 replica/풀 값까지 알아야 정확하므로 schema 가 아니라
+    render(eks) 가 호출한다 — 차트 기본 replica(HPA max 20/8/6/4)로 근사하면
+    dev(1 replica) 에서 거짓 경고가 난다.
+
+    서비스당 = (HPA max 또는 replicaCount + surge) × 프로세스 × (pool + overflow).
+    프로세스: gateway-proxy 는 env WORKERS(Dockerfile 기본 4), 나머지는 1.
+    pool/overflow 우선순위: <svc>.db → <svc>.env → 공통 database.external.
+    워커 overflow 는 서비스별 DB_POOL_OVERFLOW → 코드 기본(cost 5 / notification 3)
+    이다 — 워커는 공통 DB_MAX_OVERFLOW 를 읽지 않는다.
+    gateway-proxy 는 hot-path 풀(HOT_DB_*, 기본 4+2/프로세스)을 더한다.
+
+    반환: {services: {svc: {pods, procs, pool, overflow, conns}}, hot, migration,
+    total, budget}. cfg.deploy.target 이 eks 가 아니면 {}.
+    """
+    if cfg.deploy.target != "eks":
+        return {}
+    vals = values if isinstance(values, dict) else {}
+    common = ((vals.get("database") or {}).get("external") or {})
+    c_pool = _as_int(common.get("poolSize"), 10)
+    c_ovf = _as_int(common.get("maxOverflow"), 20)
+    services: dict[str, dict] = {}
+    hot = 0
+    for svc, (hk, ovf_env, surge) in EKS_DB_SERVICES.items():
+        sv = vals.get(hk) if isinstance(vals.get(hk), dict) else {}
+        if sv.get("enabled") is False:
+            continue
+        asg = sv.get("autoscaling") if isinstance(sv.get("autoscaling"), dict) else {}
+        if svc == "scheduler":
+            pods = 1                       # 템플릿이 replicas: 1 고정
+        elif asg.get("enabled"):
+            pods = _as_int(asg.get("maxReplicas"), 1)
+        else:
+            pods = _as_int(sv.get("replicaCount"), 1)
+        extra = {"25%": -(-pods // 4), "1": 1, "0": 0}[surge]
+        env = sv.get("env") if isinstance(sv.get("env"), dict) else {}
+        db = sv.get("db") if isinstance(sv.get("db"), dict) else {}
+        procs = _as_int(env.get("WORKERS"), 4) if svc == "gateway-proxy" else 1
+        pool = _as_int(_first(db.get("poolSize"), env.get("DB_POOL_SIZE")), c_pool)
+        ovf = _as_int(_first(db.get("maxOverflow"), env.get(ovf_env)),
+                      EKS_WORKER_OVERFLOW_DEFAULT.get(svc, c_ovf))
+        n = (pods + extra) * procs
+        services[svc] = {"pods": pods + extra, "procs": procs, "pool": pool,
+                         "overflow": ovf, "conns": n * (pool + ovf)}
+        if svc == "gateway-proxy":
+            hot = n * (_as_int(env.get("HOT_DB_POOL_SIZE"), EKS_HOT_POOL_DEFAULT[0])
+                       + _as_int(env.get("HOT_DB_MAX_OVERFLOW"),
+                                 EKS_HOT_POOL_DEFAULT[1]))
+    total = sum(s["conns"] for s in services.values()) + hot + EKS_MIGRATION_CONNS
+    return {"services": services, "hot": hot, "migration": EKS_MIGRATION_CONNS,
+            "total": total, "budget": EKS_DB_CONN_BUDGET}
+
+
+def eks_db_budget_warning(b: dict, basis: str) -> str | None:
+    """예산 초과 시 경고 문구 (없으면 None)."""
+    if not b or b["total"] <= b["budget"]:
+        return None
+    top = sorted(b["services"].items(), key=lambda kv: -kv[1]["conns"])
+    parts = ", ".join(
+        f"{svc} {s['pods']}pod×{s['procs']}×({s['pool']}+{s['overflow']})={s['conns']}"
+        for svc, s in top)
+    return (f"DB 커넥션 worst-case {b['total']}개 ({basis}; {parts}, "
+            f"gateway hot pool {b['hot']}, migration {b['migration']}) 가 기준 "
+            f"{b['budget']}개를 넘습니다 — 기준은 Aurora Serverless v2 4 ACU "
+            f"max_connections {EKS_DB_MAX_CONNECTIONS} × RDS Proxy "
+            f"{int(EKS_DB_PROXY_PERCENT * 100)}% × {int(EKS_DB_TARGET_RATIO * 100)}% "
+            f"입니다. 더 큰 클러스터라면 그 max_connections 로 다시 계산하고, "
+            f"아니면 deploy.sizing 의 db_pool_size/db_max_overflow/max_replicas 를 "
+            f"낮추세요.")

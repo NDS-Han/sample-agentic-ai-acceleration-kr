@@ -287,13 +287,84 @@ def test_sizing_eks_unknown_db_key_rejected():
             images={"tag": "abc"}))
 
 
+_DB_SVCS = ("gateway-proxy", "admin-api", "cost-recorder-worker",
+            "notification-worker", "scheduler")
+_DB_BOUNDS = {"db_pool_size": (1, 50), "db_max_overflow": (0, 50),
+              "db_pool_timeout": (1, 10), "db_pool_recycle": (60, 1799)}
+
+
+def _eks_sizing(sizing):
+    return minimal(deploy={"target": "eks", "size_tier": "t3", "sizing": sizing},
+                   images={"tag": "abc"})
+
+
+def test_db_pool_bounds_constant_matches_contract():
+    """범위 표가 바뀌면 이 테스트와 문서(gateway-yaml.md)를 함께 고친다."""
+    assert schema.EKS_DB_POOL_BOUNDS == _DB_BOUNDS
+
+
 def test_sizing_eks_db_pool_keys_accepted():
-    cfg = schema.from_dict(minimal(
-        deploy={"target": "eks", "size_tier": "t3",
-                "sizing": {"admin-api": {"db_pool_size": 5,
-                                         "db_max_overflow": 5}}},
+    cfg = schema.from_dict(_eks_sizing(
+        {"admin-api": {"db_pool_size": 5, "db_max_overflow": 5}}))
+    assert cfg.deploy.sizing["admin-api"] == {"db_pool_size": 5, "db_max_overflow": 5}
+
+
+@pytest.mark.parametrize("svc", _DB_SVCS)
+@pytest.mark.parametrize("key", sorted(_DB_BOUNDS))
+@pytest.mark.parametrize("edge", ["lo", "hi"])
+def test_sizing_eks_db_key_accepted_for_every_service(svc, key, edge):
+    """모든 (서비스, 키) 조합이 범위 양끝에서 통과한다."""
+    lo, hi = _DB_BOUNDS[key]
+    val = lo if edge == "lo" else hi
+    cfg = schema.from_dict(_eks_sizing({svc: {key: val}}))
+    assert cfg.deploy.sizing[svc][key] == val
+
+
+def test_sizing_eks_db_max_overflow_zero_accepted():
+    """P2-1: overflow 0 은 pool_size 를 정확한 상한으로 쓰는 하드캡."""
+    cfg = schema.from_dict(_eks_sizing({"cost-recorder-worker": {"db_max_overflow": 0}}))
+    assert cfg.deploy.sizing["cost-recorder-worker"]["db_max_overflow"] == 0
+
+
+def _bad_values(key):
+    lo, hi = _DB_BOUNDS[key]
+    return [lo - 1, hi + 1, -1, None, "5", 5.0, True, False, [5]]
+
+
+@pytest.mark.parametrize("key,val", [(k, v) for k in sorted(_DB_BOUNDS)
+                                     for v in _bad_values(k)])
+def test_sizing_eks_db_key_rejected(key, val):
+    """범위 밖/null/문자열/float/bool 은 validate 에서 거부 (렌더 후 pod CrashLoop 대신)."""
+    with pytest.raises(schema.SchemaError, match=rf"deploy\.sizing\.admin-api\.{key} 는"):
+        schema.from_dict(_eks_sizing({"admin-api": {key: val}}))
+
+
+def test_sizing_eks_db_reviewer_edge_cases_rejected():
+    """rv-swe P1-1 재현값: pool 10000, timeout 600, recycle 7200."""
+    for ov in ({"db_pool_size": 10000}, {"db_max_overflow": 10000},
+               {"db_pool_timeout": 600}, {"db_pool_recycle": 7200},
+               {"db_pool_recycle": 1800}):
+        with pytest.raises(schema.SchemaError):
+            schema.from_dict(_eks_sizing({"gateway-proxy": ov}))
+
+
+@pytest.mark.parametrize("svc", _DB_SVCS)
+def test_sizing_db_keys_rejected_on_ecs(svc):
+    """db_* 는 eks 전용 키 — ecs 는 task 단위 sizing 키만 받는다."""
+    with pytest.raises(schema.SchemaError, match="알 수 없는 키"):
+        schema.from_dict(minimal(
+            deploy={"target": "ecs", "size_tier": "t1",
+                    "sizing": {svc: {"db_pool_size": 5}}},
             images={"tag": "abc"}))
-    assert cfg.deploy.sizing["admin-api"]["db_pool_size"] == 5
+
+
+def test_sizing_eks_unknown_service_single_error():
+    """P2-6: 알 수 없는 서비스는 오류 하나 — '(허용: [])' 키 오류가 붙지 않는다."""
+    with pytest.raises(schema.SchemaError) as ei:
+        schema.from_dict(_eks_sizing({"admin-ui": {"db_pool_size": 5}}))
+    msg = str(ei.value)
+    assert "알 수 없는 서비스" in msg
+    assert "알 수 없는 키" not in msg
 
 
 def test_sizing_valid_on_ecs():

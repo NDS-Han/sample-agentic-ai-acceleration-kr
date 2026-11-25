@@ -192,28 +192,41 @@ imagePullSecrets:
 {{- end -}}
 
 {{/* ------------------------------------------------------------------------
-  서비스별 DB pool override env. 값이 없으면 아무것도 렌더하지 않아
+  서비스별 DB pool override env. 값이 없으면(키 부재·null) 아무것도 렌더하지 않아
   공통 ConfigMap(database.external.*)의 기존 동작을 그대로 유지한다.
-  cost/notification worker 처럼 overflow env 이름이 다른 서비스는 overflowEnv 를 바꾼다.
-  호출: include "llm-gateway.dbPoolEnv" (dict "db" .Values.gatewayProxy.db "overflowEnv" "DB_MAX_OVERFLOW")
+  env 이름은 서비스가 실제로 읽는 이름으로 넘긴다:
+    - cost/notification worker: overflowEnv=DB_POOL_OVERFLOW,
+      timeoutEnv/recycleEnv=WORKER_DB_POOL_TIMEOUT/WORKER_DB_POOL_RECYCLE
+      (워커는 공통 DB_POOL_TIMEOUT/RECYCLE 을 읽지 않는다 — 미설정 시 SQLAlchemy 기본)
+  검증(렌더 실패로 막는다 — pod 의 int("") CrashLoop 대신):
+    - 정수(또는 숫자 문자열)만. poolSize ≥ 1(0 은 SQLAlchemy 무제한), 나머지 ≥ 0
+      (maxOverflow 0 은 유효한 하드캡이며 "0" 으로 렌더된다), poolTimeout/poolRecycle ≥ 1.
+    - 같은 이름이 <svc>.env 에도 있으면 실패 — env 항목이 2개 생긴다.
+  호출: include "llm-gateway.dbPoolEnv" (dict "db" .Values.gatewayProxy.db
+          "env" .Values.gatewayProxy.env "svc" "gatewayProxy")
 -------------------------------------------------------------------------- */}}
 {{- define "llm-gateway.dbPoolEnv" -}}
-{{- with .db }}
-{{- if hasKey . "poolSize" }}
-- name: DB_POOL_SIZE
-  value: {{ .poolSize | quote }}
+{{- $db := .db | default dict }}
+{{- $env := .env | default dict }}
+{{- $svc := .svc | default "?" }}
+{{- $names := dict "poolSize" "DB_POOL_SIZE" "maxOverflow" (.overflowEnv | default "DB_MAX_OVERFLOW") "poolTimeout" (.timeoutEnv | default "DB_POOL_TIMEOUT") "poolRecycle" (.recycleEnv | default "DB_POOL_RECYCLE") }}
+{{- $min := dict "poolSize" 1 "maxOverflow" 0 "poolTimeout" 1 "poolRecycle" 1 }}
+{{- range $key := list "poolSize" "maxOverflow" "poolTimeout" "poolRecycle" }}
+{{- $v := get $db $key }}
+{{- if and (hasKey $db $key) (not (kindIs "invalid" $v)) }}
+{{- $name := get $names $key }}
+{{- $s := toString $v }}
+{{- if not (regexMatch "^[0-9]+$" $s) }}
+{{- fail (printf "%s.db.%s 는 0 이상의 정수여야 합니다: %q" $svc $key $s) }}
 {{- end }}
-{{- if hasKey . "maxOverflow" }}
-- name: {{ $.overflowEnv | default "DB_MAX_OVERFLOW" }}
-  value: {{ .maxOverflow | quote }}
+{{- if lt (atoi $s) (int (get $min $key)) }}
+{{- fail (printf "%s.db.%s 는 %v 이상이어야 합니다: %s" $svc $key (get $min $key) $s) }}
 {{- end }}
-{{- if hasKey . "poolTimeout" }}
-- name: DB_POOL_TIMEOUT
-  value: {{ .poolTimeout | quote }}
+{{- if hasKey $env $name }}
+{{- fail (printf "%s.env.%s 와 %s.db.%s 가 같은 env 를 중복 선언합니다 — 한쪽만 두세요" $svc $name $svc $key) }}
 {{- end }}
-{{- if hasKey . "poolRecycle" }}
-- name: DB_POOL_RECYCLE
-  value: {{ .poolRecycle | quote }}
+- name: {{ $name }}
+  value: {{ $s | quote }}
 {{- end }}
 {{- end }}
 {{- end -}}
