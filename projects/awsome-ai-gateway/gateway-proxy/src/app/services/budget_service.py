@@ -21,7 +21,7 @@ from app.models.budget import BudgetConfig, BudgetScope, BudgetUsage
 from app.resilience.redis_retry import call_with_transient_retry
 from app.schemas.domain import BudgetPolicy, BudgetStatus
 from app.services import budget_degraded as _bd
-from app.services.hot_path import DB_BREAKER, HotDbUnavailable
+from app.services.hot_path import DB_BREAKER, HotDbUnavailable, is_redis_infra_error
 from app.services.lua_loader import LuaScriptLoader
 
 logger = structlog.get_logger(__name__)
@@ -657,7 +657,7 @@ class BudgetService:
                 return self._decide_last_known(user_id, team_id, period, client, cause=str(e))
             except Exception as e:
                 logger.exception("redis_budget_check_failed", user_id=user_id)
-                if isinstance(e, (RedisError, OSError, TimeoutError)):
+                if is_redis_infra_error(e):  # 풀 고갈·ResponseError 는 Redis 장애가 아니다
                     deg.redis_breaker.trip(f"budget:{type(e).__name__}")
                 # Redis 경로 안에서 실패한 DB 구문(hydrate/복원)이 세션을
                 # aborted 상태로 남겼을 수 있다 — 같은 세션으로 가는

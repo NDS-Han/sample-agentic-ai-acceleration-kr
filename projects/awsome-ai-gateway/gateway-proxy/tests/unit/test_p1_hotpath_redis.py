@@ -638,3 +638,52 @@ async def test_downgrade_loader_redis_error_trips_breaker():
     redis.get = AsyncMock(side_effect=RedisConnectionError("down"))
     assert await DowngradePolicyLoader().get_active_rules(redis, None, uuid.uuid4()) == []
     assert not REDIS_BREAKER.available()
+
+
+# ── XREVIEW #1: only infra errors trip the shared breaker ─────────────────────
+
+_TRIP_CASES = [
+    (MaxConnectionsError("pool"), False),
+    (ResponseError("WRONGTYPE"), False),
+    (RedisConnectionError("down"), True),
+    (RedisTimeoutError("slow"), True),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exc,trips", _TRIP_CASES)
+async def test_budget_redis_path_trips_only_on_infra_errors(exc, trips):
+    from app.services import budget_degraded
+    from app.services.budget_service import BudgetService
+
+    breaker = budget_degraded.DEGRADED.redis_breaker
+    breaker.reset()
+    try:
+        redis = MagicMock()
+        redis.exists = AsyncMock(side_effect=exc)
+        redis.mget = AsyncMock(side_effect=exc)
+        redis.eval = AsyncMock(side_effect=exc)
+        redis.get = AsyncMock(side_effect=exc)
+        await BudgetService().check_budget(redis, None, "u1", "t1", "2026-11")
+        assert breaker.is_open() is trips
+    finally:
+        breaker.reset()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exc,trips", _TRIP_CASES)
+async def test_model_cache_redis_call_trips_only_on_infra_errors(exc, trips):
+    from app.config import get_settings
+    from app.services import model_cache
+
+    cache = model_cache.from_settings(get_settings(), session_factory=None)
+    cache.redis_breaker.reset()
+    try:
+        async def boom():
+            raise exc
+
+        out, failed = await cache.redis_call(boom, what="x")
+        assert (out, failed) == (None, True)
+        assert cache.redis_breaker.is_open() is trips
+    finally:
+        cache.redis_breaker.reset()

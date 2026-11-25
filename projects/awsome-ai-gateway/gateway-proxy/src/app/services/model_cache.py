@@ -37,7 +37,7 @@ import structlog
 from redis.exceptions import RedisError
 from sqlalchemy.exc import SQLAlchemyError
 
-from app.services.hot_path import DB_BREAKER, DbBreaker, LocalCache
+from app.services.hot_path import DB_BREAKER, DbBreaker, LocalCache, is_redis_infra_error
 
 logger = structlog.get_logger(__name__)
 
@@ -239,7 +239,8 @@ class ModelCatalogCache:
             self.redis_breaker.record_success()
             return out, False
         except (TimeoutError, RedisError, OSError) as e:
-            self.redis_breaker.trip(f"{what}:{type(e).__name__}")
+            if is_redis_infra_error(e):  # 풀 고갈·ResponseError 는 Redis 장애가 아니다
+                self.redis_breaker.trip(f"{what}:{type(e).__name__}")
             return None, True
 
     async def _apply_writes(self, redis, writes: Iterable[RedisWrite]) -> None:
