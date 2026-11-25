@@ -28,7 +28,10 @@ class ServiceTokenRepository:
     ) -> ServiceToken | None:
         stmt = select(ServiceToken).where(ServiceToken.id == token_id)
         if for_update:
-            stmt = stmt.with_for_update()
+            # populate_existing — 같은 세션이 이 행을 먼저 읽어 identity map 에
+            # 들고 있으면, 락 대기 뒤 받은 최신 행(동시 rotate 가 쓴 revoked_at)
+            # 대신 낡은 속성을 돌려줘 분기 차단 검사를 통과해 버린다.
+            stmt = stmt.with_for_update().execution_options(populate_existing=True)
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
     async def list_rotated_from(self, token_id: uuid.UUID) -> list[ServiceToken]:

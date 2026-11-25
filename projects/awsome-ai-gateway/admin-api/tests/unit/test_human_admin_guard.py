@@ -13,7 +13,11 @@ from unittest.mock import MagicMock
 import pytest
 from fastapi.routing import APIRoute
 
-from app.core.auth import require_human_admin, require_human_admin_or_team_leader
+from app.core.auth import (
+    require_human_admin,
+    require_human_admin_or_team_leader,
+    require_service_token_self,
+)
 from app.core.exceptions import ForbiddenError
 from app.models.auth import UserRole
 
@@ -21,6 +25,14 @@ from app.models.auth import UserRole
 # require_human_admin_or_team_leader 는 리더 스코프 엔드포인트용
 # (팀 경계 검사는 서비스 계층) — svc 차단 의미론은 동일 (R32).
 HUMAN_GATES = {require_human_admin, require_human_admin_or_team_leader}
+
+# 의도된 예외 — 사람 게이트 대신 다른 게이트가 붙어야 하는 mutation.
+# self-rotate 는 대상이 호출 svc 토큰 자신이라 사람은 원래 호출할 수 없다
+# (R32 가 여기에 require_human_admin 을 붙여 아무도 rotate 못 하던 회귀).
+# 새 항목은 이유와 함께 명시적으로만 추가한다.
+GATE_EXCEPTIONS = {
+    ("app.routers.service_tokens", "/admin/service-tokens/rotate", "POST"): require_service_token_self,
+}
 
 
 def _dep_fns(route: APIRoute):
@@ -64,6 +76,19 @@ def test_every_mutation_route_requires_human_admin(router_path):
     ]
     assert mutations, f"{router_path}: expected mutation routes"
     for route in mutations:
+        exempt = [
+            gate for (mod_path, path, method), gate in GATE_EXCEPTIONS.items()
+            if mod_path == router_path and path == route.path and method in route.methods
+        ]
+        if exempt:
+            fns = _dep_fns(route)
+            assert exempt[0] in fns, (
+                f"{router_path} {route.path} {route.methods} missing {exempt[0].__name__}"
+            )
+            assert not fns & HUMAN_GATES, (
+                f"{router_path} {route.path} must not carry a human-admin gate"
+            )
+            continue
         assert _dep_fns(route) & HUMAN_GATES, (
             f"{router_path} {route.path} {route.methods} missing "
             "human-admin gate"

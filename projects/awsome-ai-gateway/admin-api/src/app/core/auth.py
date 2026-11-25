@@ -492,6 +492,26 @@ async def require_human_admin_or_team_leader(
     return user
 
 
+async def require_service_token_self(
+    user: CurrentUser = Depends(get_current_user),
+) -> CurrentUser:
+    """svc 토큰 **자기 자신** 전용 — 사람(JWT) 호출자 차단. self-rotate 한 곳에만 쓴다.
+
+    require_human_admin 의 정반대 게이트다. R32(92670d53)가 service_tokens 의 모든
+    mutation 을 require_human_admin 으로 바꾸면서 rotate 까지 묶었는데, rotate 의
+    대상은 호출 토큰 자신(``service_token_id``)뿐이라 사람은 원래 호출할 수 없었다
+    — 결과적으로 아무도 rotate 할 수 없었다. 대상 id 를 요청에서 받지 않으므로
+    한 svc 토큰이 다른 토큰을 rotate 하는 경로는 구조적으로 없다.
+    사람 admin 은 새 토큰 발급(POST /admin/service-tokens) + 구 토큰 폐기로 교체한다.
+    """
+    if not user.is_service_token or user.service_token_id is None:
+        raise ForbiddenError(
+            "Only a service token can rotate itself; human admins issue a new token "
+            "(POST /admin/service-tokens) and revoke the old one instead"
+        )
+    return user
+
+
 async def forbid_service_token_reader(
     admin: CurrentUser = Depends(require_admin),
 ) -> None:

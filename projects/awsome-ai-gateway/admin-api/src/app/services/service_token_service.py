@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.exceptions import NotFoundError, ValidationError
+from app.core.exceptions import NotFoundError, RateLimitedError, ValidationError
 from app.models.auth import ServiceToken
 from app.repositories.service_token_repository import ServiceTokenRepository
 from app.schemas.service_tokens import (
@@ -24,6 +24,13 @@ SERVICE_TOKEN_PREFIX = "svc-"
 SERVICE_TOKEN_RANDOM_BYTES = 32  # 32 bytes = 64 hex chars → total 67 chars with prefix
 SERVICE_TOKEN_DEFAULT_EXPIRY_DAYS = 90
 SERVICE_TOKEN_ROTATE_GRACE_HOURS = 24
+# 한 계보(rotated_from 사슬)에서 grace 창(24h)에 동시에 살아 있을 수 있는 조상 수.
+# rotate 는 토큰당 1회지만 후속 토큰이 곧바로 다시 rotate 할 수 있다 — 상한이
+# 없으면 유출 토큰이 rotate 를 연쇄해 24h 동안 유효한 토큰을 무한히 쌓는다.
+# 2 → 한 계보에 동시에 유효한 토큰은 최대 3개(현재 + grace 2). 배포 실패로 한 번
+# 더 rotate 하는 정상 재시도는 통과한다. 더 필요하면 사람 admin 이 end-grace 로
+# 구 토큰의 grace 를 닫으면 자리가 난다.
+SERVICE_TOKEN_ROTATE_MAX_ANCESTORS_IN_GRACE = 2
 
 
 def hash_token(raw: str) -> str:
@@ -121,9 +128,16 @@ class ServiceTokenService:
             raise ValidationError("expired service token cannot be rotated")
         # revoked_at 이 세팅됐다는 것 자체가 "이미 rotate(또는 revoke) 됐다" 는
         # 뜻이다. 미래 시각(grace)도 거부 — grace 중 재rotate 를 허용하면
-        # 유출 토큰이 신 토큰을 무한히 연쇄 발급할 수 있다.
+        # 유출 토큰이 신 토큰을 무한히 연쇄 발급할 수 있다(계보 분기 차단).
         if old.revoked_at is not None:
+            if old.revoked_at > now:
+                raise ValidationError(
+                    "service token was already rotated and is in its grace period; "
+                    "rotate with the successor token instead"
+                )
             raise ValidationError("revoked service token cannot be rotated")
+
+        await self._enforce_rotate_rate_limit(repo, old, now)
 
         # 새 토큰 수명은 구 토큰의 잔여 수명을 넘지 못한다. 로테이션은 자격
         # 교체이지 수명 연장이 아니다 — 이 상한이 없으면 유출된 토큰이 self-rotate
@@ -155,6 +169,39 @@ class ServiceTokenService:
             triggered_by=str(created_by),
         )
         return resp
+
+    async def _enforce_rotate_rate_limit(
+        self, repo: ServiceTokenRepository, old: ServiceToken, now: datetime
+    ) -> None:
+        """계보당 rotate 빈도 상한 — grace 창에 있는 조상이 상한 이상이면 429.
+
+        조상은 rotate 순서대로 grace 가 끝나므로(먼저 rotate 된 조상일수록 revoked_at
+        이 이르다), grace 를 벗어난 첫 조상에서 멈춘다 — 최대 상한+1 회 조회.
+        호출 시점엔 ``old`` 행이 FOR UPDATE 로 잠겨 있고, 분기 차단 때문에 한
+        계보에서 rotate 가능한 토큰은 잎 하나뿐이라 이 계수도 직렬화된다.
+        """
+        in_grace: list[datetime] = []
+        parent_id = old.rotated_from
+        while parent_id is not None and len(in_grace) < SERVICE_TOKEN_ROTATE_MAX_ANCESTORS_IN_GRACE:
+            parent = await repo.get_by_id(parent_id)
+            if parent is None or parent.revoked_at is None or parent.revoked_at <= now:
+                break
+            in_grace.append(parent.revoked_at)
+            parent_id = parent.rotated_from
+        if len(in_grace) >= SERVICE_TOKEN_ROTATE_MAX_ANCESTORS_IN_GRACE:
+            retry_after = max(1, int((min(in_grace) - now).total_seconds()) + 1)
+            logger.warning(
+                "service_token.rotate_rate_limited",
+                token_id=str(old.id),
+                ancestors_in_grace=len(in_grace),
+                retry_after=retry_after,
+            )
+            raise RateLimitedError(
+                f"too many rotations in this token lineage: {len(in_grace)} previous tokens "
+                f"are still in their {SERVICE_TOKEN_ROTATE_GRACE_HOURS}h grace period",
+                code="service_token_rotate_rate_limited",
+                retry_after=retry_after,
+            )
 
     async def revoke(
         self, session: AsyncSession, *, token_id: uuid.UUID

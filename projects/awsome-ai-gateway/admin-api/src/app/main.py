@@ -32,6 +32,7 @@ from app.core.exceptions import (
     DateRangeTooLongError,
     ForbiddenError,
     NotFoundError,
+    RateLimitedError,
     STSVerificationError,
     ValidationError,
 )
@@ -436,6 +437,15 @@ def register_exception_handlers(app: FastAPI) -> None:
         return JSONResponse(
             status_code=400,
             content={"error": {"type": "validation_error", "message": exc.message, "code": exc.code}},
+        )
+
+    @app.exception_handler(RateLimitedError)
+    async def rate_limited_handler(request: Request, exc: RateLimitedError):
+        headers = {"Retry-After": str(exc.retry_after)} if exc.retry_after else None
+        return JSONResponse(
+            status_code=429,
+            content={"error": {"type": "rate_limited", "message": exc.message, "code": exc.code}},
+            headers=headers,
         )
 
     @app.exception_handler(BudgetExceededError)
