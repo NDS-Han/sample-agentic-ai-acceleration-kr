@@ -139,6 +139,26 @@ class Settings(BaseSettings):
     web_search_rebuild_timeout_sec: float = 20.0
     web_search_rebuild_lock_ttl_sec: int = 60
 
+    # ── Budget check degraded mode (wave 1c, option B: decide from last known values) ──
+    # Budget policy (limits/policy/thresholds per team/user/app) is cached per process and
+    # re-read in the background after this long. Request-path DB reads use hot_db_timeout_sec.
+    budget_policy_refresh_sec: float = 60.0
+    # How old the last known policy / budget state may be when DB (and Redis) can't answer.
+    budget_stale_max_seconds: float = 900.0
+    # Neither policy nor state known (cold pod + DB down): allow for this long per process,
+    # then fail closed (503). Reset when a budget DB read succeeds again.
+    budget_failopen_grace_seconds: float = 300.0
+    # The whole Redis part of the budget check gives up after this long (then DB fallback);
+    # a timeout/error skips Redis for hot_db_breaker_cooldown_sec (per process).
+    budget_redis_timeout_sec: float = 1.0
+    # Redis config keys written from the last known policy (DB down) expire after this long,
+    # so the real DB value replaces them soon after recovery.
+    budget_degraded_config_ttl_sec: int = 60
+    # Background policy refresh: DB deadline, and wait before retrying a failed key.
+    budget_policy_refresh_timeout_sec: float = 2.0
+    budget_policy_refresh_retry_sec: float = 10.0
+    budget_local_cache_max_entries: int = 20000
+
     # Timeouts
     lua_timeout_ms: int = 1000
     stream_timeout: int = 300

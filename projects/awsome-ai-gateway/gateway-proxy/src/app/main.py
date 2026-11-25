@@ -199,6 +199,11 @@ async def lifespan(app: FastAPI):
     budget_suspects.set_metrics(gateway_metrics.budget_suspects_dropped_total)
     # rate-limit fail-open 관측성(deepdive Q50 Phase 3) — eval 예외로 집행 못한 횟수.
     set_fail_open_metric(gateway_metrics.rl_fail_open_total)
+    # 예산 체크 열화 모드(wave 1c) — 설정값으로 프로세스 상태를 만들고 메트릭을 연결.
+    from app.services import budget_degraded as _budget_degraded
+
+    _budget_degraded.configure(settings)
+    _budget_degraded.get().set_metric(gateway_metrics.budget_degraded_total)
 
     # 12. Provider Registry
     provider_registry = ProviderRegistry()

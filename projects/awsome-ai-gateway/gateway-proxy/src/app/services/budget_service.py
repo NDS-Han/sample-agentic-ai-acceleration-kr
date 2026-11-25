@@ -20,6 +20,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.budget import BudgetConfig, BudgetScope, BudgetUsage
 from app.resilience.redis_retry import call_with_transient_retry
 from app.schemas.domain import BudgetPolicy, BudgetStatus
+from app.services import budget_degraded as _bd
+from app.services.hot_path import DB_BREAKER, HotDbUnavailable
 from app.services.lua_loader import LuaScriptLoader
 
 logger = structlog.get_logger(__name__)
@@ -32,6 +34,74 @@ class BudgetBackendUnavailableError(PermissionError):
     먼저 잡아 503 을 낸다 — 인프라 장애를 'no_budget_assigned' 429 로 오보하면
     사용자가 예산을 문의하고 운영자는 장애 원인을 못 찾는다.
     """
+
+
+class _PolicyUnknown(Exception):
+    """Redis 에 설정 키가 없고, DB 는 답하지 않고, 프로세스 캐시도 모른다 (wave 1c).
+
+    Redis 판정을 그대로 돌리면 '키 없음' 이 team_budget_unset(429) 또는 개인 한도 미적용으로
+    읽힌다 — 둘 다 틀린 답이다. 마지막 상태 판정(→ 유예 창)으로 넘긴다.
+    """
+
+
+class _DbAccess:
+    """예산 핫패스의 DB 읽기 — 전부 ``hot_db_timeout_sec`` 데드라인 + 프로세스 DB 브레이커.
+
+    - ``session``: 호출자가 준 세션(테스트·레거시 호출부). 읽기마다 같은 세션을 쓴다.
+    - ``session_factory``: 미들웨어 경로(메인 풀). 읽기마다 짧은 세션을 데드라인 안에서 연다 —
+      요청 내내 커넥션을 쥐지 않고, 느린 DB 의 체크아웃·세션 정리도 데드라인에 묶인다
+      (A5 강등 미들웨어 ``_bounded_lookup`` 과 같은 패턴). wave 1 의 hot-path 풀(4+2)은
+      인증 전용으로 남긴다 — 예산 읽기까지 얹으면 콜드 스타트에 체크아웃 경쟁으로 인증과
+      예산이 함께 데드라인을 넘겨 브레이커가 열렸다(로컬 장애 시험에서 실측).
+    - ``db_degraded``: 헬스체커가 DB_DEGRADED 로 본 상태 — 시도 없이 바로 불가.
+
+    타임아웃·인프라 오류(SQLAlchemyError/OSError)는 브레이커를 열고 ``HotDbUnavailable`` 로
+    바뀐다. 그 밖의 예외(코드 버그)는 그대로 전파한다(500 — 재시도 가능한 장애로 위장하지 않음).
+    """
+
+    def __init__(self, session=None, session_factory=None, *, db_degraded: bool = False) -> None:
+        self.session = session
+        self.factory = session_factory
+        self.db_degraded = db_degraded
+
+    @property
+    def configured(self) -> bool:
+        """DB 경로가 이 호출에 존재하는가(열화 여부와 무관)."""
+        return self.session is not None or self.factory is not None
+
+    async def run(self, fn, *, what: str):
+        from app.config import get_settings
+
+        if self.db_degraded or not DB_BREAKER.available():
+            raise HotDbUnavailable(f"{what}: db unavailable (degraded or breaker open)")
+        timeout = get_settings().hot_db_timeout_sec
+        try:
+            async with asyncio.timeout(timeout):
+                if self.session is not None:
+                    return await fn(self.session)
+                async with self.factory() as s:
+                    return await fn(s)
+        except TimeoutError as e:
+            DB_BREAKER.trip(f"{what}:timeout")
+            await self._rollback(timeout)
+            raise HotDbUnavailable(f"{what}: timed out after {timeout}s") from e
+        except PermissionError:
+            # 예산 거절(429)·BudgetBackendUnavailableError — PermissionError 는 OSError 의
+            # 서브클래스라 아래 인프라 분기보다 먼저 그대로 내보내야 한다.
+            raise
+        except (SQLAlchemyError, OSError) as e:
+            DB_BREAKER.trip(f"{what}:{type(e).__name__}")
+            await self._rollback(timeout)
+            raise HotDbUnavailable(f"{what}: {type(e).__name__}") from e
+
+    async def _rollback(self, timeout: float) -> None:
+        if self.session is None:
+            return
+        try:
+            async with asyncio.timeout(timeout):
+                await _safe_rollback(self.session)
+        except TimeoutError:
+            pass
 
 
 async def _safe_rollback(db) -> None:
@@ -49,6 +119,10 @@ async def _safe_rollback(db) -> None:
 
 
 BUDGET_CONFIG_TTL = None  # 무기한 (Admin 변경 시 DEL로 무효화)
+
+# "개인/앱 예산 행 없음" Redis 표지(``budget:config:user:{uid}[:client]:none``)의 수명 —
+# 재수화된 설정 키(ex=300)와 같다. 설정 키가 생기면 표지는 무시된다(wave 1c).
+_NEGATIVE_MARKER_TTL = 300
 
 # 취소된 호출이 뒤에 남긴 백그라운드 정리 태스크 — GC 방지 참조 보관소
 # (asyncio 문서의 documented 패턴; done_callback 으로 스스로 제거한다).
@@ -138,6 +212,51 @@ def _row_thresholds(config) -> list[int]:
     # _check_budget_db 까지 올라가면 인프라 오류가 아니라 재전파돼 그 스코프의
     # 모든 요청이 500 이 된다(18차 리뷰 F3). NULL 은 무시하고 나머지로 판정.
     return sorted({int(v) for v in raw if v is not None})
+
+
+def _user_config_data(config, app_clients: list[str]) -> dict:
+    """USER 총예산 행 → ``budget:config:user:{uid}`` JSON (ensure_config_cached 와 같은 shape)."""
+    return {
+        "limit_usd": str(config.max_budget_usd),
+        "policy": _policy_to_lua_value(_db_policy_to_domain(config.policy)),
+        "soft_limit_pct": DEFAULT_SOFT_LIMIT_PCT,
+        "throttle_rpm_pct": DEFAULT_THROTTLE_RPM_PCT,
+        # ⚠️ 운영자 임계값은 DB 가 원천이다(migration 0041) — ensure_config_cached 주석 참조.
+        "thresholds": _row_thresholds(config),
+        "app_clients": app_clients,
+    }
+
+
+def _team_config_data(config) -> dict:
+    """TEAM 행 → ``budget:config:team:{tid}`` JSON (_hydrate_team_config_cache 와 같은 shape)."""
+    return {
+        "limit_usd": str(config.max_budget_usd),
+        "policy": _policy_to_lua_value(_db_policy_to_domain(config.policy)),
+        "thresholds": _row_thresholds(config),
+        # 팀 기본 유저 cap D — admin DEL-only 경로의 재수화가 D 를 잃지
+        # 않도록 DB 행에서 함께 싣는다(§6-6). 현행 Lua 는 미지 필드를 무시.
+        "default_user_cap_usd": (
+            str(config.default_user_cap_usd)
+            if config.default_user_cap_usd is not None
+            else None
+        ),
+    }
+
+
+def _client_config_data(config) -> dict:
+    """per-app 행 → ``budget:config:user:{uid}:{client}`` JSON."""
+    return {
+        "limit_usd": str(config.max_budget_usd),
+        "policy": _policy_to_lua_value(_db_policy_to_domain(config.policy)),
+        "thresholds": _row_thresholds(config),
+    }
+
+
+def _period_bounds(period: str):
+    """리포팅 TZ 'YYYY-MM' → [월초, 다음 월초) — ``requested_at`` 범위 조건(인덱스 사용)."""
+    from app.services.web_search_quota import period_utc_range
+
+    return period_utc_range(period)
 
 
 def _policy_to_lua_value(policy: BudgetPolicy | str) -> str:
@@ -466,461 +585,792 @@ class BudgetService:
         team_id: str,
         period: str,
         client: str | None = None,
-    ) -> BudgetStatus:
-        """사용자 예산 확인 (Redis 우선, DB fallback).
-        예산 미설정 시 PermissionError 발생 (429 no_budget_assigned).
+        *,
+        session_factory=None,
+        db_degraded: bool = False,
+    ) -> BudgetStatus | None:
+        """사용자 예산 확인 (Redis 우선, DB fallback, 마지막으로 알던 값).
+
+        예산 거절은 PermissionError(429). 반환 ``None`` = 정책도 상태도 몰라 유예 창 안에서
+        허용(wave 1c, ``budget_degraded`` 모듈 docstring) — 유예가 끝나면
+        BudgetBackendUnavailableError(503).
         client 가 'claude-code' 또는 'cowork' 이면 앱별 예산도 추가로 확인한다.
+
+        ``db`` (세션) 또는 ``session_factory`` 중 하나로 DB 에 닿는다. 모든 DB 읽기는
+        ``hot_db_timeout_sec`` 데드라인 + 프로세스 DB 브레이커를 따른다(_DbAccess).
         """
         # D-14/§6-1 단계 0: 팀 미배정 유저는 fail-closed — team_id='' 로 만들어진
         # `budget:team:{}` 키 부재가 team_budget_unset 과 구분되도록 별도 코드.
         if not team_id:
             raise PermissionError("no_team_assigned")
 
+        dbx = _DbAccess(db, session_factory, db_degraded=db_degraded)
+        deg = _bd.DEGRADED
+        if session_factory is not None and not db_degraded:
+            self._schedule_policy_refresh(session_factory, user_id, team_id, client, redis=redis)
+
+        from app.config import get_settings
+
+        # Redis 예산 설정 확인 — 전체에 데드라인(budget_redis_timeout_sec). Redis 행/다운에서
+        # 요청마다 소켓 타임아웃(2 s + 재시도)을 기다리지 않도록, 실패하면 이 프로세스는
+        # 쿨다운 동안 Redis 경로를 건너뛰고 DB 폴백으로 바로 간다.
+        if redis is not None and deg.redis_breaker.available():
+            # 어느 지점의 Redis 실패든 같은 계약 — DB fallback. 재수화
+            # exists() 사전 호출까지 try 안이어야 헬스체커 마킹 전 미드요청
+            # 단절이 500 이 아니라 fallback 으로 간다.
+            try:
+                async with asyncio.timeout(get_settings().budget_redis_timeout_sec):
+                    return await self._check_budget_redis(
+                        redis, dbx, user_id, team_id, period, client
+                    )
+            except PermissionError:
+                raise
+            except _PolicyUnknown as e:
+                # Redis 는 살아 있고 DB 가 답하지 않는다 — DB 폴백은 같은 DB 라 건너뛴다.
+                return self._decide_last_known(user_id, team_id, period, client, cause=str(e))
+            except Exception as e:
+                logger.exception("redis_budget_check_failed", user_id=user_id)
+                if isinstance(e, (RedisError, OSError, TimeoutError)):
+                    deg.redis_breaker.trip(f"budget:{type(e).__name__}")
+                # Redis 경로 안에서 실패한 DB 구문(hydrate/복원)이 세션을
+                # aborted 상태로 남겼을 수 있다 — 같은 세션으로 가는
+                # DB fallback 이 즉시 PendingRollbackError 를 맞지 않게 되돌린다.
+                await dbx._rollback(get_settings().hot_db_timeout_sec)
+                # Redis 실패 시 DB fallback
+
+        # DB fallback (REDIS_DEGRADED / Redis 경로 실패) — 데드라인 안에서만.
+        if dbx.configured:
+            try:
+                status = await dbx.run(
+                    lambda s: self._check_budget_db(s, user_id, team_id, period, client=client),
+                    what="budget.db_fallback",
+                )
+                deg.grace.reset()
+                return status
+            except BudgetBackendUnavailableError:
+                raise
+            except PermissionError:
+                # 예산 거절도 DB 가 답한 것이다 — 유예 시계 리셋.
+                deg.grace.reset()
+                raise
+            except HotDbUnavailable as e:
+                # 인프라 장애만 여기로 온다 — 코드 버그(NULL 필드 TypeError 등)는 _DbAccess 가
+                # 그대로 전파해 500 으로 남긴다(재시도 가능한 장애처럼 보이지 않게).
+                logger.warning("budget_db_fallback_failed", user_id=user_id, error=str(e))
+                cause = str(e)
+        else:
+            cause = "no redis and no db for the budget check"
+        return self._decide_last_known(user_id, team_id, period, client, cause=cause)
+
+    async def _check_budget_redis(
+        self,
+        redis,
+        dbx: _DbAccess,
+        user_id: str,
+        team_id: str,
+        period: str,
+        client: str | None,
+    ) -> BudgetStatus:
+        """Redis 경로 (budget_check.lua). DB 는 캐시 미스·카운터 복원에만, 데드라인 안에서."""
+        deg = _bd.DEGRADED
         # Redis Cluster hash tag: {<user_id>} co-locates usage/config on same slot.
         user_key = f"budget:user:{{{user_id}}}:{period}"
         user_config_key = f"budget:config:user:{{{user_id}}}"
         team_key = f"budget:team:{{{team_id}}}:{period}"
         team_config_key = f"budget:config:team:{{{team_id}}}"
+        # TEAM config cold-cache fallback: init SQL / alembic backfill 로 DB에
+        # 삽입된 TEAM 예산이 Redis에 없으면 DB에서 조회해 캐시 (admin-api startup
+        # warmup 의 안전망).
+        if not await redis.exists(team_config_key):
+            await self._resolve_missing_config(
+                redis, dbx,
+                pk=_bd.PolicyCache.team_key(team_id),
+                config_key=team_config_key,
+                load=lambda s: self._hydrate_team_config_cache(redis, s, team_id),
+                what="budget.team_config",
+            )
 
-        # Redis 예산 설정 확인
-        if redis is not None:
-            # 어느 지점의 Redis 실패든 같은 계약 — DB fallback. 재수화
-            # exists() 사전 호출까지 try 안이어야 헬스체커 마킹 전 미드요청
-            # 단절이 500 이 아니라 fallback 으로 간다.
-            try:
-                # TEAM config cold-cache fallback: init SQL / alembic backfill 로 DB에
-                # 삽입된 TEAM 예산이 Redis에 없으면 DB에서 조회해 캐시 (admin-api startup
-                # warmup 의 안전망).
-                if db is not None and not await redis.exists(team_config_key):
-                    await self._hydrate_team_config_cache(redis, db, team_id)
+        # P0-③: USER config cold-cache fallback. If admin's best-effort SET of
+        # the user-config key (which carries app_clients) was lost, the per-app
+        # budget gate below would silently skip → budget bypass. Rehydrate from
+        # DB on miss (ensure_config_cached rebuilds app_clients from active
+        # per-app BudgetConfig rows) so the gate stays enforced.
+        user_config_present = await redis.exists(user_config_key)
+        if not user_config_present:
+            user_config_present = await self._resolve_missing_config(
+                redis, dbx,
+                pk=_bd.PolicyCache.user_key(user_id),
+                config_key=user_config_key,
+                load=lambda s: self.ensure_config_cached(redis, s, user_id),
+                what="budget.user_config",
+                recheck=True,
+                negative_marker=True,
+            )
 
-                # P0-③: USER config cold-cache fallback. If admin's best-effort SET of
-                # the user-config key (which carries app_clients) was lost, the per-app
-                # budget gate below would silently skip → budget bypass. Rehydrate from
-                # DB on miss (ensure_config_cached rebuilds app_clients from active
-                # per-app BudgetConfig rows) so the gate stays enforced.
-                user_config_present = await redis.exists(user_config_key)
-                if db is not None and not user_config_present:
-                    await self.ensure_config_cached(redis, db, user_id)
-                    user_config_present = await redis.exists(user_config_key)
-
-                # Redis 키 없으면 DB에서 복구 후 재캐싱 (LRU 삭제 / failover 대비)
-                #
-                # ⚠️ 이 경로는 **죽은 코드였다 — fail-OPEN 방향으로.** 쿼리에
-                #    `client IS NULL` 이 없어서, 그 (user, period) 에 per-app 행이 **하나만**
-                #    있어도 `scalar_one_or_none()` 이 MultipleResultsFound 로 터지고, 아래
-                #    `except Exception` 이 그것을 삼켰다. 그러면 user_key 가 복원되지 않은
-                #    채로 budget_check.lua 가 돌아 `used=0` 을 읽는다 — config 는 별도 키에서
-                #    재수화되므로 `config_present` 는 true 다. 즉 **그 사용자의 월 사용액
-                #    전체가 0 으로 리셋되고 전부 통과한다.**
-                #
-                #    per-app 행은 pub 에서 실제로 만들어진다(admin-api seed_spent 가
-                #    client 를 받아 INSERT 한다). 그리고 이 파일의 DB 폴백 경로는 이미 같은
-                #    교훈을 배워 `client.is_(None)` 을 걸고 있었다 — 복원 경로만 남겨졌다.
-                # 카운터가 없거나(**음수**)면 복원 — 축출된 키 위로 in-flight
-                # settle 의 INCRBYFLOAT 델타만 담긴 음수 키가 생기면, 그 키가
-                # 존재한다는 이유로 복원이 스킵돼 한도가 그 달 내내 해제됐다.
-                # 카운터를 생성한 스크립트가 세운 ``:lost`` 센티넬도 트리거 —
-                # 양수 첫 쓰기(reserve/deduct)는 키를 존재·양수로 만들어
-                # 존재/부호 검사만으로는 유실을 영구히 못 본다(R22 r1 M1).
-                # rebuild.lua 는 플로어 방식이라(cur < db+live 일 때만 SET)
-                # 정상 월 첫 쓰기의 센티넬 발화도 no-op 으로 수렴한다.
-                _rebuild_needed = False
-                if db is not None:
-                    # 같은 {uid} 슬롯이라 MGET 1회로 카운터+센티넬을 묶는다 —
-                    # 키별 GET/EXISTS 왕복을 요청마다 반복하지 않게(R22 r4 N3).
-                    # 앱 카운터 단독 유실도 같이 본다 — 유저 총합 키가 멀쩡해도
-                    # 현재 요청의 client 앱 키가 유실(부재·음수·센티넬)이면 같은
-                    # 복원 블록을 태워야 per-app 하드캡이 해제되지 않는다
-                    # (R22 r3 S2). 복원 블록은 진입하면 PER_APP 전체를 순회.
-                    _probe = [user_key, f"{user_key}:lost"]
-                    _app_key = (
-                        f"budget:user:{{{user_id}}}:{client}:{period}"
-                        if client in PER_APP_BUDGET_CLIENTS
-                        else None
-                    )
-                    if _app_key:
-                        _probe += [_app_key, f"{_app_key}:lost"]
-                    _vals = await redis.mget(_probe)
-                    _uk = _vals[0]
-                    _rebuild_needed = (
-                        _counter_unhealthy(_uk)
-                        or _vals[1] is not None
-                    )
-                    if not _rebuild_needed and _app_key:
-                        _cv = _vals[2]
-                        _rebuild_needed = (
-                            _counter_unhealthy(_cv)
-                            or _vals[3] is not None
-                        )
-                if _rebuild_needed:
-                    # 다른 파드가 rebuild(DB 읽기) 중이면 이번 요청은 쿼리 없이
-                    # 진행 — 대량 유실 직후 동시 요청 전원의 DB 조회가 회복을
-                    # 늦추는 것을 막는다. 정합 자체는 rebuild.lua 의 조건부
-                    # 트리거가 보장하므로 이 플래그는 순수 부하 억제다 —
-                    # 30s 락처럼 재축출을 막지 않게 짧게(5s) 잡고, 못 얻으면
-                    # 센티넬이 남아 다음 요청이 재시도한다(R22 r2 S5).
-                    if await redis.set(
-                        f"budget:rebuild-lock:{{{user_id}}}", "1",
-                        nx=True, ex=5,
-                    ):
-                        try:
-                            from sqlalchemy import func, select, text
-
-                            # 총합 행과 앱별 행을 **한 번에** 읽는다. 총합은 client IS NULL 이고,
-                            # 앱별 행은 각자의 카운터 키로 복원해야 한다(아래).
-                            result = await db.execute(
-                                text(
-                                    "SELECT client, used_usd FROM budget.budget_usages "
-                                    "WHERE scope = 'USER' AND scope_id = :uid AND period = :period"
-                                ),
-                                {"uid": user_id, "period": period},
-                            )
-                            rows = result.all()
-                            by_client = {r[0]: r[1] for r in rows}
-                            total_row = by_client.get(None)
-
-                            if total_row is None:
-                                # budget_usages 에 총합 행이 없으면 usage_logs 에서 SUM.
-                                from app.config import get_settings
-                                from app.models.usage import UsageRecord
-
-                                stmt2 = select(func.coalesce(func.sum(UsageRecord.cost_usd), 0)).where(
-                                    UsageRecord.user_id == user_id,
-                                    # period 는 리포팅 타임존 월 — to_char 를 UTC 타임스탬프에
-                                    # 바로 걸면 월 경계 몇 시간이 다른 달로 새어 과다/과소 복원된다.
-                                    func.to_char(
-                                        func.timezone(
-                                            get_settings().reporting_timezone,
-                                            UsageRecord.requested_at,
-                                        ),
-                                        "YYYY-MM",
-                                    )
-                                    == period,
-                                )
-                                result2 = await db.execute(stmt2)
-                                used_from_db = result2.scalar_one()
-                            else:
-                                used_from_db = total_row
-
-                            # ⚠️ db=0 이라도 항상 rebuild 를 호출한다 — 센티넬을
-                            #    해제해야 다음 요청이 DB 조회를 반복하지 않는다
-                            #    (무가격 모델 유저가 45 일간 매 요청 SUM 을
-                            #    도는 결함, R22 r2 S4). rebuild.lua 는 플로어라
-                            #    db=0 이면 보통 no-op 이고 센티넬만 정리된다.
-                            applied = await self._rebuild_counter(
-                                redis,
-                                usage_key=user_key,
-                                resvsum_key=(
-                                    f"budget:resvsum:user:{{{user_id}}}:{period}"
-                                ),
-                                idx_key=f"budget:pendingidx:user:{{{user_id}}}",
-                                marker_prefix=(
-                                    f"budget:pending:user:{{{user_id}}}:"
-                                ),
-                                field_prefix="",
-                                db_base=Decimal(str(used_from_db)),
-                            )
-                            if applied:
-                                logger.info(
-                                    "budget_counter_restored",
-                                    user_id=user_id,
-                                    period=period,
-                                    used=str(used_from_db),
-                                )
-
-                            # ── 앱별 카운터도 복원한다 ──
-                            #
-                            # ⚠️ 예전에는 총합 키만 복원했다. 그래서 Redis 데이터 유실/failover
-                            #    후 **소진된 앱별 예산이 조용히 0 으로 되돌아갔다** — 그 앱의
-                            #    한도가 그 달 내내 사실상 없어진다.
-                            #    이미 존재하는 키는 건드리지 않는다(진행 중인 카운트를 덮어쓰면
-                            #    그 사이의 사용량을 잃는다). DB 행이 없어도 센티넬이 선
-                            #    앱 키는 복원해 센티넬을 해제한다 — PER_APP_BUDGET_CLIENTS
-                            #    전수와 by_client 의 합집합을 본다(R22 r2 S4).
-                            for client_name in sorted(
-                                set(PER_APP_BUDGET_CLIENTS)
-                                | {c for c in by_client if c}
-                            ):
-                                used = by_client.get(client_name) or 0
-                                app_key = f"budget:user:{{{user_id}}}:{client_name}:{period}"
-                                _ak = await redis.get(app_key)
-                                if (
-                                    # 비수치 카운터('abc')도 rebuild 대상 —
-                                    # float() ValueError 로 루프가 죽으면
-                                    # 뒤 정렬 앱들이 매 요청 rebuild 에서
-                                    # 굶는다(14차 리뷰). Lua 가 fin() 으로
-                                    # 치유한다.
-                                    not _counter_unhealthy(_ak)
-                                    # :lost 센티넬 — 양수 첫 쓰기로 위장된
-                                    # 유실도 복원한다(R22 r1 M1).
-                                    and not await redis.exists(f"{app_key}:lost")
-                                ):
-                                    continue
-                                applied = await self._rebuild_counter(
-                                    redis,
-                                    usage_key=app_key,
-                                    resvsum_key=(
-                                        f"budget:resvsum:user:{{{user_id}}}:"
-                                        f"{client_name}:{period}"
-                                    ),
-                                    idx_key=(
-                                        f"budget:pendingidx:client:{{{user_id}}}"
-                                    ),
-                                    marker_prefix=(
-                                        f"budget:pending:client:{{{user_id}}}:"
-                                    ),
-                                    field_prefix=f"{client_name}:",
-                                    db_base=Decimal(str(used)),
-                                )
-                                if applied:
-                                    logger.info(
-                                        "budget_app_counter_restored",
-                                        user_id=user_id,
-                                        client=client_name,
-                                        period=period,
-                                        used=str(used),
-                                    )
-                        except Exception:
-                            logger.exception("budget_counter_restore_failed", user_id=user_id)
-                            # 실패한 구문은 트랜잭션을 aborted 상태로 남긴다 — 같은
-                            # 세션의 뒤 쿼리(팀 복원·eval 사전 조회)가 전부
-                            # PendingRollbackError 로 터지지 않게 되돌린다.
-                            await _safe_rollback(db)
-
-                # TEAM 사용 카운터도 복원한다 — 위가 USER/앱만 복원하고 팀은 놔두면,
-                # 카운터 유실(축출/failover) 뒤 budget_check.lua 가 used=0 을 읽어
-                # 팀 하드캡이 그 달 내내 사실상 해제된다(E2E S2-1). 사용자와 같은
-                # 규칙: 이미 있는 키는 건드리지 않고, in-flight 예약 마커 합을 얹는다.
-                _tk, _tk_lost = await redis.mget([team_key, f"{team_key}:lost"])
-                if db is not None and (
-                    _counter_unhealthy(_tk)
-                    or _tk_lost is not None
-                ):
-                    # user 경로와 같은 inflight 플래그 — 정합은 rebuild.lua 의
-                    # 조건부 트리거가 보장, 여기선 DB 조회만 억제(5s).
-                    if await redis.set(
-                        f"budget:rebuild-lock:team:{{{team_id}}}", "1",
-                        nx=True, ex=5,
-                    ):
-                        try:
-                            from sqlalchemy import text as _t
-
-                            result = await db.execute(
-                                _t(
-                                    "SELECT used_usd FROM budget.budget_usages "
-                                    "WHERE scope = 'TEAM' AND scope_id = :tid "
-                                    "AND period = :period AND client IS NULL"
-                                ),
-                                {"tid": team_id, "period": period},
-                            )
-                            team_used = result.scalar_one_or_none()
-                            if team_used is None:
-                                from sqlalchemy import func as _f, select as _s
-
-                                from app.config import get_settings
-                                from app.models.usage import UsageRecord
-
-                                team_used = (
-                                    await db.execute(
-                                        _s(_f.coalesce(_f.sum(UsageRecord.cost_usd), 0)).where(
-                                            UsageRecord.team_id == team_id,
-                                            # user 경로와 같다 — 리포팅 타임존 월로 버킷.
-                                            _f.to_char(
-                                                _f.timezone(
-                                                    get_settings().reporting_timezone,
-                                                    UsageRecord.requested_at,
-                                                ),
-                                                "YYYY-MM",
-                                            )
-                                            == period,
-                                        )
-                                    )
-                                ).scalar_one()
-                            # db=0 여도 항상 rebuild — 센티넬 해제가 목적의 일부
-                            # (S4: db=0 에서 영구 재트리거 방지).
-                            applied = await self._rebuild_counter(
-                                redis,
-                                usage_key=team_key,
-                                resvsum_key=(
-                                    f"budget:resvsum:team:{{{team_id}}}:{period}"
-                                ),
-                                idx_key=f"budget:pendingidx:team:{{{team_id}}}",
-                                marker_prefix=(
-                                    f"budget:pending:team:{{{team_id}}}:"
-                                ),
-                                field_prefix="",
-                                db_base=Decimal(str(team_used)),
-                            )
-                            if applied:
-                                logger.info(
-                                    "budget_team_counter_restored",
-                                    team_id=team_id,
-                                    period=period,
-                                    used=str(team_used),
-                                )
-                        except Exception:
-                            logger.exception("budget_team_counter_restore_failed", team_id=team_id)
-                            await _safe_rollback(db)
-
-                # Redis Cluster CROSSSLOT 대응: USER/TEAM 키는 hash tag 가 달라 slot 이
-                # 서로 다르므로 단일 Lua 호출에 묶을 수 없다. scope 별로 2번 호출하고
-                # Python 에서 결과를 합친다. Lua 내부 체크는 여전히 각 scope 원자적.
-                script = LuaScriptLoader.get("budget_check")
-
-                # §6-1 단계 1: TEAM 설정 존재 확인이 USER 평가보다 먼저다.
-                # user EVAL 을 먼저 돌리면 D-유저 차단 + T-미설정 조합에서
-                # user_budget_exceeded 가 team_budget_unset 을 이겨 DB 폴백과
-                # 에러 코드가 갈린다. eval 순서만 바꾸고 block 판정은
-                # §6-1 순서(1 unset → 2 user → 3 team)대로 적용한다.
-                team_raw = await redis.eval(script, 2, team_key, team_config_key, "team", "")
-                team_result = json.loads(team_raw)
-
-                # TEAM config 미설정 → deny (C-1 정책)
-                if not team_result.get("config_present"):
-                    raise PermissionError("team_budget_unset")
-
-                # D-3: 개인 config 가 없고 팀 기본 cap D 가 있으면, D 를 합성
-                # config 로 user EVAL 에 넘긴다 (cap_u = A_u ?? D). 팀 키는 다른
-                # slot 이라 Lua 안에서 읽지 못하므로 plain GET 으로 미리 읽어
-                # ARGV 로 주입한다 — D 유저의 policy/thresholds 는 팀 것을 따른다.
-                user_fallback = ""
-                if not user_config_present:
-                    team_cfg_raw = await redis.get(team_config_key)
-                    if team_cfg_raw:
-                        try:
-                            team_cfg = json.loads(
-                                team_cfg_raw.decode()
-                                if isinstance(team_cfg_raw, bytes)
-                                else team_cfg_raw
-                            )
-                        except ValueError:
-                            # 형제 사이트(cost_recorder/reserve)와 같은 가드 —
-                            # 깨진 JSON 은 D-3 합성 없이 진행하는 게 폴백 전체보다
-                            # 낫다(12차 리뷰).
-                            team_cfg = None
-                        if not isinstance(team_cfg, dict):
-                            # reserve 경로(:918)와 같은 가드 — 비객체 캐시
-                            # ('"5"' 등)는 .get 이 AttributeError 로 죽는다.
-                            team_cfg = None
-                        d_cap = (
-                            team_cfg.get("default_user_cap_usd")
-                            if team_cfg else None
-                        )
-                        if d_cap is not None:
-                            # 캐시된 팀 config 에 thresholds 키가 없는 구버전 엔트리
-                            # 대비 폴백 — 키가 있으면 [](의도된 알림 끔)도 유효한
-                            # 설정이라 or 로 기본값을 쓰면 되살아난다
-                            # (_row_thresholds 주석, 8차 리뷰). null 도 기본값으로
-                            # — JSON null 은 Lua 에서 cjson.null(truthy)이라
-                            # ipairs(thresholds) 가 eval 실패한다(9차 리뷰).
-                            d_thresholds = (
-                                team_cfg["thresholds"]
-                                if team_cfg.get("thresholds") is not None
-                                else list(DEFAULT_THRESHOLDS)
-                            )
-                            user_fallback = json.dumps({
-                                "limit_usd": str(d_cap),
-                                "policy": team_cfg.get("policy", "hard_block"),
-                                "soft_limit_pct": team_cfg.get("soft_limit_pct")
-                                or DEFAULT_SOFT_LIMIT_PCT,
-                                "throttle_rpm_pct": team_cfg.get("throttle_rpm_pct")
-                                or DEFAULT_THROTTLE_RPM_PCT,
-                                "thresholds": d_thresholds,
-                            })
-
-                # §6-1 단계 2: USER (A_u 또는 D)
-                user_raw = await redis.eval(
-                    script, 2, user_key, user_config_key, "user", user_fallback
+        # Redis 키 없으면 DB에서 복구 후 재캐싱 (LRU 삭제 / failover 대비)
+        #
+        # ⚠️ 이 경로는 **죽은 코드였다 — fail-OPEN 방향으로.** 쿼리에
+        #    `client IS NULL` 이 없어서, 그 (user, period) 에 per-app 행이 **하나만**
+        #    있어도 `scalar_one_or_none()` 이 MultipleResultsFound 로 터지고, 아래
+        #    `except Exception` 이 그것을 삼켰다. 그러면 user_key 가 복원되지 않은
+        #    채로 budget_check.lua 가 돌아 `used=0` 을 읽는다 — config 는 별도 키에서
+        #    재수화되므로 `config_present` 는 true 다. 즉 **그 사용자의 월 사용액
+        #    전체가 0 으로 리셋되고 전부 통과한다.**
+        #
+        #    per-app 행은 pub 에서 실제로 만들어진다(admin-api seed_spent 가
+        #    client 를 받아 INSERT 한다). 그리고 이 파일의 DB 폴백 경로는 이미 같은
+        #    교훈을 배워 `client.is_(None)` 을 걸고 있었다 — 복원 경로만 남겨졌다.
+        # 카운터가 없거나(**음수**)면 복원 — 축출된 키 위로 in-flight
+        # settle 의 INCRBYFLOAT 델타만 담긴 음수 키가 생기면, 그 키가
+        # 존재한다는 이유로 복원이 스킵돼 한도가 그 달 내내 해제됐다.
+        # 카운터를 생성한 스크립트가 세운 ``:lost`` 센티넬도 트리거 —
+        # 양수 첫 쓰기(reserve/deduct)는 키를 존재·양수로 만들어
+        # 존재/부호 검사만으로는 유실을 영구히 못 본다(R22 r1 M1).
+        # rebuild.lua 는 플로어 방식이라(cur < db+live 일 때만 SET)
+        # 정상 월 첫 쓰기의 센티넬 발화도 no-op 으로 수렴한다.
+        _rebuild_needed = False
+        if dbx.configured:
+            # 같은 {uid} 슬롯이라 MGET 1회로 카운터+센티넬을 묶는다 —
+            # 키별 GET/EXISTS 왕복을 요청마다 반복하지 않게(R22 r4 N3).
+            # 앱 카운터 단독 유실도 같이 본다 — 유저 총합 키가 멀쩡해도
+            # 현재 요청의 client 앱 키가 유실(부재·음수·센티넬)이면 같은
+            # 복원 블록을 태워야 per-app 하드캡이 해제되지 않는다
+            # (R22 r3 S2). 복원 블록은 진입하면 PER_APP 전체를 순회.
+            _probe = [user_key, f"{user_key}:lost"]
+            _app_key = (
+                f"budget:user:{{{user_id}}}:{client}:{period}"
+                if client in PER_APP_BUDGET_CLIENTS
+                else None
+            )
+            if _app_key:
+                _probe += [_app_key, f"{_app_key}:lost"]
+            _vals = await redis.mget(_probe)
+            _uk = _vals[0]
+            _rebuild_needed = (
+                _counter_unhealthy(_uk)
+                or _vals[1] is not None
+            )
+            if not _rebuild_needed and _app_key:
+                _cv = _vals[2]
+                _rebuild_needed = (
+                    _counter_unhealthy(_cv)
+                    or _vals[3] is not None
                 )
-                user_result = json.loads(user_raw)
+        if _rebuild_needed:
+            # 다른 파드가 rebuild(DB 읽기) 중이면 이번 요청은 쿼리 없이
+            # 진행 — 대량 유실 직후 동시 요청 전원의 DB 조회가 회복을
+            # 늦추는 것을 막는다. 정합 자체는 rebuild.lua 의 조건부
+            # 트리거가 보장하므로 이 플래그는 순수 부하 억제다 —
+            # 30s 락처럼 재축출을 막지 않게 짧게(5s) 잡고, 못 얻으면
+            # 센티넬이 남아 다음 요청이 재시도한다(R22 r2 S5).
+            if await redis.set(
+                f"budget:rebuild-lock:{{{user_id}}}", "1",
+                nx=True, ex=5,
+            ):
+                try:
+                    async def _q_user_usage(db):
+                        from sqlalchemy import func, select, text
 
-                # USER config 미설정(+D 미설정) → pass-through (Q 정책)
-                if user_result.get("config_present") and not user_result["allowed"]:
-                    raise PermissionError(user_result.get("reason", "user_budget_exceeded"))
-
-                # §6-1 단계 3: TEAM 한도 — unset 은 위에서 이미 걸렀다.
-                if not team_result["allowed"]:
-                    raise PermissionError(team_result.get("reason", "team_budget_exceeded"))
-
-                # 앱(client) 예산 확인 — 'claude-code' / 'cowork' 이고, USER config 에
-                # 이 client 가 app_clients 로 등록된 경우에만 추가 eval (free gate).
-                # USER check 결과가 이미 config.app_clients 를 echo 하므로 추가 RTT 없이
-                # 게이팅 — 앱 예산 없는 유저는 3번째 eval 자체를 건너뛴다.
-                # 불변식(P0-③ review): per-app 예산은 USER 총예산의 하위 서브-리밋이므로
-                # 항상 부모 USER 예산이 존재한다(admin-api 가 부모 없는 per-app 생성 거부).
-                # → app_clients 게이트는 부모 config 가 있다는 전제에서 신뢰 가능.
-                #
-                # ⚠️ `app_clients` 는 리스트 또는 **빈 dict** 로 올 수 있다. admin-api 는 이
-                #    필드를 Lua 로 병합해 쓰는데(app_clients 클로버를 막기 위해),
-                #    Redis 의 cjson 에는 빈 배열 개념이 없어 `[]` 가 `{}` 로 인코딩된다
-                #    (실측: redis 7.4, `cjson.empty_array` 미지원). 둘 다 "활성 per-app
-                #    예산이 없다" 는 같은 뜻이므로 같게 다뤄야 한다.
-                #
-                #    `isinstance(list)` 만 보면 빈 dict 가 "타입이 틀렸다" 로 떨어져,
-                #    아래 per-app 분기 전체(콜드 캐시 재수화 안전망 포함)를 건너뛴다.
-                #    지금은 결과가 같지만(둘 다 per-app 예산 0건), 그 동등성이 우연이라
-                #    미래의 독자가 `{}` 를 "알 수 없음" 으로 오독할 수 있다. 여기서 한 번
-                #    정규화해 그 여지를 없앤다.
-                user_app_clients = _as_client_list(user_result.get("app_clients"))
-                client_result = None
-                # 개인 config 가 없는 유저(D 합성 포함)는 app_clients 게이트를
-                # 신뢰할 수 없다 — 불변식(P0-③) 이전의 고아 per-app 행이 남아
-                # 있으면 DB 폴백은 걸고 Redis 경로는 건너뛰어 판정이 갈린다.
-                # 이 경우엔 per-app 키를 직접 eval 해 두 경로를 일치시킨다.
-                if client in PER_APP_BUDGET_CLIENTS and (
-                    client in user_app_clients or not user_config_present
-                ):
-                    client_key = f"budget:user:{{{user_id}}}:{client}:{period}"
-                    client_config_key = f"budget:config:user:{{{user_id}}}:{client}"
-                    # P0-③: per-app config cold-cache fallback. If admin's
-                    # best-effort SET of this key was lost, the Lua would see
-                    # config_present=false → pass-through (bypass). Rehydrate from
-                    # DB on miss so the per-app limit stays enforced.
-                    if db is not None and not await redis.exists(client_config_key):
-                        await self._hydrate_client_config_cache(
-                            redis, db, user_id, client
+                        # 총합 행과 앱별 행을 **한 번에** 읽는다. 총합은 client IS NULL 이고,
+                        # 앱별 행은 각자의 카운터 키로 복원해야 한다(아래).
+                        result = await db.execute(
+                            text(
+                                "SELECT client, used_usd FROM budget.budget_usages "
+                                "WHERE scope = 'USER' AND scope_id = :uid AND period = :period"
+                            ),
+                            {"uid": user_id, "period": period},
                         )
-                    client_raw = await redis.eval(
-                        script, 2, client_key, client_config_key, "client", ""
+                        rows = result.all()
+                        by_client = {r[0]: r[1] for r in rows}
+                        total_row = by_client.get(None)
+                        if total_row is not None:
+                            return by_client, total_row
+
+                        # budget_usages 에 총합 행이 없으면 usage_logs 에서 SUM.
+                        from app.models.usage import UsageRecord
+
+                        # period 는 리포팅 타임존 월 — [월초, 다음 월초) 범위 조건으로 건다.
+                        # to_char(timezone(...)) 비교는 같은 월 경계지만 인덱스를 못 타서
+                        # 핫패스 데드라인(hot_db_timeout_sec) 안에 끝나지 않는다(1c).
+                        _start, _end = _period_bounds(period)
+                        stmt2 = select(func.coalesce(func.sum(UsageRecord.cost_usd), 0)).where(
+                            UsageRecord.user_id == user_id,
+                            UsageRecord.requested_at >= _start,
+                            UsageRecord.requested_at < _end,
+                        )
+                        result2 = await db.execute(stmt2)
+                        return by_client, result2.scalar_one()
+
+                    by_client, used_from_db = await dbx.run(
+                        _q_user_usage, what="budget.user_rebuild"
                     )
-                    client_result = json.loads(client_raw)
-                    if client_result.get("config_present") and not client_result["allowed"]:
-                        raise PermissionError(
-                            client_result.get("reason", "client_budget_exceeded")
+
+                    # ⚠️ db=0 이라도 항상 rebuild 를 호출한다 — 센티넬을
+                    #    해제해야 다음 요청이 DB 조회를 반복하지 않는다
+                    #    (무가격 모델 유저가 45 일간 매 요청 SUM 을
+                    #    도는 결함, R22 r2 S4). rebuild.lua 는 플로어라
+                    #    db=0 이면 보통 no-op 이고 센티넬만 정리된다.
+                    applied = await self._rebuild_counter(
+                        redis,
+                        usage_key=user_key,
+                        resvsum_key=(
+                            f"budget:resvsum:user:{{{user_id}}}:{period}"
+                        ),
+                        idx_key=f"budget:pendingidx:user:{{{user_id}}}",
+                        marker_prefix=(
+                            f"budget:pending:user:{{{user_id}}}:"
+                        ),
+                        field_prefix="",
+                        db_base=Decimal(str(used_from_db)),
+                    )
+                    if applied:
+                        logger.info(
+                            "budget_counter_restored",
+                            user_id=user_id,
+                            period=period,
+                            used=str(used_from_db),
                         )
 
-                # §6-3/§6-5: 평가된 계층 전부를 조합 — remaining 은 "차단까지의
-                # 잔여" 최솟값, 경고·throttle 은 계층별로 모은다.
-                tiers: list[tuple[str, dict]] = []
-                if user_result.get("config_present"):
-                    tiers.append(("user", user_result))
-                tiers.append(("team", team_result))
-                if client_result is not None and client_result.get("config_present"):
-                    tiers.append(("client", client_result))
-                return _build_status(tiers, team_result)
-            except PermissionError:
-                raise
-            except Exception:
-                logger.exception("redis_budget_check_failed", user_id=user_id)
-                # Redis 경로 안에서 실패한 DB 구문(hydrate/복원)이 세션을
-                # aborted 상태로 남겼을 수 있다 — 같은 세션으로 가는
-                # DB fallback 이 즉시 PendingRollbackError 를 맞지 않게 되돌린다.
-                await _safe_rollback(db)
-                # Redis 실패 시 DB fallback
+                    # ── 앱별 카운터도 복원한다 ──
+                    #
+                    # ⚠️ 예전에는 총합 키만 복원했다. 그래서 Redis 데이터 유실/failover
+                    #    후 **소진된 앱별 예산이 조용히 0 으로 되돌아갔다** — 그 앱의
+                    #    한도가 그 달 내내 사실상 없어진다.
+                    #    이미 존재하는 키는 건드리지 않는다(진행 중인 카운트를 덮어쓰면
+                    #    그 사이의 사용량을 잃는다). DB 행이 없어도 센티넬이 선
+                    #    앱 키는 복원해 센티넬을 해제한다 — PER_APP_BUDGET_CLIENTS
+                    #    전수와 by_client 의 합집합을 본다(R22 r2 S4).
+                    for client_name in sorted(
+                        set(PER_APP_BUDGET_CLIENTS)
+                        | {c for c in by_client if c}
+                    ):
+                        used = by_client.get(client_name) or 0
+                        app_key = f"budget:user:{{{user_id}}}:{client_name}:{period}"
+                        _ak = await redis.get(app_key)
+                        if (
+                            # 비수치 카운터('abc')도 rebuild 대상 —
+                            # float() ValueError 로 루프가 죽으면
+                            # 뒤 정렬 앱들이 매 요청 rebuild 에서
+                            # 굶는다(14차 리뷰). Lua 가 fin() 으로
+                            # 치유한다.
+                            not _counter_unhealthy(_ak)
+                            # :lost 센티넬 — 양수 첫 쓰기로 위장된
+                            # 유실도 복원한다(R22 r1 M1).
+                            and not await redis.exists(f"{app_key}:lost")
+                        ):
+                            continue
+                        applied = await self._rebuild_counter(
+                            redis,
+                            usage_key=app_key,
+                            resvsum_key=(
+                                f"budget:resvsum:user:{{{user_id}}}:"
+                                f"{client_name}:{period}"
+                            ),
+                            idx_key=(
+                                f"budget:pendingidx:client:{{{user_id}}}"
+                            ),
+                            marker_prefix=(
+                                f"budget:pending:client:{{{user_id}}}:"
+                            ),
+                            field_prefix=f"{client_name}:",
+                            db_base=Decimal(str(used)),
+                        )
+                        if applied:
+                            logger.info(
+                                "budget_app_counter_restored",
+                                user_id=user_id,
+                                client=client_name,
+                                period=period,
+                                used=str(used),
+                            )
+                except HotDbUnavailable as e:
+                    # DB 가 답하지 않는다 — 복원을 건너뛰고 Redis 카운터 값으로 판정한다.
+                    # :lost 센티넬은 남아 DB 복구 후 다음 요청이 복원한다.
+                    deg.record(_bd.R_REBUILD_SKIPPED, scope="user", error=str(e))
+                except Exception:
+                    logger.exception("budget_counter_restore_failed", user_id=user_id)
+                    # 실패한 구문은 트랜잭션을 aborted 상태로 남긴다 — 같은
+                    # 세션의 뒤 쿼리(팀 복원·eval 사전 조회)가 전부
+                    # PendingRollbackError 로 터지지 않게 되돌린다.
+                    await dbx._rollback(1.0)
 
-        # DB fallback (REDIS_DEGRADED)
+        # TEAM 사용 카운터도 복원한다 — 위가 USER/앱만 복원하고 팀은 놔두면,
+        # 카운터 유실(축출/failover) 뒤 budget_check.lua 가 used=0 을 읽어
+        # 팀 하드캡이 그 달 내내 사실상 해제된다(E2E S2-1). 사용자와 같은
+        # 규칙: 이미 있는 키는 건드리지 않고, in-flight 예약 마커 합을 얹는다.
+        _tk, _tk_lost = await redis.mget([team_key, f"{team_key}:lost"])
+        if dbx.configured and (
+            _counter_unhealthy(_tk)
+            or _tk_lost is not None
+        ):
+            # user 경로와 같은 inflight 플래그 — 정합은 rebuild.lua 의
+            # 조건부 트리거가 보장, 여기선 DB 조회만 억제(5s).
+            if await redis.set(
+                f"budget:rebuild-lock:team:{{{team_id}}}", "1",
+                nx=True, ex=5,
+            ):
+                try:
+                    async def _q_team_usage(db):
+                        from sqlalchemy import text as _t
+
+                        result = await db.execute(
+                            _t(
+                                "SELECT used_usd FROM budget.budget_usages "
+                                "WHERE scope = 'TEAM' AND scope_id = :tid "
+                                "AND period = :period AND client IS NULL"
+                            ),
+                            {"tid": team_id, "period": period},
+                        )
+                        used = result.scalar_one_or_none()
+                        if used is not None:
+                            return used
+                        from sqlalchemy import func as _f, select as _s
+
+                        from app.models.usage import UsageRecord
+
+                        # user 경로와 같다 — 리포팅 타임존 월, 인덱스를 타는 범위 조건.
+                        _start, _end = _period_bounds(period)
+                        return (
+                            await db.execute(
+                                _s(_f.coalesce(_f.sum(UsageRecord.cost_usd), 0)).where(
+                                    UsageRecord.team_id == team_id,
+                                    UsageRecord.requested_at >= _start,
+                                    UsageRecord.requested_at < _end,
+                                )
+                            )
+                        ).scalar_one()
+
+                    team_used = await dbx.run(_q_team_usage, what="budget.team_rebuild")
+                    # db=0 여도 항상 rebuild — 센티넬 해제가 목적의 일부
+                    # (S4: db=0 에서 영구 재트리거 방지).
+                    applied = await self._rebuild_counter(
+                        redis,
+                        usage_key=team_key,
+                        resvsum_key=(
+                            f"budget:resvsum:team:{{{team_id}}}:{period}"
+                        ),
+                        idx_key=f"budget:pendingidx:team:{{{team_id}}}",
+                        marker_prefix=(
+                            f"budget:pending:team:{{{team_id}}}:"
+                        ),
+                        field_prefix="",
+                        db_base=Decimal(str(team_used)),
+                    )
+                    if applied:
+                        logger.info(
+                            "budget_team_counter_restored",
+                            team_id=team_id,
+                            period=period,
+                            used=str(team_used),
+                        )
+                except HotDbUnavailable as e:
+                    deg.record(_bd.R_REBUILD_SKIPPED, scope="team", error=str(e))
+                except Exception:
+                    logger.exception("budget_team_counter_restore_failed", team_id=team_id)
+                    await dbx._rollback(1.0)
+
+        # Redis Cluster CROSSSLOT 대응: USER/TEAM 키는 hash tag 가 달라 slot 이
+        # 서로 다르므로 단일 Lua 호출에 묶을 수 없다. scope 별로 2번 호출하고
+        # Python 에서 결과를 합친다. Lua 내부 체크는 여전히 각 scope 원자적.
+        script = LuaScriptLoader.get("budget_check")
+
+        # §6-1 단계 1: TEAM 설정 존재 확인이 USER 평가보다 먼저다.
+        # user EVAL 을 먼저 돌리면 D-유저 차단 + T-미설정 조합에서
+        # user_budget_exceeded 가 team_budget_unset 을 이겨 DB 폴백과
+        # 에러 코드가 갈린다. eval 순서만 바꾸고 block 판정은
+        # §6-1 순서(1 unset → 2 user → 3 team)대로 적용한다.
+        team_raw = await redis.eval(script, 2, team_key, team_config_key, "team", "")
+        team_result = json.loads(team_raw)
+        # 마지막 판정 상태 — Redis·DB 가 둘 다 답하지 못할 때 이 값으로 다시 판정한다(1c).
+        self._remember("team", (team_id,), period, team_result)
+
+        # TEAM config 미설정 → deny (C-1 정책)
+        if not team_result.get("config_present"):
+            raise PermissionError("team_budget_unset")
+
+        # D-3: 개인 config 가 없고 팀 기본 cap D 가 있으면, D 를 합성
+        # config 로 user EVAL 에 넘긴다 (cap_u = A_u ?? D). 팀 키는 다른
+        # slot 이라 Lua 안에서 읽지 못하므로 plain GET 으로 미리 읽어
+        # ARGV 로 주입한다 — D 유저의 policy/thresholds 는 팀 것을 따른다.
+        user_fallback = ""
+        if not user_config_present:
+            team_cfg_raw = await redis.get(team_config_key)
+            if team_cfg_raw:
+                try:
+                    team_cfg = json.loads(
+                        team_cfg_raw.decode()
+                        if isinstance(team_cfg_raw, bytes)
+                        else team_cfg_raw
+                    )
+                except ValueError:
+                    # 형제 사이트(cost_recorder/reserve)와 같은 가드 —
+                    # 깨진 JSON 은 D-3 합성 없이 진행하는 게 폴백 전체보다
+                    # 낫다(12차 리뷰).
+                    team_cfg = None
+                if not isinstance(team_cfg, dict):
+                    # reserve 경로(:918)와 같은 가드 — 비객체 캐시
+                    # ('"5"' 등)는 .get 이 AttributeError 로 죽는다.
+                    team_cfg = None
+                d_cap = (
+                    team_cfg.get("default_user_cap_usd")
+                    if team_cfg else None
+                )
+                if d_cap is not None:
+                    # 캐시된 팀 config 에 thresholds 키가 없는 구버전 엔트리
+                    # 대비 폴백 — 키가 있으면 [](의도된 알림 끔)도 유효한
+                    # 설정이라 or 로 기본값을 쓰면 되살아난다
+                    # (_row_thresholds 주석, 8차 리뷰). null 도 기본값으로
+                    # — JSON null 은 Lua 에서 cjson.null(truthy)이라
+                    # ipairs(thresholds) 가 eval 실패한다(9차 리뷰).
+                    d_thresholds = (
+                        team_cfg["thresholds"]
+                        if team_cfg.get("thresholds") is not None
+                        else list(DEFAULT_THRESHOLDS)
+                    )
+                    user_fallback = json.dumps({
+                        "limit_usd": str(d_cap),
+                        "policy": team_cfg.get("policy", "hard_block"),
+                        "soft_limit_pct": team_cfg.get("soft_limit_pct")
+                        or DEFAULT_SOFT_LIMIT_PCT,
+                        "throttle_rpm_pct": team_cfg.get("throttle_rpm_pct")
+                        or DEFAULT_THROTTLE_RPM_PCT,
+                        "thresholds": d_thresholds,
+                    })
+
+        # §6-1 단계 2: USER (A_u 또는 D)
+        user_raw = await redis.eval(
+            script, 2, user_key, user_config_key, "user", user_fallback
+        )
+        user_result = json.loads(user_raw)
+        self._remember("user", (user_id,), period, user_result, personal=bool(user_config_present))
+
+        # USER config 미설정(+D 미설정) → pass-through (Q 정책)
+        if user_result.get("config_present") and not user_result["allowed"]:
+            raise PermissionError(user_result.get("reason", "user_budget_exceeded"))
+
+        # §6-1 단계 3: TEAM 한도 — unset 은 위에서 이미 걸렀다.
+        if not team_result["allowed"]:
+            raise PermissionError(team_result.get("reason", "team_budget_exceeded"))
+
+        # 앱(client) 예산 확인 — 'claude-code' / 'cowork' 이고, USER config 에
+        # 이 client 가 app_clients 로 등록된 경우에만 추가 eval (free gate).
+        # USER check 결과가 이미 config.app_clients 를 echo 하므로 추가 RTT 없이
+        # 게이팅 — 앱 예산 없는 유저는 3번째 eval 자체를 건너뛴다.
+        # 불변식(P0-③ review): per-app 예산은 USER 총예산의 하위 서브-리밋이므로
+        # 항상 부모 USER 예산이 존재한다(admin-api 가 부모 없는 per-app 생성 거부).
+        # → app_clients 게이트는 부모 config 가 있다는 전제에서 신뢰 가능.
+        #
+        # ⚠️ `app_clients` 는 리스트 또는 **빈 dict** 로 올 수 있다. admin-api 는 이
+        #    필드를 Lua 로 병합해 쓰는데(app_clients 클로버를 막기 위해),
+        #    Redis 의 cjson 에는 빈 배열 개념이 없어 `[]` 가 `{}` 로 인코딩된다
+        #    (실측: redis 7.4, `cjson.empty_array` 미지원). 둘 다 "활성 per-app
+        #    예산이 없다" 는 같은 뜻이므로 같게 다뤄야 한다.
+        #
+        #    `isinstance(list)` 만 보면 빈 dict 가 "타입이 틀렸다" 로 떨어져,
+        #    아래 per-app 분기 전체(콜드 캐시 재수화 안전망 포함)를 건너뛴다.
+        #    지금은 결과가 같지만(둘 다 per-app 예산 0건), 그 동등성이 우연이라
+        #    미래의 독자가 `{}` 를 "알 수 없음" 으로 오독할 수 있다. 여기서 한 번
+        #    정규화해 그 여지를 없앤다.
+        user_app_clients = _as_client_list(user_result.get("app_clients"))
+        client_result = None
+        # 개인 config 가 없는 유저(D 합성 포함)는 app_clients 게이트를
+        # 신뢰할 수 없다 — 불변식(P0-③) 이전의 고아 per-app 행이 남아
+        # 있으면 DB 폴백은 걸고 Redis 경로는 건너뛰어 판정이 갈린다.
+        # 이 경우엔 per-app 키를 직접 eval 해 두 경로를 일치시킨다.
+        if client in PER_APP_BUDGET_CLIENTS and (
+            client in user_app_clients or not user_config_present
+        ):
+            client_key = f"budget:user:{{{user_id}}}:{client}:{period}"
+            client_config_key = f"budget:config:user:{{{user_id}}}:{client}"
+            # P0-③: per-app config cold-cache fallback. If admin's
+            # best-effort SET of this key was lost, the Lua would see
+            # config_present=false → pass-through (bypass). Rehydrate from
+            # DB on miss so the per-app limit stays enforced.
+            if not await redis.exists(client_config_key):
+                await self._resolve_missing_config(
+                    redis, dbx,
+                    pk=_bd.PolicyCache.client_key(user_id, client),
+                    config_key=client_config_key,
+                    load=lambda s: self._hydrate_client_config_cache(
+                        redis, s, user_id, client
+                    ),
+                    what="budget.client_config",
+                    negative_marker=True,
+                )
+            client_raw = await redis.eval(
+                script, 2, client_key, client_config_key, "client", ""
+            )
+            client_result = json.loads(client_raw)
+            self._remember("client", (user_id, client), period, client_result)
+            if client_result.get("config_present") and not client_result["allowed"]:
+                raise PermissionError(
+                    client_result.get("reason", "client_budget_exceeded")
+                )
+
+        # §6-3/§6-5: 평가된 계층 전부를 조합 — remaining 은 "차단까지의
+        # 잔여" 최솟값, 경고·throttle 은 계층별로 모은다.
+        tiers: list[tuple[str, dict]] = []
+        if user_result.get("config_present"):
+            tiers.append(("user", user_result))
+        tiers.append(("team", team_result))
+        if client_result is not None and client_result.get("config_present"):
+            tiers.append(("client", client_result))
+        return _build_status(tiers, team_result)
+
+    # ── wave 1c: 열화 모드 (마지막으로 알던 값) ─────────────────────────────────
+
+    async def _resolve_missing_config(
+        self,
+        redis,
+        dbx: _DbAccess,
+        *,
+        pk: tuple,
+        config_key: str,
+        load,
+        what: str,
+        recheck: bool = False,
+        negative_marker: bool = False,
+    ) -> bool:
+        """Redis 설정 키가 없을 때 — 데드라인 걸린 DB 로 채우고, DB 가 답하지 않을 때만
+        마지막으로 알던 정책을 쓴다.
+
+        반환: ``recheck`` 면 처리 후 Redis 에 키가 있는지(개인 설정 존재 판정용), 아니면 False.
+
+        - DB 경로 자체가 없는 호출(테스트/레거시): 예전처럼 아무것도 하지 않는다.
+        - DB 가 닿으면 **항상** DB 를 읽는다(예전 동작 그대로). admin-api 는 이 키들을 DEL 만
+          하고(H3, ``core/budget_cache.py``) 미스 때마다 게이트웨이가 DB 에서 다시 도출한다는
+          계약에 기대므로, 프로세스 캐시의 "행 없음" 으로 DB 를 건너뛰면 방금 만든 개인/앱
+          예산이 캐시 수명 동안 적용되지 않는다(fail-open).
+        - DB 가 답하지 않으면(데드라인·오류·브레이커·DB_DEGRADED) 프로세스 캐시 값을
+          ``budget_stale_max_seconds`` 까지 쓴다. 설정이면 Redis 에 짧은 TTL 로 다시 써서
+          reserve 경로도 같은 설정을 보게 하고, "행 없음" 이면 설정 없이 진행한다. 캐시가
+          모르면 Redis 표지를 보고, 그것도 없으면 ``_PolicyUnknown``(→ 마지막 상태 → 유예 창).
+        - ``negative_marker`` (사용자·앱 설정): DB 가 "행 없음" 이라고 답하면 Redis 에
+          ``{config_key}:none`` 표지를 ``_NEGATIVE_MARKER_TTL`` 동안 남기고, 행이 있으면 지운다.
+          프로세스 캐시는 워커·파드마다 따로라, 이 프로세스가 처음 보는 사용자도 DB 장애 중
+          유예 창이 아니라 "개인/앱 예산 없음" 으로 판정하게 한다. 표지는 DB 가 답하지 않을
+          때만 읽는다.
+        """
+        if not dbx.configured:
+            return False
+        deg = _bd.DEGRADED
+        marker_key = f"{config_key}:none"
         try:
-            return await self._check_budget_db(db, user_id, team_id, period, client=client)
-        except PermissionError:
-            raise
+            await dbx.run(load, what=what)
+        except HotDbUnavailable as e:
+            snap = deg.policy.stale(pk)
+            if snap is _bd.ABSENT:
+                return False
+            if snap is None:
+                if negative_marker and await redis.get(marker_key):
+                    return False
+                raise _PolicyUnknown(f"{what}: {e}") from e
+            from app.config import get_settings
+
+            deg.record(_bd.R_STALE_POLICY, what=what, error=str(e),
+                       age_sec=round(deg.policy.cache.age(pk) or 0.0, 1))
+            await redis.set(
+                config_key, json.dumps(snap), ex=get_settings().budget_degraded_config_ttl_sec
+            )
+            return True
+        deg.grace.reset()
+        if negative_marker:
+            if deg.policy.fresh(pk) is _bd.ABSENT:
+                await redis.set(marker_key, "1", ex=_NEGATIVE_MARKER_TTL)
+            else:
+                await redis.delete(marker_key)
+        if recheck:
+            return bool(await redis.exists(config_key))
+        return False
+
+    def _remember(self, scope: str, ids: tuple, period: str, tier: dict, *,
+                  personal: bool | None = None) -> None:
+        """계층 판정 결과(Lua 결과 또는 DB 폴백 dict)를 마지막 상태로 남긴다."""
+        if not isinstance(tier, dict):
+            return
+        d = dict(tier)
+        if personal is not None:
+            d["_personal"] = personal
+        _bd.DEGRADED.known.put((scope, *ids, period), d)
+
+    def _decide_last_known(
+        self,
+        user_id: str,
+        team_id: str,
+        period: str,
+        client: str | None,
+        *,
+        cause: str,
+    ) -> BudgetStatus | None:
+        """Redis·DB 가 둘 다 답하지 못했다 — 마지막으로 알던 계층 상태로 판정한다.
+
+        판정 순서는 §6-1 과 같다(팀 미설정 → 사용자 → 팀 → 앱). 알던 차단은 그대로 429.
+        필요한 계층 중 하나라도 모르면(그리고 아는 계층이 차단하지 않으면) 유예 창:
+        창 안이면 ``None``(허용), 끝났으면 503.
+        """
+        deg = _bd.DEGRADED
+        team = deg.known.get(("team", team_id, period))
+        user = deg.known.get(("user", user_id, period))
+        need_client = client in PER_APP_BUDGET_CLIENTS and (
+            user is None
+            or not user.get("_personal")
+            or client in _as_client_list(user.get("app_clients"))
+        )
+        cl = deg.known.get(("client", user_id, client, period)) if need_client else None
+
+        def _block(name: str, d: dict | None) -> str | None:
+            if not d or not d.get("config_present"):
+                return None
+            try:
+                limit = Decimal(str(d.get("limit_usd", 0)))
+                used = Decimal(str(d.get("used_usd", 0)))
+                if not limit.is_finite() or not used.is_finite():
+                    return f"{name}_budget_exceeded"
+                policy = BudgetPolicy(str(d.get("policy", "hard_block")).lower())
+                raw_t = d.get("thresholds")
+                thresholds = (
+                    [int(v) for v in raw_t if v is not None] if isinstance(raw_t, list) else None
+                )
+            except (InvalidOperation, ValueError, TypeError):
+                # 판정 불가한 기억값은 차단으로 수렴(_check_budget_db 의 비유한 행값과 같은 규칙).
+                return f"{name}_budget_exceeded"
+            suffix, _sw, _ta = _evaluate_layer(used, limit, policy, thresholds)
+            return f"{name}_{suffix}" if suffix else None
+
+        reason = None
+        if team is not None and not team.get("config_present"):
+            reason = "team_budget_unset"
+        reason = reason or _block("user", user) or _block("team", team) or _block("client", cl)
+        if reason:
+            deg.record(_bd.R_LAST_KNOWN_BLOCK, reason_code=reason, cause=cause)
+            raise PermissionError(reason)
+
+        if team is None or user is None or (need_client and cl is None):
+            ok, elapsed = deg.grace.admit()
+            fields = dict(user_id=user_id, team_id=team_id, client=client, cause=cause,
+                          grace_elapsed_sec=round(elapsed, 1),
+                          grace_sec=deg.grace.seconds,
+                          known={"team": team is not None, "user": user is not None,
+                                 "client": (cl is not None) if need_client else None})
+            if ok:
+                deg.record(_bd.R_GRACE_ALLOW, always_log=True, **fields)
+                return None
+            deg.record(_bd.R_GRACE_EXPIRED, always_log=True, **fields)
+            raise BudgetBackendUnavailableError(
+                "budget check unavailable: no known budget state and the grace window expired"
+            )
+
+        tiers: list[tuple[str, dict]] = []
+        if user.get("config_present"):
+            tiers.append(("user", user))
+        tiers.append(("team", team))
+        if cl is not None and cl.get("config_present"):
+            tiers.append(("client", cl))
+        deg.record(_bd.R_LAST_KNOWN_ALLOW, cause=cause)
+        return _build_status(tiers, team)
+
+    def _schedule_policy_refresh(self, session_factory, user_id: str, team_id: str,
+                                 client: str | None = None, *, redis=None) -> None:
+        """정책 캐시가 신선하지 않으면 백그라운드로 다시 읽는다 (키당 single-flight).
+
+        사용자 로더는 총예산과 per-app 설정을 한 번에 읽으므로, 이 요청의 앱 설정만 신선하지
+        않아도 사용자 로더를 돌린다.
+        """
+        deg = _bd.DEGRADED
+        if not DB_BREAKER.available():
+            return
+        user_pk = _bd.PolicyCache.user_key(user_id)
+        user_stale = deg.policy.needs_refresh(user_pk) or (
+            client in PER_APP_BUDGET_CLIENTS
+            and deg.policy.needs_refresh(_bd.PolicyCache.client_key(user_id, client))
+        )
+        for pk, loader, stale in (
+            (_bd.PolicyCache.team_key(team_id), self._load_team_policy, None),
+            (user_pk, self._load_user_policy, user_stale),
+        ):
+            if stale is None:
+                stale = deg.policy.needs_refresh(pk)
+            if not stale or not deg.refresh_allowed(pk):
+                continue
+            ident = pk[1]
+
+            async def _job(pk=pk, loader=loader, ident=ident):
+                from app.config import get_settings
+
+                if not DB_BREAKER.available():
+                    _bd.DEGRADED.refresh_failed(pk)
+                    return
+                try:
+                    async with asyncio.timeout(get_settings().budget_policy_refresh_timeout_sec):
+                        async with session_factory() as s:
+                            await loader(s, ident)
+                    _bd.DEGRADED.grace.reset()
+                except (TimeoutError, SQLAlchemyError, OSError) as e:
+                    _bd.DEGRADED.refresh_failed(pk)
+                    logger.info("budget_policy_refresh_failed", key=":".join(pk),
+                                error=type(e).__name__)
+                    return
+                if redis is not None and pk[0] == "user":
+                    await self._write_absence_markers(redis, ident)
+
+            _bd.spawn_refresh(pk, _job)
+
+    async def _write_absence_markers(self, redis, user_id: str) -> None:
+        """백그라운드 재조회가 "행 없음" 으로 확인한 사용자/앱 설정의 Redis 표지를 갱신한다.
+
+        요청 경로는 Redis 설정 키가 없을 때만 DB 를 읽어 표지를 쓰므로, 한 프로세스가 이미
+        아는 앱 설정의 표지는 다른 워커가 처음 볼 때까지 비어 있을 수 있다 — 여기서 채운다.
+        best-effort: Redis 오류는 무시한다(다음 재조회가 다시 쓴다).
+        """
+        pc = _bd.DEGRADED.policy
+        keys = [(pc.user_key(user_id), f"budget:config:user:{{{user_id}}}:none")] + [
+            (pc.client_key(user_id, c), f"budget:config:user:{{{user_id}}}:{c}:none")
+            for c in PER_APP_BUDGET_CLIENTS
+        ]
+        try:
+            for pk, marker in keys:
+                if pc.fresh(pk) is _bd.ABSENT:
+                    await redis.set(marker, "1", ex=_NEGATIVE_MARKER_TTL)
+                elif pc.fresh(pk) is not None:
+                    await redis.delete(marker)
         except Exception as e:
-            # 인프라 장애만 503 — 코드 버그(NULL 필드 TypeError 등)는 그대로
-            # 전파해 500 으로 남겨 재시도 가능한 장애처럼 보이지 않게 한다.
-            if not isinstance(e, (SQLAlchemyError, OSError, asyncio.TimeoutError)):
-                raise
-            logger.exception("budget_db_fallback_failed", user_id=user_id)
-            raise BudgetBackendUnavailableError("budget check failed: DB fallback error")
+            logger.info("budget_absence_marker_write_failed", error=type(e).__name__)
+
+    async def _load_team_policy(self, db: AsyncSession, team_id: str) -> None:
+        """백그라운드 재조회 — TEAM 행 → 정책 캐시 (Redis 는 건드리지 않는다)."""
+        result = await db.execute(
+            select(BudgetConfig)
+            .where(BudgetConfig.scope == BudgetScope.TEAM)
+            .where(BudgetConfig.scope_id == team_id)
+            .where(BudgetConfig.is_active == True)  # noqa: E712
+            .limit(1)
+        )
+        config = result.scalar_one_or_none()
+        _bd.DEGRADED.policy.put(
+            _bd.PolicyCache.team_key(team_id),
+            None if config is None or config.max_budget_usd is None else _team_config_data(config),
+        )
+
+    async def _load_user_policy(self, db: AsyncSession, user_id: str) -> None:
+        """백그라운드 재조회 — USER 총예산 + per-app 행 → 정책 캐시 (한 번의 조회)."""
+        result = await db.execute(
+            select(BudgetConfig)
+            .where(BudgetConfig.scope == BudgetScope.USER)
+            .where(BudgetConfig.scope_id == user_id)
+            .where(BudgetConfig.is_active == True)  # noqa: E712
+        )
+        rows = list(result.scalars().all())
+        total = next((r for r in rows if r.client is None), None)
+        apps = {r.client: r for r in rows if r.client}
+        pc = _bd.DEGRADED.policy
+        pc.put(
+            _bd.PolicyCache.user_key(user_id),
+            _user_config_data(total, sorted(apps)) if total is not None else None,
+        )
+        for c in PER_APP_BUDGET_CLIENTS:
+            row = apps.get(c)
+            pc.put(_bd.PolicyCache.client_key(user_id, c),
+                   _client_config_data(row) if row is not None else None)
 
     async def reserve_budget(
         self,
@@ -1425,6 +1875,7 @@ class BudgetService:
         team_config = team_cfg_result.scalar_one_or_none()
         # T=NULL 'D-only' 행은 행 없음과 동일 — fail-closed(§3-1).
         if team_config is None or team_config.max_budget_usd is None:
+            self._remember("team", (team_id,), period, {"config_present": False})
             raise PermissionError("team_budget_unset")
 
         policy = _db_policy_to_domain(team_config.policy)
@@ -1438,6 +1889,7 @@ class BudgetService:
                 _db_policy_to_domain(user_config.policy),
                 _row_thresholds(user_config),
             )
+            self._remember("user", (user_id,), period, d, personal=True)
             if user_block:
                 raise PermissionError(f"user_{user_block}")
             tiers.append(("user", d))
@@ -1448,9 +1900,13 @@ class BudgetService:
                 user_block, d = _layer(
                     await _user_used(), cap_d, policy, _row_thresholds(team_config)
                 )
+                self._remember("user", (user_id,), period, d, personal=False)
                 if user_block:
                     raise PermissionError(f"user_{user_block}")
                 tiers.append(("user", d))
+            else:
+                self._remember("user", (user_id,), period, {"config_present": False},
+                               personal=False)
 
         team_usage_result = await db.execute(
             select(BudgetUsage)
@@ -1468,6 +1924,7 @@ class BudgetService:
         team_block, team_dict = _layer(
             team_used, max_budget, policy, _row_thresholds(team_config)
         )
+        self._remember("team", (team_id,), period, team_dict)
         if team_block:
             raise PermissionError(f"team_{team_block}")
         tiers.append(("team", team_dict))
@@ -1482,6 +1939,8 @@ class BudgetService:
                 .where(BudgetConfig.is_active == True)  # noqa: E712
             )
             client_config = client_cfg_result.scalar_one_or_none()
+            if client_config is None:
+                self._remember("client", (user_id, client), period, {"config_present": False})
             if client_config is not None:
                 client_usage_result = await db.execute(
                     select(BudgetUsage)
@@ -1498,6 +1957,7 @@ class BudgetService:
                     _db_policy_to_domain(client_config.policy),
                     _row_thresholds(client_config),
                 )
+                self._remember("client", (user_id, client), period, client_dict)
                 if client_block:
                     raise PermissionError(f"client_{client_block}")
                 tiers.append(("client", client_dict))
@@ -1535,6 +1995,10 @@ class BudgetService:
             .where(BudgetConfig.is_active == True)  # noqa: E712
         )
         config = result.scalar_one_or_none()
+        if not config:
+            # 개인 예산 없음도 '알던 값' 이다 — DB 장애 중 이 사용자를 유예 창으로 보내지 않고,
+            # 정상 시에도 요청마다 같은 부재 조회를 반복하지 않게 프로세스 캐시에 남긴다(1c).
+            _bd.DEGRADED.policy.put(_bd.PolicyCache.user_key(user_id), None)
         if config:
             # app_clients 는 DB의 활성 per-app budget row에서 재구성 — 이 캐시 재생성이
             # admin-api가 user-config JSON에 써둔 app_clients 를 덮어쓰지 않도록(free gate 보존).
@@ -1546,18 +2010,13 @@ class BudgetService:
                 .where(BudgetConfig.is_active == True)  # noqa: E712
             )
             app_clients = [c for c in app_rows.scalars().all() if c]
-            config_data = {
-                "limit_usd": str(config.max_budget_usd),
-                "policy": _policy_to_lua_value(_db_policy_to_domain(config.policy)),
-                "soft_limit_pct": DEFAULT_SOFT_LIMIT_PCT,
-                "throttle_rpm_pct": DEFAULT_THROTTLE_RPM_PCT,
-                # ⚠️ 여기가 운영자 설정이 되돌아간 지점이다. 이 재수화는 Redis 설정 키가
-                #    만료(ex=300)될 때마다 돌고, 예전에는 DB 에 저장된 값이 없어서
-                #    DEFAULT_THRESHOLDS 를 써 넣었다 — admin-api 가 방금 써 둔 운영자
-                #    임계값을 5분마다 조용히 덮었다. migration 0041 이후 DB 가 원천이다.
-                "thresholds": _row_thresholds(config),
-                "app_clients": app_clients,
-            }
+            # ⚠️ 운영자 설정이 되돌아간 지점이었다. 이 재수화는 Redis 설정 키가
+            #    만료(ex=300)될 때마다 돌고, 예전에는 DB 에 저장된 값이 없어서
+            #    DEFAULT_THRESHOLDS 를 써 넣었다 — admin-api 가 방금 써 둔 운영자
+            #    임계값을 5분마다 조용히 덮었다. migration 0041 이후 DB 가 원천이다
+            #    (_user_config_data → _row_thresholds).
+            config_data = _user_config_data(config, app_clients)
+            _bd.DEGRADED.policy.put(_bd.PolicyCache.user_key(user_id), config_data)
             # TTL 300s to match team/client hydrate + admin warmers. Without it a
             # lost invalidation could leave this parent config stale-forever
             # (P0-③ review fix). admin DEL is the durable path; TTL is the backstop.
@@ -1592,20 +2051,11 @@ class BudgetService:
         if config is None or config.max_budget_usd is None:
             # T=NULL 'D-only' 행 — 키 부재로 두어 Lua 가 team_budget_unset
             # 으로 fail-closed 판정하게 한다(§3-1: 행 없음과 동일 취급).
+            _bd.DEGRADED.policy.put(_bd.PolicyCache.team_key(team_id), None)
             return
 
-        config_data = {
-            "limit_usd": str(config.max_budget_usd),
-            "policy": _policy_to_lua_value(_db_policy_to_domain(config.policy)),
-            "thresholds": _row_thresholds(config),
-            # 팀 기본 유저 cap D — admin DEL-only 경로의 재수화가 D 를 잃지
-            # 않도록 DB 행에서 함께 싣는다(§6-6). 현행 Lua 는 미지 필드를 무시.
-            "default_user_cap_usd": (
-                str(config.default_user_cap_usd)
-                if config.default_user_cap_usd is not None
-                else None
-            ),
-        }
+        config_data = _team_config_data(config)
+        _bd.DEGRADED.policy.put(_bd.PolicyCache.team_key(team_id), config_data)
         config_key = f"budget:config:team:{{{team_id}}}"
         # TTL은 admin-api BUDGET_CONFIG_CACHE_TTL 과 일치 (5분)
         await redis.set(config_key, json.dumps(config_data), ex=300)
@@ -1645,13 +2095,11 @@ class BudgetService:
         )
         config = result.scalar_one_or_none()
         if config is None:
+            _bd.DEGRADED.policy.put(_bd.PolicyCache.client_key(user_id, client), None)
             return
 
-        config_data = {
-            "limit_usd": str(config.max_budget_usd),
-            "policy": _policy_to_lua_value(_db_policy_to_domain(config.policy)),
-            "thresholds": _row_thresholds(config),
-        }
+        config_data = _client_config_data(config)
+        _bd.DEGRADED.policy.put(_bd.PolicyCache.client_key(user_id, client), config_data)
         config_key = f"budget:config:user:{{{user_id}}}:{client}"
         await redis.set(config_key, json.dumps(config_data), ex=300)
         logger.info(

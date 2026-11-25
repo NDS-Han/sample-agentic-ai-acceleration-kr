@@ -23,9 +23,11 @@ def _reset_rl_breaker():
 def _reset_hot_path_state():
     """wave 1 hot-path 싱글톤(DB 브레이커·로컬 캐시)을 테스트마다 초기화 — 한 테스트의
     DB 장애 시뮬레이션이 열어 둔 브레이커가 다음 테스트의 DB 조회를 건너뛰게 하지 않게."""
-    from app.services import auth_service, hot_path, web_search_quota
+    from app.services import auth_service, budget_degraded, hot_path, web_search_quota
 
     def _reset():
+        budget_degraded.DEGRADED.reset()
+        budget_degraded.DEGRADED.grace.seconds = 300.0
         hot_path.DB_BREAKER.reset()
         hot_path.DB_BREAKER._dm = None
         hot_path._HOT_SESSION_FACTORY = None
