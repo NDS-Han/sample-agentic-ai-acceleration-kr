@@ -30,8 +30,9 @@ interface OrgDetailPanelProps {
   root?: OrgTreeNode | null;
   /** 팀 구성원 표의 행 → 사용자 선택. */
   onOpenUser?: (_id: string) => void;
-  /** 저장 성공 후 트리 재조회 — 개별설정 점·팀장 표시가 stale 해지지 않게. */
-  onSaved?: () => void;
+  /** 저장 성공 후 트리 갱신 — 개별설정 점·팀장 표시가 stale 해지지 않게. 인자는 바뀐 팀
+   *  (그 팀 노드만 패치한다). null 이면 전체 재조회. */
+  onSaved?: (_teamId: string | null) => void;
 }
 
 /** 루트에서 node 까지 조상 노드들(자신 제외). */
@@ -63,7 +64,7 @@ export function OrgDetailPanel({ node, root, onOpenUser, onSaved }: OrgDetailPan
         node={node}
         breadcrumb={crumbs}
         onOpenUser={(id) => onOpenUser?.(id)}
-        onChanged={() => onSaved?.()}
+        onChanged={() => onSaved?.(node.id)}
       />
     );
   }
@@ -75,7 +76,7 @@ export function OrgDetailPanel({ node, root, onOpenUser, onSaved }: OrgDetailPan
         node={node}
         teamId={team?.id ?? null}
         breadcrumb={team ? [...crumbs, team.name] : crumbs}
-        onChanged={() => onSaved?.()}
+        onChanged={() => onSaved?.(team?.id ?? null)}
       />
     );
   }

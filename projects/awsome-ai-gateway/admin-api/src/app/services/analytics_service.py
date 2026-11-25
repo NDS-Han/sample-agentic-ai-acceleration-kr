@@ -377,13 +377,15 @@ class AnalyticsService:
         client: str | None = None,
         start_date: str | None = None,
         end_date: str | None = None,
+        scope_ids: list[uuid.UUID] | None | object = ...,
     ) -> tuple[str, str]:
-        """Returns (content, content_type)."""
+        """Returns (content, content_type). scope_ids 를 넘기면(라우터가 헤더 전에 이미
+        해석한 경우) 다시 해석하지 않는다."""
         # ⚠️ scope/client 를 그대로 넘겨야 화면에 보이는 집합과 파일이 일치한다 —
         #    예전엔 scope="all" 고정이라 팀 스코프 화면에서 전사 CSV 가 나갔다.
         response = await self.get_analytics(
             session, period=period, group_by=group_by, scope=scope, client=client,
-            actor=actor, start_date=start_date, end_date=end_date,
+            actor=actor, start_date=start_date, end_date=end_date, scope_ids=scope_ids,
         )
 
         if format == "csv":

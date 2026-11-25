@@ -188,13 +188,38 @@ async def list_teams(
 async def get_users_tree(
     request: Request,
     include_empty: bool = Query(default=False),
+    slim: bool = Query(
+        default=False,
+        description="true = 축약형(None·False·USER 팀 이름·빈 children 생략). admin-ui 가 채운다",
+    ),
     admin: CurrentUser = Depends(require_admin),
     session: AsyncSession = Depends(get_db_session),
 ):
+    from fastapi.responses import JSONResponse
+
     from app.services.user_team_service import UserTeamService
 
     svc: UserTeamService = request.app.state.user_team_service
-    return await svc.get_org_tree(session, include_empty=include_empty)
+    tree = await svc.get_org_tree(session, include_empty=include_empty, slim=slim)
+    if slim:
+        # 축약형은 dict 그대로 — response_model 재검증(6k 노드 pydantic 왕복)을 건너뛴다.
+        return JSONResponse(tree)
+    return tree
+
+
+@router.get("/users/tree/marks")
+async def get_users_tree_marks(
+    request: Request,
+    team_id: uuid.UUID = Query(),
+    admin: CurrentUser = Depends(require_admin),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """저장 후 트리 패치용 — 한 팀의 팀장·멤버 역할·개별설정 점. 트리 전체(6k 사용자 ≈ MB)
+    재조회 대신 admin-ui 가 그 팀 노드만 고친다."""
+    from app.services.user_team_service import UserTeamService
+
+    svc: UserTeamService = request.app.state.user_team_service
+    return await svc.get_org_tree_marks(session, team_id)
 
 
 #: /users/activity 한 번에 받는 사용자 수 상한 — 팀 구성원 표 한 장 분량.

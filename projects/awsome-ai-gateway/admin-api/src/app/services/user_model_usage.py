@@ -269,6 +269,11 @@ def page_from_payload(
         rows = present + absent  # 안 쓴 사용자는 방향과 무관하게 뒤로
 
     total_users = len(rows)
+    # 범위(검색 반영) 전체 합계 — 사용자 상세의 "팀 대비 비중"이 팀 전 페이지를 순차로
+    # 긁던(300명 팀 = 6 요청) 것을 한 요청(page_size=1)으로 끝내게 한다.
+    scope_total = _cell(0, 0, 0, 0, 0.0, 0)
+    for r in rows:
+        scope_total = _add(scope_total, r["total"])
     start = (page - 1) * page_size
     return {
         "period": payload["period"],
@@ -286,6 +291,7 @@ def page_from_payload(
         "dir": "desc" if desc else "asc",
         "q": q or "",
         "max_cell": max_cell,
+        "scope_total": scope_total,
         "rows": rows[start:start + page_size],
         "data_as_of": payload.get("data_as_of"),
         "delayed_days": payload.get("delayed_days", []),
@@ -340,17 +346,38 @@ async def get_user_detail(
     }
 
 
-async def export_csv(session: AsyncSession, rng: DayRange, scope_ids, client: str | None) -> str:
+_CSV_HEADER = ["period", "timezone", "user_id", "name", "email", "team", "model", "requests",
+               "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens",
+               "total_tokens", "cost_usd"]
+
+
+async def export_csv_chunks(
+    session: AsyncSession, rng: DayRange, scope_ids, client: str | None, *, batch: int = 2000
+):
+    """CSV 를 ``batch`` 행 단위 문자열 조각으로 낸다 — 서버 측 커서(``session.stream``)라
+    6k 사용자 × 모델 행 전체를 메모리에 올리지 않는다. 헤더 행은 첫 조각과 함께 낸다
+    (쿼리가 실패하면 아무 행도 나가지 않는다)."""
     scope = _scope(rng, scope_ids, client)
-    rows = (await _execute(session, export_sql(scope), ur.bind(scope))).all()
-    buf = io.StringIO()
-    w = csv.writer(buf)
-    w.writerow(["period", "timezone", "user_id", "name", "email", "team", "model", "requests",
-                "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens",
-                "total_tokens", "cost_usd"])
     tz = reporting_timezone()
-    for r in rows:
-        w.writerow([rng.label, tz, str(r.user_id), r.display_name, r.email, r.team_name,
-                    r.model_alias, int(r.n), int(r.i), int(r.o), int(r.cr), int(r.cw),
-                    int(r.i + r.o + r.cr + r.cw), str(Decimal(r.c).quantize(Decimal("0.000001")))])
-    return buf.getvalue()
+    result = await session.stream(text(export_sql(scope)), ur.bind(scope))
+    first = True
+    async for part in result.partitions(batch):
+        buf = io.StringIO()
+        w = csv.writer(buf)
+        if first:
+            w.writerow(_CSV_HEADER)
+            first = False
+        for r in part:
+            w.writerow([rng.label, tz, str(r.user_id), r.display_name, r.email, r.team_name,
+                        r.model_alias, int(r.n), int(r.i), int(r.o), int(r.cr), int(r.cw),
+                        int(r.i + r.o + r.cr + r.cw),
+                        str(Decimal(r.c).quantize(Decimal("0.000001")))])
+        yield buf.getvalue()
+    if first:
+        buf = io.StringIO()
+        csv.writer(buf).writerow(_CSV_HEADER)
+        yield buf.getvalue()
+
+
+async def export_csv(session: AsyncSession, rng: DayRange, scope_ids, client: str | None) -> str:
+    return "".join([c async for c in export_csv_chunks(session, rng, scope_ids, client)])

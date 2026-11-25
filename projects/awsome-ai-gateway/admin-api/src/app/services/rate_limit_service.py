@@ -243,6 +243,7 @@ class RateLimitService:
         이미 상속 상태에서 호출돼도 에러가 아니어야 한다."""
         repo = RateLimitConfigRepository(session)
         removed = await repo.deactivate_configs(scope, scope_id)
+        self._invalidate_live_plans()
 
         # proxy 가 읽는 건 rl:config:* 뿐이지만, _set_rate_limit 이 쓰는
         # ratelimit:config:* 도 대칭으로 지워 stale 상태를 남기지 않는다.
@@ -272,82 +273,144 @@ class RateLimitService:
             request_id=request_id,
         )
 
+    #: 실시간 RPM 키 계획(한도 행 → 카운터 키) 프로세스 로컬 캐시 — 카드가 10초마다 폴링한다.
+    #: 같은 프로세스의 한도 변경은 즉시 비우고(_invalidate_live_plans), 다른 파드의 변경은
+    #: 최대 이 시간 늦게 반영된다(표시 전용 — 집행은 gateway 가 한다).
+    _LIVE_PLAN_TTL_S = 15.0
+
+    def _invalidate_live_plans(self) -> None:
+        self.__dict__.setdefault("_live_plans", {}).clear()
+
+    async def _live_plan(
+        self, session: AsyncSession | None, sc: str, scope_id: str
+    ) -> tuple[bool, list[str]]:
+        """(tracked, 카운터 키 alias 목록). gateway 키 규약과 같은 규칙:
+
+        * USER/TEAM — 요청 모델 X 에 대해 X 전용 행이 있으면 그 행, 없으면 NULL 행이 고른다
+          (rate_limit_config_loader._query_scope_from_db). NULL 행은 `*` 키
+          (rate_limit_enforcement._key_alias), 모델 행은 alias 키. rpm>0 인 행만 카운터를
+          적재한다(check_multi_scope_rpm). 그래서 키 = {rpm>0 인 모델 행 alias} ∪ {`*` | NULL
+          행 rpm>0}.
+        * GLOBAL — scope_id IS NULL + 모델 행만 쓴다(NULL alias 행은 로더가 보지 않는다).
+        """
+        import time
+
+        plans: dict = self.__dict__.setdefault("_live_plans", {})
+        ck = (sc, scope_id)
+        hit = plans.get(ck)
+        now = time.monotonic()
+        if hit is not None and hit[0] > now:
+            return hit[1], hit[2]
+
+        cfg_sid = uuid.UUID(scope_id) if sc != "GLOBAL" else None
+
+        async def _read(s: AsyncSession):
+            return await RateLimitConfigRepository(s).list_active_rpm_aliases(
+                RateLimitScope(sc), cfg_sid
+            )
+
+        if session is None:
+            # 짧은 세션 — 설정 두어 행만 읽고 바로 반납한다. 요청 범위 세션을 Redis 조회 동안
+            # 붙잡지 않는다(카드 폴링이 기본 풀 연결을 상주시키지 않게).
+            from app.core.db import AsyncSessionLocal
+
+            async with AsyncSessionLocal() as s:
+                try:
+                    rows = await _read(s)
+                finally:
+                    await s.rollback()
+        else:
+            rows = await _read(session)
+
+        aliases: set[str] = set()
+        for alias, rpm in rows:
+            if not rpm or rpm <= 0:
+                continue
+            if alias is None:
+                if sc != "GLOBAL":
+                    aliases.add("*")
+            else:
+                aliases.add(alias)
+        plan = (bool(aliases), sorted(aliases))
+        if len(plans) > 4096:
+            plans.clear()
+        plans[ck] = (now + self._LIVE_PLAN_TTL_S, *plan)
+        return plan
+
     async def get_live_usage(
-        self, session: AsyncSession, scope: str, scope_id: str, *, window_ms: int = 60_000
+        self,
+        session: AsyncSession | None,
+        scope: str,
+        scope_id: str,
+        *,
+        window_ms: int = 60_000,
     ) -> dict:
         """gateway-proxy 가 적재하는 **실시간 RPM 카운터**(Redis ZSET)를 읽어 현재
-        사용량/잔여를 반환(§60.9). 설정값만 보던 RL 화면에 실시간 상태를 더한다.
+        사용량을 반환(§60.9).
 
         proxy 키 규약(gateway-proxy/rate_limit_scope.py:build_rl_key):
           `{{SCOPE:scope_id:model_alias}}:rpm`  (ZSET, member=request_id, score=now_ms)
         현재 사용량 = window(60s) 안의 ZSET 항목 수 = ZCOUNT(key, now-window, +inf).
-        모델별로 분리 적재되므로 scope 의 모든 모델 키를 scan 해 합산/모델별 분해.
 
-        429 누적은 usage_logs 에 없다(status enum=SUCCESS/ERROR/TIMEOUT). 실시간
-        429 는 proxy 메트릭 영역이므로 여기선 'rpm 현재/한도/잔여'만 정확히 제공.
-        fail-soft: Redis 오류/키 없음 → available=false (config 화면은 그대로).
+        ⚠️ 예전엔 `SCAN MATCH {SCOPE:id:*}:rpm` 으로 키를 찾고 키마다 ZCOUNT 를 따로 보냈다 —
+        SCAN 은 키스페이스 전체를 훑는다(gateway 의 수십만 키 · 카드 10초 폴링 × 관리자 수).
+        이제 키는 한도 행에서 계산하고(_live_plan) ZCOUNT 는 파이프라인 한 번이다. 한도
+        미설정이면 Redis 를 치지 않는다.
+
+        ``session`` 이 None 이면 설정 조회만 짧은 세션으로 하고 Redis 조회 전에 반납한다.
+
+        tracked: RPM 한도가 설정된 scope 에만 proxy 가 카운터를 적재한다 — 한도 미설정
+        scope 의 0 은 "요청 없음"이 아니라 "계량 안 함"이다. 설정 조회가 실패하면 키를 알 수
+        없으므로 available=false(0 을 지어내지 않는다).
+        fail-soft: Redis 오류 → available=false (config 화면은 그대로).
         """
         import time
 
-        redis = self._cache_mgr._redis
         sc = (scope or "").upper()
         if sc not in ("USER", "TEAM", "GLOBAL"):
             return {"available": False, "reason": "invalid scope"}
-        # ⚠️ GLOBAL 의 scope_id 는 proxy 가 `*` 로 적는다
-        #    (gateway-proxy/rate_limit_scope.py:75 GLOBAL_WILDCARD, :101 scope_id is None → `*`).
-        #    예전엔 여기서 `__global__` 을 조립해 SCAN 이 0건 → GLOBAL RPM 이 에러 없이
-        #    항상 0/available=true 로 보였다(실제로는 429 를 내는 중일 수 있음).
-        #    `[*]` 는 Redis 글롭에서 **리터럴 별표** 문자 클래스라, 임의 scope_id 까지
-        #    싸잡지 않으면서 `*` 키만 정확히 잡는다.
-        sid = scope_id if sc != "GLOBAL" else "[*]"
-
-        # tracked: RPM 한도가 설정된 scope 에만 proxy 가 카운터를 적재한다
-        # (check_multi_scope_rpm — limit>0 일 때만 ZADD). 한도 미설정 scope 의
-        # rpm_used_total=0 은 "요청 없음"이 아니라 "계량 안 함"이므로 UI 가 두
-        # 상태를 구분할 수 있게 플래그로 내려준다. 조회 실패 시 None(미상) —
-        # 프론트는 None 을 기존 동작(수치 표시)으로 간주한다.
-        tracked: bool | None = None
         try:
-            cfg_sid = uuid.UUID(scope_id) if sc != "GLOBAL" else None
-            cfg = await RateLimitConfigRepository(session).get_active(
-                RateLimitScope(sc), cfg_sid
-            )
-            tracked = bool(cfg and cfg.rpm_limit and cfg.rpm_limit > 0)
-        except Exception:  # noqa: BLE001 — 설정 조회 실패도 라이브 조회를 막지 않음
-            pass
+            tracked, aliases = await self._live_plan(session, sc, scope_id)
+        except Exception as exc:  # noqa: BLE001 — 설정 조회 실패가 화면을 막지 않게
+            logger.warning("rl_live_usage_config_failed", error=str(exc), scope=sc, scope_id=scope_id)
+            return {"available": False, "reason": "config unavailable"}
 
+        base = {
+            "available": True,
+            "scope": sc,
+            "scope_id": scope_id,
+            "window_sec": window_ms // 1000,
+            "tracked": tracked,
+            "rpm_used_total": 0,
+            "by_model": [],
+        }
+        if not aliases:
+            return base
+
+        # ⚠️ GLOBAL 의 scope_id 는 proxy 가 `*` 로 적는다(rate_limit_scope.GLOBAL_WILDCARD).
+        sid = scope_id if sc != "GLOBAL" else "*"
+        keys = [f"{{{sc}:{sid}:{alias}}}:rpm" for alias in aliases]
         now_ms = int(time.time() * 1000)
         window_start = now_ms - window_ms
-        pattern = f"{{{sc}:{sid}:*}}:rpm"  # 해당 scope 의 모든 모델 rpm ZSET
-
         try:
-            per_model: list[dict] = []
-            total = 0
-            async for key in redis.scan_iter(match=pattern, count=200):
-                k = key.decode() if isinstance(key, (bytes, bytearray)) else key
+            redis = self._cache_mgr._redis
+            pipe = redis.pipeline(transaction=False)
+            for k in keys:
                 # 윈도우 내 항목 수(만료분 제외) — proxy 의 ZCARD-after-cleanup 과 동치.
-                cnt = await redis.zcount(k, window_start, "+inf")
-                cnt = int(cnt or 0)
-                if cnt <= 0:
-                    continue
-                # 키에서 model_alias 추출: {SCOPE:sid:MODEL}:rpm
-                inner = k[k.find("{") + 1 : k.find("}")]
-                parts = inner.split(":")
-                model_alias = parts[2] if len(parts) >= 3 else "*"
-                per_model.append({"model_alias": model_alias, "rpm_used": cnt})
-                total += cnt
-            return {
-                "available": True,
-                "scope": sc,
-                "scope_id": scope_id,
-                "window_sec": window_ms // 1000,
-                "tracked": tracked,
-                "rpm_used_total": total,
-                "by_model": sorted(per_model, key=lambda x: -x["rpm_used"]),
-            }
+                pipe.zcount(k, window_start, "+inf")
+            counts = await pipe.execute()
         except Exception as exc:  # noqa: BLE001 — 실시간 조회 실패가 화면을 막지 않게
             logger.warning("rl_live_usage_failed", error=str(exc), scope=sc, scope_id=scope_id)
             return {"available": False, "reason": f"{type(exc).__name__}"}
+
+        per_model = [
+            {"model_alias": alias, "rpm_used": int(cnt or 0)}
+            for alias, cnt in zip(aliases, counts)
+            if int(cnt or 0) > 0
+        ]
+        base["rpm_used_total"] = sum(m["rpm_used"] for m in per_model)
+        base["by_model"] = sorted(per_model, key=lambda x: -x["rpm_used"])
+        return base
 
     # 트렌드 조회의 창/버킷은 고정 조합만 허용 — free-form bucket 을 받으면 임의
     # 비용의 집계가 가능해져 admin-api 풀(pool_size=5+overflow10)을 압박한다.
@@ -478,6 +541,7 @@ class RateLimitService:
         request_id: str = "",
     ) -> RateLimitResponse:
         repo = RateLimitConfigRepository(session)
+        self._invalidate_live_plans()
 
         config = RateLimitConfig(
             id=uuid.uuid4(),

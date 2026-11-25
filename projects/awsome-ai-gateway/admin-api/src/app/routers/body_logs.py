@@ -27,7 +27,7 @@ from app.core.auth import (
     require_admin,
 )
 from app.core.config import get_settings
-from app.core.db import get_db_session
+from app.core.db import get_analytics_session, get_db_session
 from app.models.auth import User
 from app.models.usage import UsageLog, UsageStatus
 from app.services.web_search_cost import web_search_deployed
@@ -70,6 +70,18 @@ _SESSION_GAP_MINUTES = 30
 _SESSION_SCAN_LIMIT = 2000
 # 세션당 반환 호출 상한 — 긴 에이전트 세션(수백~수천 호출)도 응답을 바운딩한다.
 _SESSION_CALLS_MAX = 500
+#: 명시 세션 목록의 시간 창 걸음 — 창 전체 GROUP BY(7일 ≈ 수백만 행) 대신 최신 시각부터
+#: 작은 구간을 차례로 집계하고, 필요한 세션 수가 모이면 멈춘다. 첫 구간 15분, 이후 밀도에
+#: 맞춰 최대 4배씩(최대 7일) 넓히고, 빈 구간이면 그 아래 가장 최근 행으로 바로 뛴다.
+#: 구간들이 읽은 행 합이 상한을 넘으면 그 구간 하한을 커서로 돌려준다(has_more) — 한 요청이
+#: 365일 창 전체를 훑는 일이 없다.
+_SESSION_SLICE_START = timedelta(minutes=15)
+_SESSION_SLICE_MAX = timedelta(days=7)
+_SESSION_SLICE_ROW_BUDGET = 300_000
+#: 다음 구간의 목표 행 수 — 앞 구간의 밀도(행/시간)로 걸음 폭을 정한다.
+_SESSION_SLICE_TARGET_ROWS = 50_000
+#: has_error 필터는 세션 전체의 오류 수로 판정하므로 후보를 묶음으로 집계해 거른다.
+_SESSION_AGG_BATCH = 200
 #: 배치 조회 상한 — 응답 크기·감사 행 크기·S3 스캔 시간을 묶는 상한.
 _BATCH_MAX_IDS = 50
 
@@ -140,7 +152,7 @@ def _usage_lookup_stmt():
 
 def _session_agg_stmt(
     cutoff: datetime | None,
-    limit: int,
+    limit: int | None,
     *,
     before: datetime | None = None,
     user_ids: list | None = None,
@@ -148,6 +160,7 @@ def _session_agg_stmt(
     has_error: bool = False,
     sid: str | None = None,
     null_client: bool = False,
+    sids: list[str] | None = None,
 ):
     """session_id 명시 세션 집계 — ⚠️ user_id 는 uuid 라 max()/min() 집계 불가.
 
@@ -184,12 +197,15 @@ def _session_agg_stmt(
             UsageLog.client,
         )
         .order_by(func.max(UsageLog.requested_at).desc())
-        .limit(limit)
     )
+    if limit is not None:
+        stmt = stmt.limit(limit)
     if cutoff is not None:
         stmt = stmt.where(UsageLog.requested_at >= cutoff)
     if sid is not None:
         stmt = stmt.where(UsageLog.session_id == sid)
+    if sids is not None:
+        stmt = stmt.where(UsageLog.session_id.in_(sids))
     if user_ids is not None:
         stmt = stmt.where(UsageLog.user_id.in_(user_ids))
     if null_client:
@@ -207,6 +223,189 @@ def _session_agg_stmt(
     return stmt
 
 
+def _sess_key(session_id, user_id, client) -> tuple:
+    return (session_id, str(user_id) if user_id else None, client)
+
+
+def _wire_key(session_id, user_id, client) -> str:
+    return f"sid|{session_id}|{user_id or 'none'}|{client or 'other'}"
+
+
+def _utc(ts: datetime) -> datetime:
+    return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+
+
+def _row_filters(stmt, *, user_ids, client, null_client):
+    if user_ids is not None:
+        stmt = stmt.where(UsageLog.user_id.in_(user_ids))
+    if null_client:
+        stmt = stmt.where(UsageLog.client.is_(None))
+    elif client is not None:
+        stmt = stmt.where(UsageLog.client == client)
+    return stmt
+
+
+async def _explicit_sessions(
+    session: AsyncSession,
+    *,
+    cutoff: datetime | None,
+    before: datetime | None,
+    exclude_keys: set[str],
+    need: int,
+    user_ids: list | None,
+    client: str | None,
+    null_client: bool,
+    has_error: bool,
+) -> tuple[list, datetime | None]:
+    """명시 세션 목록 — ``_session_agg_stmt``(창 전체 GROUP BY … ORDER BY max DESC LIMIT)와
+    같은 결과를 시간 창을 최신부터 걸어 내려가며 만든다.
+
+    구간 ``(lo, hi]`` 마다 (session_id, user_id, client) 별 max(requested_at) 를 모은다. 처음
+    나타난 구간의 max 가 그 세션의 ended_at 이다(더 최신 구간은 이미 다 읽었다). 그래서 구간
+    하나를 끝내면 ``ended_at > lo`` 인 세션은 전부 알려져 있고, 필요한 수(need)가 모이면 그
+    순서가 최종이다. 통계(started_at·건수·오류·비용·모델)는 고른 세션만 session 인덱스로
+    ``requested_at >= cutoff`` 전체를 집계한다(원래 쿼리와 같은 범위).
+
+    ``before`` 커서: 원래 쿼리는 HAVING max <= before — 커서 뒤에 행이 있는 세션(앞 페이지에
+    나온 것)은 통째로 빠진다. 구간은 before 아래만 읽으므로, 후보 중 before 뒤에 행이 있는
+    것을 session 인덱스로 확인해 버린다.
+
+    반환 ``(rows, floor)``: rows 는 ended_at 내림차순 집계 행(최대 need 개). floor 가 None 이
+    아니면 행 예산을 다 써서 ``ended_at > floor`` 까지만 확정됐다는 뜻이다(호출부가 has_more
+    + 그 시각을 커서로 쓴다).
+    """
+    if cutoff is not None:
+        floor = cutoff
+    else:
+        floor = (
+            await session.execute(
+                select(func.min(UsageLog.requested_at).label("earliest")).where(
+                    UsageLog.session_id.is_not(None)
+                )
+            )
+        ).scalar()
+        if floor is None:
+            return [], None
+        floor = _utc(floor)
+
+    top = before if before is not None else datetime.now(timezone.utc)
+    hi = before  # None = 상한 없음(시계가 앞선 행까지 원래 쿼리처럼 포함)
+    step = _SESSION_SLICE_START
+    seen: set[tuple] = set()
+    accepted: list = []
+    scanned = 0
+    while True:
+        lo = top - step
+        at_floor = lo <= floor
+        if at_floor:
+            lo = floor
+        cstmt = (
+            select(
+                UsageLog.session_id,
+                UsageLog.user_id,
+                UsageLog.client,
+                func.max(UsageLog.requested_at).label("ended_at"),
+                func.count().label("slice_rows"),
+            )
+            .where(UsageLog.session_id.is_not(None))
+            .group_by(UsageLog.session_id, UsageLog.user_id, UsageLog.client)
+        )
+        # 하한이 cutoff 이면 원래 쿼리처럼 포함(>=), 중간 구간은 (lo, hi] 반개구간.
+        cstmt = cstmt.where(
+            UsageLog.requested_at >= lo if at_floor else UsageLog.requested_at > lo
+        )
+        if hi is not None:
+            cstmt = cstmt.where(UsageLog.requested_at <= hi)
+        cstmt = _row_filters(cstmt, user_ids=user_ids, client=client, null_client=null_client)
+        rows = (await session.execute(cstmt)).all()
+        scanned += sum(int(r.slice_rows or 0) for r in rows)
+
+        cands = []
+        for r in rows:
+            k = _sess_key(r.session_id, r.user_id, r.client)
+            if k in seen:
+                continue
+            seen.add(k)
+            if (
+                before is not None
+                and _utc(r.ended_at) == before
+                and _wire_key(r.session_id, r.user_id, r.client) in exclude_keys
+            ):
+                continue  # 앞 페이지에서 반환된 타이 세션
+            cands.append(r)
+
+        if before is not None and cands:
+            later = (
+                await session.execute(
+                    select(UsageLog.session_id, UsageLog.user_id, UsageLog.client)
+                    .where(
+                        UsageLog.session_id.in_(sorted({c.session_id for c in cands})),
+                        UsageLog.requested_at > before,
+                    )
+                    .distinct()
+                )
+            ).all()
+            gone = {_sess_key(x.session_id, x.user_id, x.client) for x in later}
+            if gone:
+                cands = [
+                    c for c in cands
+                    if _sess_key(c.session_id, c.user_id, c.client) not in gone
+                ]
+
+        cands.sort(key=lambda r: _utc(r.ended_at), reverse=True)
+        i = 0
+        while i < len(cands) and len(accepted) < need:
+            size = _SESSION_AGG_BATCH if has_error else need - len(accepted)
+            batch = cands[i : i + size]
+            i += len(batch)
+            astmt = _session_agg_stmt(
+                cutoff,
+                None,
+                user_ids=user_ids,
+                client=client,
+                null_client=null_client,
+                sids=sorted({c.session_id for c in batch}),
+            )
+            by_key = {
+                _sess_key(a.session_id, a.user_id, a.client): a
+                for a in (await session.execute(astmt)).all()
+            }
+            for c in batch:
+                a = by_key.get(_sess_key(c.session_id, c.user_id, c.client))
+                if a is None or (has_error and not a.error_count):
+                    continue
+                accepted.append(a)
+                if len(accepted) >= need:
+                    break
+        if len(accepted) >= need or at_floor:
+            return accepted, None
+        if scanned >= _SESSION_SLICE_ROW_BUDGET:
+            return accepted, lo
+        hi = lo
+        slice_rows = sum(int(r.slice_rows or 0) for r in rows)
+        if slice_rows == 0:
+            # 빈 구간 — 걸음을 키우며 빈 시간을 건너는 대신 그 아래 가장 최근 행으로 바로 뛴다
+            # (requested_at 인덱스 역방향 한 번). 데이터가 몰린 시각에서 첫 걸음부터 다시.
+            newest_stmt = _row_filters(
+                select(func.max(UsageLog.requested_at).label("newest")).where(
+                    UsageLog.session_id.is_not(None),
+                    UsageLog.requested_at <= lo,
+                    UsageLog.requested_at >= floor,
+                ),
+                user_ids=user_ids, client=client, null_client=null_client,
+            )
+            newest = (await session.execute(newest_stmt)).scalar()
+            if newest is None:
+                return accepted, None
+            top = _utc(newest)
+            step = _SESSION_SLICE_START
+        else:
+            # 밀도에 맞춰 넓힌다 — 다음 구간의 예상 행 수가 _SESSION_SLICE_TARGET_ROWS 를 넘지 않게.
+            top = lo
+            grow = min(4.0, _SESSION_SLICE_TARGET_ROWS / slice_rows)
+            step = min(max(step * grow, _SESSION_SLICE_START), _SESSION_SLICE_MAX)
+
+
 # ── 세션 목록 (메타데이터만 — 본문 아님, 감사 불요) ────────────────────────────
 # `/{request_id}` 보다 먼저 선언해야 경로 파라미터에 삼켜지지 않는다.
 @router.get("/sessions")
@@ -222,7 +421,9 @@ async def list_body_log_sessions(
     has_error: bool = Query(default=False),
     sid: str | None = Query(default=None),
     admin: CurrentUser = Depends(require_admin),
-    session: AsyncSession = Depends(get_db_session),
+    # 읽기 전용 목록 — 분석 풀(격리 + 문장 상한)에서 돈다. 인증·쓰기 경로의 기본 풀을
+    # 긴 세션 스캔이 붙잡지 않게 한다.
+    session: AsyncSession = Depends(get_analytics_session),
 ):
     """세션 목록 — 명시적 session_id 그룹핑 + NULL 행은 시간 휴리스틱 폴백.
 
@@ -240,8 +441,9 @@ async def list_body_log_sessions(
 
     if sid is not None and not _SESSION_ID_RE.fullmatch(sid):
         raise HTTPException(400, "sid 형식이 올바르지 않습니다")
-    if before is not None and before.tzinfo is None:
-        before = before.replace(tzinfo=timezone.utc)
+    if before is not None:
+        # UTC 로 정규화 — 커서 비교(ended_at ISO 문자열 포함)가 오프셋에 흔들리지 않게.
+        before = _utc(before).astimezone(timezone.utc)
     # before 와 같은 ended_at 을 가진 세션 중 이미 반환한 것 — 커서는 초 단위라
     # 동시 종료 세션이 있으면 `< before` 만으로는 다음 페이지에서 빠진다.
     exclude_keys = set(before_key)
@@ -277,36 +479,40 @@ async def list_body_log_sessions(
     if days > 0:
         cutoff = datetime.now(timezone.utc) - timedelta(days=days)
 
-    # ── 1) 명시적 세션 — session_id GROUP BY + 호출은 IN 쿼리 1회 ─────────
-    # limit+1 로 가져와 has_more 를 판별한다.
-    exact_rows = list(
-        (
-            await session.execute(
-                _session_agg_stmt(
-                    cutoff,
-                    limit + 1 + len(exclude_keys),
-                    before=before,
-                    user_ids=user_ids,
-                    client=None if client == "other" else client,
-                    has_error=has_error,
-                    sid=sid,
-                    null_client=client == "other",
+    # ── 1) 명시적 세션 — 시간 창 걸음 집계(_explicit_sessions) + 호출은 IN 쿼리 1회 ──
+    # limit+1 로 가져와 has_more 를 판별한다. sid 직행은 session 인덱스 한 번이라 그대로 집계.
+    exact_floor: datetime | None = None
+    if sid is not None:
+        exact_rows = list(
+            (
+                await session.execute(
+                    _session_agg_stmt(
+                        cutoff,
+                        limit + 1,
+                        before=before,
+                        user_ids=user_ids,
+                        client=None if client == "other" else client,
+                        has_error=has_error,
+                        sid=sid,
+                        null_client=client == "other",
+                    )
                 )
-            )
-        ).all()
-    )
-    if before is not None and exclude_keys:
-        # 커서 시각과 같은 ended_at + 이미 반환된 key 면 앞 페이지의 세션이다.
-        exact_rows = [
-            r
-            for r in exact_rows
-            if not (
-                (r.ended_at if r.ended_at.tzinfo else r.ended_at.replace(tzinfo=timezone.utc))
-                == before
-                and f"sid|{r.session_id}|{r.user_id or 'none'}|{r.client or 'other'}"
-                in exclude_keys
-            )
-        ]
+            ).all()
+        )
+    elif user_ids is not None and not user_ids:
+        exact_rows = []  # user 필터가 아무도 못 찾음 — 스캔할 것이 없다
+    else:
+        exact_rows, exact_floor = await _explicit_sessions(
+            session,
+            cutoff=cutoff,
+            before=before,
+            exclude_keys=exclude_keys,
+            need=limit + 1,
+            user_ids=user_ids,
+            client=None if client == "other" else client,
+            null_client=client == "other",
+            has_error=has_error,
+        )
     exact_overflow = len(exact_rows) > limit
     exact_rows = exact_rows[:limit]
 
@@ -534,6 +740,12 @@ async def list_body_log_sessions(
         sessions.append(sess)
 
     sessions.sort(key=lambda x: x["ended_at"], reverse=True)
+    if exact_floor is not None:
+        # 명시 세션 걸음이 행 예산에 멈췄다 — ended_at > floor 까지만 확정이다. 그 아래로
+        # 끝나는 세션(휴리스틱 포함)은 이번 페이지에 내지 않는다. 내면 커서가 floor 아래로
+        # 내려가 (커서, floor] 의 명시 세션이 어느 페이지에도 안 나온다.
+        floor_iso = exact_floor.astimezone(timezone.utc).isoformat()
+        sessions = [s for s in sessions if s["ended_at"] > floor_iso]
     deferred_iso = deferred_until.isoformat() if deferred_until is not None else None
     if deferred_iso is not None:
         # 스캔 하한에 걸친 그룹보다 이전에 끝나는 세션도 함께 미룬다 — 그대로
@@ -553,8 +765,12 @@ async def list_body_log_sessions(
         or truncated
         or len(sessions) > limit
         or deferred_iso is not None
+        or exact_floor is not None
     )
     next_before = returned[-1]["ended_at"] if has_more and returned else None
+    if has_more and not returned and exact_floor is not None:
+        # 빈 페이지라도 진행한다 — 다음 요청은 floor 아래부터 걷는다.
+        next_before = exact_floor.astimezone(timezone.utc).isoformat()
     return JSONResponse(
         {
             "sessions": returned,

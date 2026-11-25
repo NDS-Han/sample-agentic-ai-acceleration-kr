@@ -208,115 +208,158 @@ class TestGatewayCacheInvalidation:
 
 
 class TestGetLiveUsage:
-    """get_live_usage — tracked 플래그.
+    """get_live_usage — 카운터 키는 한도 행에서 계산(SCAN 없음) + tracked 플래그.
 
     proxy 는 RPM 한도가 설정된 scope 에만 카운터를 적재하므로, 한도 미설정
     scope 의 0 은 '요청 없음'이 아니라 '계량 안 함'이다. UI 가 두 상태를
-    구분하도록 tracked 플래그를 내려준다 (설정 조회 실패 시 None=미상).
+    구분하도록 tracked 플래그를 내려준다. 설정 조회가 실패하면 키를 모르므로
+    available=false.
     """
 
     @staticmethod
-    def _scan(keys: list[str]):
-        async def _gen(*_args, **_kwargs):
-            for k in keys:
-                yield k
-        return _gen
+    def _pipe(mock_redis, counts):
+        pipe = MagicMock()
+        pipe.zcount = MagicMock()
+        pipe.execute = AsyncMock(return_value=counts)
+        mock_redis.pipeline = MagicMock(return_value=pipe)
+        mock_redis.scan_iter = MagicMock(side_effect=AssertionError("SCAN must not be used"))
+        return pipe
 
-    async def test_tracked_when_rpm_limit_configured(
-        self,
-        rate_limit_service: RateLimitService,
-        mock_session: AsyncMock,
-        mock_redis: AsyncMock,
+    async def test_model_agnostic_limit_reads_star_key(
+        self, rate_limit_service: RateLimitService, mock_session: AsyncMock, mock_redis: AsyncMock
     ):
         team_id = uuid.uuid4()
-        cfg = MagicMock(rpm_limit=100)
-        mock_redis.scan_iter = MagicMock(
-            side_effect=lambda *a, **kw: self._scan(
-                [f"{{TEAM:{team_id}:claude-sonnet}}:rpm"]
-            )()
-        )
-        mock_redis.zcount = AsyncMock(return_value=5)
-
+        pipe = self._pipe(mock_redis, [5])
         with patch("app.services.rate_limit_service.RateLimitConfigRepository") as MockRepo:
-            MockRepo.return_value.get_active = AsyncMock(return_value=cfg)
-            out = await rate_limit_service.get_live_usage(
-                mock_session, "TEAM", str(team_id)
-            )
+            MockRepo.return_value.list_active_rpm_aliases = AsyncMock(return_value=[(None, 100)])
+            out = await rate_limit_service.get_live_usage(mock_session, "TEAM", str(team_id))
 
         assert out["available"] is True
         assert out["tracked"] is True
         assert out["rpm_used_total"] == 5
-        assert out["by_model"] == [{"model_alias": "claude-sonnet", "rpm_used": 5}]
-        MockRepo.return_value.get_active.assert_awaited_once_with(
+        assert out["by_model"] == [{"model_alias": "*", "rpm_used": 5}]
+        pipe.zcount.assert_called_once()
+        assert pipe.zcount.call_args.args[0] == f"{{TEAM:{team_id}:*}}:rpm"
+        MockRepo.return_value.list_active_rpm_aliases.assert_awaited_once_with(
             RateLimitScope.TEAM, team_id
         )
 
-    async def test_untracked_when_no_config(
-        self,
-        rate_limit_service: RateLimitService,
-        mock_session: AsyncMock,
-        mock_redis: AsyncMock,
+    async def test_model_rows_and_null_row_one_pipeline(
+        self, rate_limit_service: RateLimitService, mock_session: AsyncMock, mock_redis: AsyncMock
     ):
+        """모델 행(rpm>0) alias 키 + NULL 행 `*` 키를 파이프라인 한 번으로. rpm 없는 행은 키 없음."""
+        uid = uuid.uuid4()
+        pipe = self._pipe(mock_redis, [3, 0, 7])
+        rows = [("claude-sonnet", 10), (None, 50), ("claude-opus", 5), ("claude-haiku", None)]
         with patch("app.services.rate_limit_service.RateLimitConfigRepository") as MockRepo:
-            MockRepo.return_value.get_active = AsyncMock(return_value=None)
-            out = await rate_limit_service.get_live_usage(
-                mock_session, "TEAM", str(uuid.uuid4())
-            )
+            MockRepo.return_value.list_active_rpm_aliases = AsyncMock(return_value=rows)
+            out = await rate_limit_service.get_live_usage(mock_session, "USER", str(uid))
+
+        keys = [c.args[0] for c in pipe.zcount.call_args_list]
+        assert keys == [f"{{USER:{uid}:{a}}}:rpm" for a in ("*", "claude-opus", "claude-sonnet")]
+        pipe.execute.assert_awaited_once()
+        assert out["rpm_used_total"] == 10
+        assert out["by_model"] == [
+            {"model_alias": "claude-sonnet", "rpm_used": 7},
+            {"model_alias": "*", "rpm_used": 3},
+        ]
+
+    async def test_untracked_when_no_config_skips_redis(
+        self, rate_limit_service: RateLimitService, mock_session: AsyncMock, mock_redis: AsyncMock
+    ):
+        pipe = self._pipe(mock_redis, [])
+        with patch("app.services.rate_limit_service.RateLimitConfigRepository") as MockRepo:
+            MockRepo.return_value.list_active_rpm_aliases = AsyncMock(return_value=[])
+            out = await rate_limit_service.get_live_usage(mock_session, "TEAM", str(uuid.uuid4()))
 
         assert out["available"] is True
         assert out["tracked"] is False
         assert out["rpm_used_total"] == 0
         assert out["by_model"] == []
+        pipe.execute.assert_not_called()
 
     async def test_untracked_when_rpm_null(
-        self,
-        rate_limit_service: RateLimitService,
-        mock_session: AsyncMock,
-        mock_redis: AsyncMock,
+        self, rate_limit_service: RateLimitService, mock_session: AsyncMock, mock_redis: AsyncMock
     ):
         # TPM 만 설정된 경우 — rpm 카운터는 적재되지 않으므로 untracked.
-        cfg = MagicMock(rpm_limit=None)
+        self._pipe(mock_redis, [])
         with patch("app.services.rate_limit_service.RateLimitConfigRepository") as MockRepo:
-            MockRepo.return_value.get_active = AsyncMock(return_value=cfg)
-            out = await rate_limit_service.get_live_usage(
-                mock_session, "USER", str(uuid.uuid4())
-            )
+            MockRepo.return_value.list_active_rpm_aliases = AsyncMock(return_value=[(None, None)])
+            out = await rate_limit_service.get_live_usage(mock_session, "USER", str(uuid.uuid4()))
 
         assert out["tracked"] is False
 
-    async def test_tracked_none_on_config_lookup_error(
-        self,
-        rate_limit_service: RateLimitService,
-        mock_session: AsyncMock,
-        mock_redis: AsyncMock,
+    async def test_unavailable_on_config_lookup_error(
+        self, rate_limit_service: RateLimitService, mock_session: AsyncMock, mock_redis: AsyncMock
     ):
+        self._pipe(mock_redis, [])
         with patch("app.services.rate_limit_service.RateLimitConfigRepository") as MockRepo:
-            MockRepo.return_value.get_active = AsyncMock(
+            MockRepo.return_value.list_active_rpm_aliases = AsyncMock(
                 side_effect=RuntimeError("db down")
             )
-            out = await rate_limit_service.get_live_usage(
-                mock_session, "USER", str(uuid.uuid4())
+            out = await rate_limit_service.get_live_usage(mock_session, "USER", str(uuid.uuid4()))
+
+        assert out["available"] is False
+
+    async def test_unavailable_on_redis_error(
+        self, rate_limit_service: RateLimitService, mock_session: AsyncMock, mock_redis: AsyncMock
+    ):
+        pipe = self._pipe(mock_redis, [])
+        pipe.execute = AsyncMock(side_effect=ConnectionError("redis down"))
+        with patch("app.services.rate_limit_service.RateLimitConfigRepository") as MockRepo:
+            MockRepo.return_value.list_active_rpm_aliases = AsyncMock(return_value=[(None, 10)])
+            out = await rate_limit_service.get_live_usage(mock_session, "USER", str(uuid.uuid4()))
+
+        assert out == {"available": False, "reason": "ConnectionError"}
+
+    async def test_global_scope_uses_null_scope_id_and_star_sid(
+        self, rate_limit_service: RateLimitService, mock_session: AsyncMock, mock_redis: AsyncMock
+    ):
+        """GLOBAL — scope_id NULL 행, 모델 행만(NULL alias 행은 gateway 로더가 안 쓴다), 키 sid=`*`."""
+        pipe = self._pipe(mock_redis, [9])
+        with patch("app.services.rate_limit_service.RateLimitConfigRepository") as MockRepo:
+            MockRepo.return_value.list_active_rpm_aliases = AsyncMock(
+                return_value=[("claude-sonnet", 1000), (None, 99)]
             )
+            out = await rate_limit_service.get_live_usage(mock_session, "GLOBAL", "claude-sonnet")
 
-        assert out["available"] is True
-        assert out["tracked"] is None
+        assert out["tracked"] is True
+        assert [c.args[0] for c in pipe.zcount.call_args_list] == ["{GLOBAL:*:claude-sonnet}:rpm"]
+        MockRepo.return_value.list_active_rpm_aliases.assert_awaited_once_with(
+            RateLimitScope.GLOBAL, None
+        )
 
-    async def test_global_scope_uses_null_scope_id(
+    async def test_plan_cached_then_invalidated_by_set(
         self,
         rate_limit_service: RateLimitService,
         mock_session: AsyncMock,
         mock_redis: AsyncMock,
+        admin_user: CurrentUser,
     ):
-        with patch("app.services.rate_limit_service.RateLimitConfigRepository") as MockRepo:
-            MockRepo.return_value.get_active = AsyncMock(return_value=None)
-            out = await rate_limit_service.get_live_usage(
-                mock_session, "GLOBAL", "claude-sonnet"
+        """폴링마다 DB 를 치지 않는다(15초 캐시) — 같은 프로세스의 한도 변경은 즉시 반영."""
+        uid = uuid.uuid4()
+        self._pipe(mock_redis, [1])
+        with patch("app.services.rate_limit_service.RateLimitConfigRepository") as MockRepo, \
+             patch("app.services.rate_limit_service.audit_logger") as mock_audit:
+            MockRepo.return_value.list_active_rpm_aliases = AsyncMock(return_value=[(None, 10)])
+            MockRepo.return_value.upsert = AsyncMock()
+            mock_audit.log = AsyncMock()
+            await rate_limit_service.get_live_usage(mock_session, "USER", str(uid))
+            await rate_limit_service.get_live_usage(mock_session, "USER", str(uid))
+            assert MockRepo.return_value.list_active_rpm_aliases.await_count == 1
+            await rate_limit_service.set_user_rate_limit(
+                mock_session, user_id=uid, data=RateLimitSetRequest(rpm=5), actor=admin_user
             )
+            await rate_limit_service.get_live_usage(mock_session, "USER", str(uid))
+            assert MockRepo.return_value.list_active_rpm_aliases.await_count == 2
 
-        assert out["tracked"] is False
-        MockRepo.return_value.get_active.assert_awaited_once_with(
-            RateLimitScope.GLOBAL, None
-        )
+    async def test_router_holds_no_request_session(self):
+        """라우트는 요청 범위 세션 의존성을 받지 않는다(폴링이 풀 연결을 붙잡지 않게)."""
+        import inspect
+
+        from app.routers.rate_limits import get_rate_limit_usage
+
+        assert "session" not in inspect.signature(get_rate_limit_usage).parameters
 
 
 class TestGetUsageTrend:

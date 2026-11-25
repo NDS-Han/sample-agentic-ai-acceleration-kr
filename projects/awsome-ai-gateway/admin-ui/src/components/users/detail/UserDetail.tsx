@@ -64,7 +64,8 @@ export function UserDetail({
   const catalog = useCatalog();
   const [policy, reloadPolicy] = usePolicy('user', node.id);
   const usage = useUserUsage(node.id, period);
-  const teamUsage = useTeamUsage(teamId, period);
+  // 팀 합계만 쓴다(팀 대비 비중) — 행 없이 scope_total 한 요청.
+  const teamUsage = useTeamUsage(teamId, period, 0, { totalOnly: true });
   const activity = useActivity([node.id]);
   const cat = catalog.status === 'ready' ? catalog.data : [];
   const text = usePolicyText(cat);
