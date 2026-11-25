@@ -439,6 +439,11 @@ gatewayProxy:
   enabled: true
   replicaCount: 2  # prod에선 3+ 권장 (values-*-prod.yaml에서 override)
 
+  # DB pool 서비스별 override. 비워두면 공통 ConfigMap(database.external.*) 값을
+  # 그대로 사용한다(기존 렌더와 동일). maxOverflow 는 서비스가 읽는 env 이름으로 변환된다.
+  # 예: poolSize/maxOverflow/poolTimeout/poolRecycle
+  db: {}
+
   image:
     repository: "llm-gateway/gateway-proxy"
     tag: "1.0.55-runtimeplane"  # 빌드 시점 스냅샷 — install-eks 가 라이브 태그를 보존하고 rebuild-image 가 새 SHA 를 주입
@@ -601,6 +606,11 @@ gatewayProxy:
 adminApi:
   enabled: true
   replicaCount: 2
+
+  # DB pool 서비스별 override. 비워두면 공통 ConfigMap(database.external.*) 값을
+  # 그대로 사용한다(기존 렌더와 동일). maxOverflow 는 서비스가 읽는 env 이름으로 변환된다.
+  # 예: poolSize/maxOverflow/poolTimeout/poolRecycle
+  db: {}
 
   # /webhooks/git GitHub HMAC 수신(R4-A1-2). true 면 ExternalSecret 에
   # `github_webhook_secret` 매핑이 추가된다 — ⚠️ 먼저 SM 의
@@ -916,6 +926,11 @@ scheduler:
   enabled: true
   replicaCount: 1  # 절대 2 이상 금지 (중복 cron 실행 방지)
 
+  # DB pool 서비스별 override. 비워두면 공통 ConfigMap(database.external.*) 값을
+  # 그대로 사용한다(기존 렌더와 동일). maxOverflow 는 서비스가 읽는 env 이름으로 변환된다.
+  # 예: poolSize/maxOverflow/poolTimeout/poolRecycle
+  db: {}
+
   image:
     # admin-api 이미지 재사용 (command만 다름) — 태그도 admin-api 와 항상 같이 움직인다
     repository: "llm-gateway/admin-api"
@@ -980,6 +995,11 @@ scheduler:
 notificationWorker:
   enabled: true
   replicaCount: 2
+
+  # DB pool 서비스별 override. 비워두면 공통 ConfigMap(database.external.*) 값을
+  # 그대로 사용한다(기존 렌더와 동일). maxOverflow 는 서비스가 읽는 env 이름으로 변환된다.
+  # 예: poolSize/maxOverflow/poolTimeout/poolRecycle
+  db: {}
 
   image:
     repository: "llm-gateway/notification-worker"
@@ -1079,6 +1099,11 @@ costRecorderWorker:
   enabled: true
   # consumer group 방식이라 여러 replica가 안전하게 병렬 소비 가능
   replicaCount: 2
+
+  # DB pool 서비스별 override. 비워두면 공통 ConfigMap(database.external.*) 값을
+  # 그대로 사용한다(기존 렌더와 동일). maxOverflow 는 서비스가 읽는 env 이름으로 변환된다.
+  # 예: poolSize/maxOverflow/poolTimeout/poolRecycle
+  db: {}
 
   image:
     repository: "llm-gateway/cost-recorder-worker"

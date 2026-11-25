@@ -72,6 +72,9 @@ spec:
             - name: {{ $key }}
               value: {{ $value | quote }}
             {{- end }}
+            {{- with .Values.gatewayProxy.db }}
+            {{- include "llm-gateway.dbPoolEnv" (dict "db" . "overflowEnv" "DB_MAX_OVERFLOW") | trim | nindent 12 }}
+            {{- end }}
           envFrom:
             - configMapRef:
                 name: {{ include "llm-gateway.fullname" . }}-config

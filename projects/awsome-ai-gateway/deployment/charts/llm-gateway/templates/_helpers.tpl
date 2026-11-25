@@ -192,6 +192,33 @@ imagePullSecrets:
 {{- end -}}
 
 {{/* ------------------------------------------------------------------------
+  서비스별 DB pool override env. 값이 없으면 아무것도 렌더하지 않아
+  공통 ConfigMap(database.external.*)의 기존 동작을 그대로 유지한다.
+  cost/notification worker 처럼 overflow env 이름이 다른 서비스는 overflowEnv 를 바꾼다.
+  호출: include "llm-gateway.dbPoolEnv" (dict "db" .Values.gatewayProxy.db "overflowEnv" "DB_MAX_OVERFLOW")
+-------------------------------------------------------------------------- */}}
+{{- define "llm-gateway.dbPoolEnv" -}}
+{{- with .db }}
+{{- if hasKey . "poolSize" }}
+- name: DB_POOL_SIZE
+  value: {{ .poolSize | quote }}
+{{- end }}
+{{- if hasKey . "maxOverflow" }}
+- name: {{ $.overflowEnv | default "DB_MAX_OVERFLOW" }}
+  value: {{ .maxOverflow | quote }}
+{{- end }}
+{{- if hasKey . "poolTimeout" }}
+- name: DB_POOL_TIMEOUT
+  value: {{ .poolTimeout | quote }}
+{{- end }}
+{{- if hasKey . "poolRecycle" }}
+- name: DB_POOL_RECYCLE
+  value: {{ .poolRecycle | quote }}
+{{- end }}
+{{- end }}
+{{- end -}}
+
+{{/* ------------------------------------------------------------------------
   VK 복호화가 필요한 컴포넌트 전용: DEK + (로테이션 시) 구버전 키맵.
   extraKeysEnabled=true 면 SM `/app` JSON 의 virtual_key_encryption_extra_keys
   속성이 ExternalSecret 을 통해 같은 Secret 에 동기화돼 있어야 한다 —
