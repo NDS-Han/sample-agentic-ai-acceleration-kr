@@ -89,7 +89,15 @@ from app.config import get_settings
 from app.providers.openai_usage import extract_responses_usage
 from app.schemas.domain import TokenUsage
 from app.services.agentcore_mcp_client import AgentCoreMcpClient, AgentCoreMcpError
-from app.services.streaming import _aclose_iter, _spawn, mark_outcome, outcome_from_http
+from app.services.streaming import (
+    _aclose_iter,
+    _spawn,
+    anthropic_delta_text,
+    heuristic_tokens,
+    mark_outcome,
+    outcome_from_http,
+    shield_upstream,
+)
 from app.services.web_search_quota import WebSearchQuotaExceeded, WebSearchRequestCapReached
 
 logger = structlog.get_logger(__name__)
@@ -2006,6 +2014,8 @@ async def _anthropic_stream(
     #: peeks at the first yielded frame so a first-turn non-200 becomes the real
     #: HTTP status instead of a 200 envelope (R20 S3).
     status_holder: dict | None = None,
+    #: B1 — 최종 message_delta 없이 끊긴 턴의 출력 토큰 역산(없으면 문자 수 근사).
+    tokenizer_hook: Callable[[str], Awaitable[int | None]] | None = None,
 ) -> AsyncIterator[bytes]:
     """Stitch N Anthropic model turns into ONE message_start … message_stop stream.
 
@@ -2061,6 +2071,9 @@ async def _anthropic_stream(
     #: 턴이 끝날 때까지 merged 에 합산하지 않는다 — turn_usages 스냅샷이 있어야
     #: 장문 티어가 턴별 프롬프트로 판정된다(M1). None = 턴 밖(merge 완료).
     turn_usage: TokenUsage | None = None
+    #: B1 — 진행 중 턴의 출력 델타(text·thinking·input_json, 우리 검색 인자 포함)와
+    #: 최종 message_delta.usage 수신 여부. 최종 없이 끝난 턴은 이 텍스트로 출력을 역산한다.
+    turn_track: dict = {"text": [], "final": False}
 
     try:
         while True:
@@ -2089,7 +2102,25 @@ async def _anthropic_stream(
             turn_body["messages"] = conversation
             turn_body["stream"] = True
 
-            status, chunk_iter, _headers, _rid = await invoke_stream(turn_body)
+            # 턴 호출을 취소에서 보호한다(B1) — 호출 도중 클라이언트가 끊으면 상류는 이미 이 턴의
+            # 프롬프트를 받았다(청구). 결과를 받아 드레인 태스크가 정산한다(_drain_cancelled_turn).
+            _inv = _spawn(invoke_stream(turn_body))
+            try:
+                status, chunk_iter, _headers, _rid = await asyncio.shield(_inv)
+            except asyncio.CancelledError:
+                if outcome is not None:
+                    outcome.setdefault("status", "error" if (failed or error_seen)
+                                       else "cancelled")
+                _spawn(_drain_cancelled_turn(
+                    _inv, dialect="anthropic", merged=merged, searches_done=searches_done,
+                    on_usage=on_usage, outcome=outcome, tokenizer_hook=tokenizer_hook))
+                drain_owns_settle = True
+                if outcome is not None:
+                    outcome["drain_pending"] = True
+                raise
+            # 상류 읽기를 클라이언트 취소에서 보호 — disconnect 드레인이 같은 스트림을 이어
+            # 읽는다(streaming.ShieldedUpstream, B1).
+            chunk_iter = shield_upstream(chunk_iter)
             if status != 200:
                 failed = True  # 상류 비-200 종결 — 요청 실패(E2E S5)
                 if status_holder is not None:
@@ -2119,6 +2150,7 @@ async def _anthropic_stream(
             pending_searches: list[dict] = []   # [{id, name, input}] — support MANY per turn (F-3)
             client_tool_present = False
             turn_usage = TokenUsage()
+            turn_track = {"text": [], "final": False}
             turn_open = True
 
             async for raw in chunk_iter:
@@ -2127,6 +2159,7 @@ async def _anthropic_stream(
                 except (ValueError, TypeError):
                     continue
                 etype = ev.get("type")
+                _track_anthropic_turn(turn_track, ev)
 
                 if etype == "message_start":
                     u = (ev.get("message") or {}).get("usage") or {}
@@ -2569,24 +2602,23 @@ async def _anthropic_stream(
         # yield 지점에서만 발생하므로 turn_open=True 면 그 턴은 아직 merge 되지 않았고,
         # 드레인이 나머지 message_delta 의 output 을 회수해 merged 에 합친 뒤 스스로
         # 정산한다(M2). 턴 밖 disconnect 면 finally 가 직접 정산한다.
+        if outcome is not None:
+            # CANCELLED(B1) — 끊기기 전에 본 상류 실패는 ERROR 로 지킨다.
+            outcome.setdefault("status", "error" if (failed or error_seen) else "cancelled")
         if turn_open and turn_usage is not None and chunk_iter is not None:
-            if outcome is not None:
-                outcome.setdefault("status", "success")
             # _spawn 실패 시 finally 가 대신 정산하게 플래그는 스폰 후에 세운다
             # (동기 구간이라 경쟁 없음 — R20 round-3 N-9). drain_pending 도
             # 같이 — 스폰 실패로 마커만 남으면 guard 가 drain_timeout+10s 를
             # 헛기다린다(R20 round-4 N-c).
             _spawn(_drain_anthropic_turn_usage(
                 chunk_iter=chunk_iter, turn_usage=turn_usage, merged=merged,
-                searches_done=searches_done, on_usage=on_usage, outcome=outcome))
+                searches_done=searches_done, on_usage=on_usage, outcome=outcome,
+                turn_track=turn_track, tokenizer_hook=tokenizer_hook))
             drain_owns_settle = True
             if outcome is not None:
                 # unsettled_reservation_guard 가 드레인 정산과 경쟁해 예약을 먼저
                 # release(0) 하지 않게 소유권을 표시한다(streaming.py 와 동일).
                 outcome["drain_pending"] = True
-        elif outcome is not None:
-            # 끊긴 건 게이트웨이/상류 실패가 아니다 — 이미 본 에러 판정은 지키고.
-            outcome.setdefault("status", "success")
         raise
     except Exception:
         failed = True
@@ -2614,8 +2646,81 @@ async def _anthropic_stream(
             # input·캐시 버킷은 이미 과금됐으므로 버리지 않는다(R20 M-b).
             # drain 경로는 드레인 태스크가 스스로 merge 한다.
             if turn_open and turn_usage is not None:
+                await _estimate_open_turn(turn_usage, turn_track, tokenizer_hook)
                 _merge_usage(merged, turn_usage)
             await _settle_stream_usage(on_usage, merged)
+
+
+async def _drain_cancelled_turn(
+    inv: asyncio.Task, *, dialect: str, merged: TokenUsage, searches_done: int,
+    on_usage: Callable[[TokenUsage], Awaitable[None]], outcome: dict | None,
+    tokenizer_hook: Callable[[str], Awaitable[int | None]] | None = None,
+) -> None:
+    """턴 호출 도중 클라이언트가 끊었다 — 호출을 끝까지 받아 그 턴의 usage 를 회수·정산한다(B1).
+
+    예전에는 `await invoke_stream()` 이 취소되며 상류 스트림이 버려져, 검색 뒤 답 턴이 통째로
+    청구에서 빠졌다(proof 실측 10/53 취소 요청). 상류가 비-200 이면 이번 턴에 회수할 usage 가
+    없다 — 앞 턴들(merged)만 정산한다.
+    """
+    try:
+        status, it, _h, _rid = await inv
+    except Exception:
+        logger.warning("web_search.cancelled_turn_invoke_failed")
+        status, it = None, None
+    if status != 200 or it is None:
+        if it is not None:
+            await _aclose_iter(it)
+        merged.web_search_count = searches_done
+        merged.total_tokens = merged.input_tokens + merged.output_tokens
+        await _settle_stream_usage(on_usage, merged)
+        if outcome is not None:
+            outcome.pop("drain_pending", None)
+        return
+    it = shield_upstream(it)
+    if dialect == "anthropic":
+        await _drain_anthropic_turn_usage(
+            chunk_iter=it, turn_usage=TokenUsage(), merged=merged, searches_done=searches_done,
+            on_usage=on_usage, outcome=outcome, turn_track={"text": [], "final": False},
+            tokenizer_hook=tokenizer_hook)
+    else:
+        await _drain_responses_turn_usage(
+            chunk_iter=it, merged=merged, searches_done=searches_done, on_usage=on_usage,
+            outcome=outcome)
+
+
+def _track_anthropic_turn(track: dict, ev: dict) -> None:
+    """B1 — 턴의 출력 델타 텍스트와 최종 usage 수신 여부를 기록한다(라이브·드레인 공용)."""
+    etype = ev.get("type")
+    if etype == "content_block_delta":
+        if piece := anthropic_delta_text(ev.get("delta") or {}):
+            track["text"].append(piece)
+    elif etype == "message_delta" and "output_tokens" in (ev.get("usage") or {}):
+        track["final"] = True
+
+
+async def _estimate_open_turn(turn_usage: TokenUsage, track: dict,
+                              tokenizer_hook) -> None:
+    """최종 message_delta 없이 끝난 턴 — 전달된 출력으로 output_tokens 를 역산한다(B1).
+
+    Bedrock 은 끊기기 전까지 생성한 출력을 청구한다. 예전에는 이 턴의 output 이 0 으로
+    합산됐다. 토크나이저가 없거나 실패하면 문자 수 근사. 역산했으면 estimated 로 표시한다.
+    """
+    if track.get("final"):
+        return
+    text = "".join(track.get("text") or [])
+    if not text:
+        return
+    n = None
+    if tokenizer_hook is not None:
+        try:
+            n = await tokenizer_hook(text)
+        except Exception:
+            logger.warning("web_search.tokenizer_hook_failed")
+            n = None
+    n = n if n and n > 0 else heuristic_tokens(text)
+    if n > turn_usage.output_tokens:
+        turn_usage.output_tokens = n
+    turn_usage.estimated = True
 
 
 async def _settle_stream_usage(on_usage, merged: TokenUsage) -> None:
@@ -2752,6 +2857,8 @@ async def _drain_anthropic_turn_usage(
     searches_done: int,
     on_usage: Callable[[TokenUsage], Awaitable[None]],
     outcome: dict | None,
+    turn_track: dict | None = None,
+    tokenizer_hook: Callable[[str], Awaitable[int | None]] | None = None,
 ) -> None:
     """disconnect 시 진행 중이던 Anthropic 턴의 나머지 usage 를 회수해 정산한다.
 
@@ -2761,12 +2868,22 @@ async def _drain_anthropic_turn_usage(
     본 제너레이터의 finally 는 ``drain_owns_settle`` 로 건너뛴다.
     """
     iterator = chunk_iter.__aiter__()
+    track = turn_track if turn_track is not None else {"text": [], "final": False}
+
+    def _on_event(ev: dict) -> None:
+        _accumulate_anthropic_turn_usage(turn_usage, ev)
+        _track_anthropic_turn(track, ev)
+
     try:
-        await _drain_events_for_usage(
-            iterator, lambda ev: _accumulate_anthropic_turn_usage(turn_usage, ev))
+        await _drain_events_for_usage(iterator, _on_event)
     except Exception:
         logger.exception("web_search.anthropic_drain_failed")
     finally:
+        # 드레인 타임아웃 등으로 최종 message_delta 를 못 봤으면 출력을 역산한다(B1).
+        try:
+            await _estimate_open_turn(turn_usage, track, tokenizer_hook)
+        except Exception:
+            logger.warning("web_search.estimate_failed")
         # 드레인이 비정상 종료(읽기 오류 등)해도 이미 모인 input·캐시 버킷은
         # 과금됐다 — merge 는 예외 경로에서도 수행한다(R20 S-a).
         _merge_usage(merged, turn_usage)
@@ -3193,7 +3310,22 @@ async def _responses_stream(
                 else conv_input
             )
             turn_body["stream"] = True
-            status, chunk_iter, _h, _rid = await invoke_stream(turn_body)
+            # 턴 호출 보호(B1) — Anthropic 스티처의 같은 블록 주석.
+            _inv = _spawn(invoke_stream(turn_body))
+            try:
+                status, chunk_iter, _h, _rid = await asyncio.shield(_inv)
+            except asyncio.CancelledError:
+                if outcome is not None:
+                    outcome.setdefault("status", "error" if (failed or error_seen)
+                                       else "cancelled")
+                _spawn(_drain_cancelled_turn(
+                    _inv, dialect="responses", merged=merged, searches_done=searches_done,
+                    on_usage=on_usage, outcome=outcome))
+                drain_owns_settle = True
+                if outcome is not None:
+                    outcome["drain_pending"] = True
+                raise
+            chunk_iter = shield_upstream(chunk_iter)  # B1 — 취소에서 상류 읽기 보호
             if status != 200:
                 failed = True  # 상류 비-200 종결 — 요청 실패(E2E S5)
                 if status_holder is not None:
@@ -3476,17 +3608,16 @@ async def _responses_stream(
         # 종결 전에 끊긴 턴은 입출력이 전량 유실된다(M2). 남은 청크를 백그라운드에서
         # drain 해 종결 이벤트의 usage 를 회수한 뒤 드레인 태스크가 스스로 정산한다
         # (streaming.py KI-08 과 같은 계약).
+        if outcome is not None:
+            # CANCELLED(B1) — 끊기기 전에 본 상류 실패는 ERROR 로 지킨다.
+            outcome.setdefault("status", "error" if (failed or error_seen) else "cancelled")
         if turn_open and chunk_iter is not None:
-            if outcome is not None:
-                outcome.setdefault("status", "success")
             _spawn(_drain_responses_turn_usage(
                 chunk_iter=chunk_iter, merged=merged, searches_done=searches_done,
                 on_usage=on_usage, outcome=outcome))
             drain_owns_settle = True  # _spawn 후에 세운다(스폰 실패 시 finally 정산)
             if outcome is not None:
                 outcome["drain_pending"] = True
-        elif outcome is not None:
-            outcome.setdefault("status", "success")
         raise
     except Exception:
         failed = True
@@ -3980,6 +4111,7 @@ async def run_web_search_loop(
             outcome=outcome,
             status_holder=status_holder,
             **dialect_kw,
+            **({"tokenizer_hook": tokenizer_hook} if dialect == "anthropic" else {}),
         )
         # Peek at the first frame BEFORE fixing the response status: a first-turn
         # upstream non-200 must come back as the real status — SDKs key retries

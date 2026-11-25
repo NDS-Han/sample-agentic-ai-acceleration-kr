@@ -103,6 +103,19 @@ class StreamConsumer:
         self._reclaim_fail_head: str | None = None
         self._reclaim_first_fail_at: float | None = None
         self._dead_letter_grace = settings.stream_dead_letter_grace_sec
+        #: 디코드 불가 메시지 (stream_id, raw, error) — XACK 전에 dead-letter 표에 남긴다(B5).
+        self._undecodable: list[tuple[str, str | None, str]] = []
+
+    async def _ack(self, ids: list[str]) -> None:
+        """XACK — 그 전에 디코드 불가 메시지를 dead-letter 표에 남긴다. 그 쓰기가 실패하면
+        예외가 올라가 ACK 하지 않는다(버리지 않는다 — 다음 회수에서 다시 시도)."""
+        if self._undecodable:
+            store = getattr(self._flusher, "store_undecodable", None)
+            if store is not None:
+                await store(list(self._undecodable))
+            self._undecodable.clear()
+        if ids:
+            await self._redis.xack(self._stream, self._group, *ids)
 
     async def ensure_group(self) -> None:
         """Consumer group MKSTREAM create. BUSYGROUP은 정상 상황."""
@@ -200,14 +213,14 @@ class StreamConsumer:
                 #    continue 하면 빈 페이지에서 영원히 돌며 기동이 멈춘다.
                 if not ids:
                     break
-                # 파싱 실패 메시지들도 ACK하여 무한 루프 방지.
-                await self._redis.xack(self._stream, self._group, *ids)
+                # 파싱 실패 메시지 — dead-letter 표에 원본을 남긴 뒤 ACK(무한 루프 방지).
+                await self._ack(ids)
                 # 디코드 불가 페이지만 소화했으면 계속 읽어 자기 PEL 을 비운다 —
                 # break 하면 뒤 페이지가 XAUTOCLAIM 주기(수 분)까지 방치된다.
                 continue
 
             await self._flush_or_dead_letter(entries, ids)
-            await self._redis.xack(self._stream, self._group, *ids)
+            await self._ack(ids)
             await self._trim_consumed()
             logger.info("backlog_batch_processed", count=len(ids))
 
@@ -411,7 +424,7 @@ class StreamConsumer:
             if entries:
                 await self._flush_or_dead_letter(entries, ids, reclaim=True)
             if ids:
-                await self._redis.xack(self._stream, self._group, *ids)
+                await self._ack(ids)
                 await self._trim_consumed()
                 reclaimed += len(ids)
             if cursor in ("0-0", "0", None):
@@ -494,14 +507,14 @@ class StreamConsumer:
                 # 재실패 루프가 된다. 디코딩 불가 메시지는 재처리해도 영원히
                 # 실패하므로 drop 이 맞다.
                 if batch_ids:
-                    await self._redis.xack(self._stream, self._group, *batch_ids)
+                    await self._ack(batch_ids)
                 # yield back to event loop — xreadgroup 호출이 이미 blocking이지만
                 # 예외 없이 빈 결과 온 경우에도 tight loop 방지.
                 await asyncio.sleep(0)
                 continue
 
             await self._flush_or_dead_letter(batch_entries, batch_ids)
-            await self._redis.xack(self._stream, self._group, *batch_ids)
+            await self._ack(batch_ids)
             await self._trim_consumed()
 
     async def _flush_or_dead_letter(
@@ -596,6 +609,9 @@ class StreamConsumer:
                     )
                     data = json.loads(raw)
                     entry = CostStreamEntry(**data)
+                    # 영구 오류 시 dead-letter 표에 원본 그대로 남기기 위해(B5).
+                    entry._raw = raw
+                    entry._stream_id = raw_id
                     entries.append(entry)
                 except Exception as exc:
                     logger.warning(
@@ -603,8 +619,13 @@ class StreamConsumer:
                         msg_id=raw_id,
                         error=str(exc),
                     )
-                    if self._metrics:
-                        self._metrics.entries_dropped.add(1, {"reason": "parse_failed"})
+                    # ACK 전에 dead-letter 표로(B5) — 예전에는 버렸다.
+                    try:
+                        raw_text = (payload.decode("utf-8", "replace")
+                                    if isinstance(payload, bytes) else str(payload))
+                    except Exception:
+                        raw_text = None
+                    self._undecodable.append((raw_id, raw_text, str(exc)[:2000]))
                 else:
                     if entry.schema_version > _SUPPORTED_SCHEMA_VERSION:
                         # 게이트웨이가 워커보다 새 스키마 — additive(필드 추가)면

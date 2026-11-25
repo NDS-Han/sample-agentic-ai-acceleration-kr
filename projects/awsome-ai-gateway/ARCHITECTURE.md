@@ -97,7 +97,7 @@ Helm 이 배포하는 워크로드는 **6 long-running Deployment + 1 migration 
 | `rl:cost:{user\|team}:{id}:cpm:{ts}` / `:cph:{ts}` | cost-per-minute/hour 윈도우 |
 | `budget:config:{user\|team}:{id}`, `budget:{user\|team}:{id}:{period}`, `budget:user:{uid}:{client}:{period}` | budget config + live USD 카운터(scope별 + **per-app(client)**) |
 | `key:vk:{key_hash}` (VK→user_id 매핑), `key:cache:vk:{key_hash}` (AuthContext 캐시, TTL 300s) | 미스 시 무효키 → PermissionError. 무효화 시 두 키 함께 delete |
-| `cost:stream` | **Redis Stream**(MAXLEN ~500k = 메모리 백스톱 전용 — 미소비 entry 도 자르므로 크기 제어가 아니다), cost/usage 핸드오프, consumer group. 실제 정리는 워커가 ACK 후 `XTRIM MINID min(미처리 최솟값, last-delivered-id)` 로 수행 — 미소비 청구 기록은 절대 트림되지 않는다 |
+| `cost:stream` | **Redis Stream**(XADD 에 MAXLEN 없음 — wave 3 B4: 근사 트림이 미소비 entry 를 잘라 청구 기록을 잃었다), cost/usage 핸드오프, consumer group. 정리는 워커가 ACK 후 `XTRIM MINID min(미처리 최솟값, last-delivered-id)` 로만 — 미소비 청구 기록은 트림되지 않는다. 영구 오류 행은 `usage.cost_dead_letters` 에 원본으로 남는다 |
 | `model:{alias}`, `model:{provider_model_id}`, `model:list` | model-catalog 캐시(TTL 300s) |
 | `routing_profile:{client}` | routing-profile 캐시(TTL 300s). 롤백 시 이 키 플러시 필요 |
 | `usage:daily:user:{uid}:{date}:cost/tokens/models` | live daily 카운터 |

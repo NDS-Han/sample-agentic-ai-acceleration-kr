@@ -6,7 +6,7 @@
 import { adminAPI } from '@/lib/api-client';
 import { withRetry } from '@/lib/utils/retry';
 import { currentCalendarMonth, monthsAgo } from '@/lib/utils/period';
-import type { WebSearchUsage } from '@/types/entities';
+import type { ChargedBreakdown, WebSearchUsage } from '@/types/entities';
 
 export interface DashboardSummary {
   period: string;
@@ -111,7 +111,12 @@ export interface DashboardKPI {
   /** ERROR+TIMEOUT 요청 수 — 전체 요청 = total_requests + error_requests */
   error_requests: number;
   total_tokens: number;
+  /** 모델 토큰 비용 — 청구 대상 전 상태(성공·실패·취소, wave 3). 웹 검색은 charged 에. */
   total_cost_usd: number;
+  /** 클라이언트가 끊은 스트림 수(CANCELLED). 배포 전 백엔드는 없음. */
+  cancelled_requests?: number;
+  /** Total (charged) = 성공 + 실패 + 취소 + 웹 검색. 배포 전 백엔드는 없음. */
+  charged?: ChargedBreakdown;
   active_users: number;
   cost_per_user_usd: number;
   budget_used_usd: number;

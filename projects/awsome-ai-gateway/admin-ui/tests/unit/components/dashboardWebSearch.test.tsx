@@ -8,7 +8,7 @@
  *  B) 배포됨·검색 0          → 섹션(0 / $0.00) + 합산 카드(웹 검색 $0.00)
  *  C) 미배포·기록 비용 있음   → 섹션 + "현재 미배포" 배지 + 합산 카드
  *  D) 미배포·기록 비용 없음   → 섹션 없음, COST & BUDGET 4장은 기능 이전과 똑같이
- * 그리고 예산 사용률은 어느 경우에도 모델 비용만(웹 검색 무시).
+ * 예산 사용률은 백엔드 값 그대로(wave 3 이후 예산 원장은 웹 검색 포함 — DECISION 2).
  */
 
 import { render, screen, within } from '@testing-library/react';
@@ -87,6 +87,46 @@ async function cards(k: DashboardKPI | null) {
   };
 }
 
+describe('Total (charged) — wave 3 DECISION 1/2', () => {
+  it('성공 + 실패 + 취소 + 웹 검색 분해와 총액', async () => {
+    const k = kpi({});
+    k.charged = {
+      success_usd: 10, failed_usd: 1.5, cancelled_usd: 0.5, model_usd: 12,
+      web_search_usd: 0.672, total_usd: 12.672,
+    };
+    await cards(k);
+    const box = screen.getByTestId('charged-breakdown');
+    expect(within(box).getByText('Total (charged)')).toBeTruthy();
+    expect(within(box).getByTestId('charged-total').textContent).toBe('$12.67');
+    expect(within(screen.getByTestId('charged-success')).getByText('$10.00')).toBeTruthy();
+    expect(within(screen.getByTestId('charged-failed')).getByText('$1.50')).toBeTruthy();
+    expect(within(screen.getByTestId('charged-cancelled')).getByText('$0.50')).toBeTruthy();
+    expect(within(screen.getByTestId('charged-webSearch')).getByText('$0.67')).toBeTruthy();
+  });
+
+  it('웹 검색 미추적은 "Not tracked"($0 아님), 구 백엔드는 분해 없음', async () => {
+    const k = kpi({ cost_usd: null, untracked_queries: 3 });
+    k.charged = {
+      success_usd: 12, failed_usd: 0, cancelled_usd: 0, model_usd: 12,
+      web_search_usd: null, total_usd: 12,
+    };
+    await cards(k);
+    expect(within(screen.getByTestId('charged-webSearch')).getByText('Not tracked')).toBeTruthy();
+  });
+
+  it('구 백엔드(charged 없음) — 분해 블록을 그리지 않는다', async () => {
+    await cards(kpi({}));
+    expect(screen.queryByTestId('charged-breakdown')).toBeNull();
+  });
+
+  it('costBudgetView 는 charged.total_usd 를 Usage 값으로 쓴다', () => {
+    const k = kpi({});
+    k.charged = { success_usd: 9, failed_usd: 2, cancelled_usd: 1, model_usd: 12,
+                  web_search_usd: 0.5, total_usd: 12.5 };
+    expect(costBudgetView(k, '2026-11', NOW).usageCost).toBe(12.5);
+  });
+});
+
 describe('COST & BUDGET 줄 — 표시 규칙 4가지', () => {
   it('A) 배포됨·사용 있음 — 모델 + 웹 검색 합산, 부제 분해, 예산 사용률은 모델만', async () => {
     const c = await cards(kpi({}));
@@ -99,14 +139,14 @@ describe('COST & BUDGET 줄 — 표시 규칙 4가지', () => {
     expect(within(c.daily).getByText('$0.63')).toBeTruthy();
     expect(within(c.daily).getByText('Month-end projection $19.01 (linear estimate) · incl. web search')).toBeTruthy();
     expect(within(c.budget).getByText('50.0%')).toBeTruthy();
-    expect(within(c.budget).getByText('Model cost vs budget · web search excluded')).toBeTruthy();
+    expect(within(c.budget).getByText('Charged cost vs budget · incl. web search')).toBeTruthy();
   });
 
   it('B) 배포됨·검색 0 — 웹 검색 $0.00 로 합산 표기', async () => {
     const c = await cards(kpi({ queries: 0, cost_usd: 0 }));
     expect(within(c.usage).getByText('$12.00')).toBeTruthy();
     expect(within(c.usage).getByText('Model $12.00 · Web search $0.00 (all users)')).toBeTruthy();
-    expect(within(c.budget).getByText('Model cost vs budget · web search excluded')).toBeTruthy();
+    expect(within(c.budget).getByText('Charged cost vs budget · incl. web search')).toBeTruthy();
   });
 
   it('배포됨·비용 미추적(NULL) — $0.00 이 아니라 "Web search not tracked"', async () => {
@@ -115,8 +155,8 @@ describe('COST & BUDGET 줄 — 표시 규칙 4가지', () => {
     expect(within(c.usage).getByText('Model $12.00 · Web search not tracked (all users)')).toBeTruthy();
     expect(within(c.avg).getByText('Based on 4 active users this month · web search not tracked')).toBeTruthy();
     expect(within(c.daily).getByText('Month-end projection $18.00 (linear estimate) · web search not tracked')).toBeTruthy();
-    expect(within(c.budget).getByText('Model cost vs budget · web search excluded')).toBeTruthy();
-    expect(document.body.textContent).not.toMatch(/Web search \$0\.00|incl\. web search/);
+    expect(within(c.budget).getByText('Charged cost vs budget · incl. web search')).toBeTruthy();
+    expect(document.body.textContent).not.toMatch(/Web search \$0\.00|· incl\. web search \(|users this month · incl/);
   });
 
   it('C) 미배포·기록 비용 있음 — 합산 표기', async () => {

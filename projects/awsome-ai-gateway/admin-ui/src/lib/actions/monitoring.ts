@@ -41,6 +41,7 @@ export type MonitoringEventTypeFilter =
   | 'success'
   | 'error'
   | 'timeout'
+  | 'cancelled'
   | 'slow'
   | 'abnormal';
 

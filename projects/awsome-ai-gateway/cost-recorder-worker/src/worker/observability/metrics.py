@@ -80,6 +80,39 @@ class WorkerMetrics:
             unit="1",
         )
 
+        # wave 3 — 영구 오류로 usage_logs 에 못 쓴 행을 dead-letter 표(usage.cost_dead_letters)에
+        # 원본 그대로 남긴 수(B5). 0 이어야 정상 — 0 이 아니면 표를 보고 고쳐 다시 넣는다.
+        self.dead_lettered = self._meter.create_counter(
+            "cost_recorder_dead_letter_rows_total",
+            description="Cost rows stored in usage.cost_dead_letters (labels: reason)",
+            unit="1",
+        )
+        # dept_id 를 팀에서 해석한 행 수(B5) — VK 인증은 dept 를 모른다.
+        self.dept_resolved = self._meter.create_counter(
+            "cost_recorder_dept_resolved_total",
+            description="Rows whose dept_id was resolved from the team (labels: outcome)",
+            unit="1",
+        )
+        # 재가격(B7) — 단가가 생겨 비용을 채운 행 / 아직 단가가 없는 행.
+        self.repriced = self._meter.create_counter(
+            "cost_recorder_repriced_rows_total",
+            description="pricing_missing rows repriced (labels: outcome)",
+            unit="1",
+        )
+        # 비용 대조(B8) — 마지막 실행의 검사별 불일치 수 + 실행 결과.
+        self.reconciliation_runs = self._meter.create_counter(
+            "cost_recorder_reconciliation_runs_total",
+            description="Cost reconciliation runs (labels: status)",
+            unit="1",
+        )
+        self._reconciliation_callbacks: list[Callable] = []
+        self.reconciliation_mismatches = self._meter.create_observable_gauge(
+            "cost_recorder_reconciliation_mismatches",
+            callbacks=self._reconciliation_callbacks,
+            description="Mismatches found by the last reconciliation run (labels: check)",
+            unit="1",
+        )
+
         # 롤업 잡(시간/야간/기동) — 실행 시간·단위(날짜/시간/월) 실패·성공 수·마지막 성공 시각.
         # 마지막 성공 시각이 2시간 넘게 멈추면 admin-api 는 그 시간들을 raw 로 읽는다(느려짐).
         self.rollup_run_duration = self._meter.create_histogram(
@@ -128,6 +161,9 @@ class WorkerMetrics:
 
     def register_stream_pending_callback(self, callback: Callable) -> None:
         self._stream_pending_callbacks.append(callback)
+
+    def register_reconciliation_callback(self, callback: Callable) -> None:
+        self._reconciliation_callbacks.append(callback)
 
     def register_rollup_success_callback(self, callback: Callable) -> None:
         self._rollup_success_callbacks.append(callback)

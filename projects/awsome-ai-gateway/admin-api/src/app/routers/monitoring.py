@@ -116,7 +116,7 @@ async def monitoring_events(
     limit: int = Query(default=50, ge=PAGE_LIMIT_MIN, le=PAGE_LIMIT_MAX),
     event_type: str = Query(
         default="all",
-        pattern="^(all|success|error|timeout|slow|abnormal)$",
+        pattern="^(all|success|error|timeout|cancelled|slow|abnormal)$",
         description="all=전체, success=정상, error=에러, timeout=타임아웃, slow=첫 응답(TTFT) 3s 초과, abnormal=error+timeout+slow",
     ),
     # 조회 창(일). 0 = 기간 제한 없음 — 본문 로그 뷰어처럼 과거 요청을 찾는
@@ -168,6 +168,9 @@ async def monitoring_events(
         stmt = stmt.where(UsageLog.status == UsageStatus.ERROR)
     elif event_type == "timeout":
         stmt = stmt.where(UsageLog.status == UsageStatus.TIMEOUT)
+    elif event_type == "cancelled":
+        # 클라이언트가 끊은 스트림(migration 0062) — 장애가 아니라 abnormal 에는 넣지 않는다.
+        stmt = stmt.where(UsageLog.status == UsageStatus.CANCELLED)
     elif event_type == "slow":
         stmt = stmt.where(
             UsageLog.status == UsageStatus.SUCCESS,
@@ -191,6 +194,8 @@ async def monitoring_events(
             ev_type = "ERROR"
         elif row.status == UsageStatus.TIMEOUT:
             ev_type = "TIMEOUT"
+        elif row.status == UsageStatus.CANCELLED:
+            ev_type = "CANCELLED"
         elif (effective or 0) > slow_ms:
             ev_type = "SLOW_REQUEST"
         else:

@@ -327,7 +327,36 @@ def spawn_release_reservations(*, redis, state: dict, auth_context) -> None:
     t.add_done_callback(_BACKGROUND_TASKS.discard)
 
 
-def unsettled_reservation_guard(state: dict) -> "BackgroundTask":
+async def _start_and_close_unstarted(gen) -> None:
+    """첫 바이트 전에 끊겨 **한 번도 시작되지 않은** 스트림 제너레이터를 깨워 닫는다(B1).
+
+    spec<2.4 경로에서 첫 청크 전에 disconnect 가 오면 Starlette 는 제너레이터를 시작하지 않고
+    취소한다 — 미시작 async generator 는 본문도 finally 도 돌지 않아, 이미 열린 상류 스트림
+    (Bedrock 은 프롬프트를 받아 처리·청구 중)이 정산 없이 버려졌다(usage 행 없음). 한 청크를
+    읽게 한 뒤(상류 읽기는 ShieldedUpstream) aclose 로 GeneratorExit 을 넣으면 헬퍼의 disconnect
+    경로(CANCELLED + 백그라운드 드레인 → 최종 usage 로 정산)가 그대로 돈다.
+    """
+    import inspect
+
+    try:
+        if inspect.getasyncgenstate(gen) != inspect.AGEN_CREATED:
+            return
+    except Exception:
+        return
+    try:
+        async with asyncio.timeout(float(get_settings().stream_idle_timeout)):
+            await gen.__anext__()
+    except StopAsyncIteration:
+        return  # 끝까지 갔다 — 정상 종료 경로가 정산했다
+    except Exception:
+        logger.warning("unstarted_stream_wake_failed")
+    try:
+        await gen.aclose()
+    except Exception:
+        pass
+
+
+def unsettled_reservation_guard(state: dict, stream_gen=None) -> "BackgroundTask":
     """spec<2.4 경로 '미시작 제너레이터' disconnect 로 새는 예약의 안전망.
 
     Starlette 의 spec<2.4 경로는 ``listen_for_disconnect`` 로 끊김을 감지해
@@ -344,6 +373,9 @@ def unsettled_reservation_guard(state: dict) -> "BackgroundTask":
     """
 
     async def _guard() -> None:
+        if stream_gen is not None:
+            # 미시작 제너레이터(첫 바이트 전 끊김) — 깨워서 disconnect 드레인 정산을 태운다.
+            await _start_and_close_unstarted(stream_gen)
         # 막 _spawn 된 정산 태스크가 state 를 pop 할 한 틱을 준다 — release(0)
         # 가 먼저 가면 뒤의 settle(actual) 이 마커 부재로 no-op 되어 실제 비용
         # 만큼 카운터가 얇아진다.

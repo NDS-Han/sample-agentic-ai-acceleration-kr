@@ -199,9 +199,13 @@ def test_csv_web_search_section_is_separate_from_model_cost():
     assert rows[0] == ["period", "model", "display_name", "requests", "cost_usd"]
     assert rows[1][-1] == "1.5"  # 모델 비용 행은 그대로
     assert rows[2] == []
-    assert rows[3] == ["period", "web_search_queries", "web_search_cost_usd",
+    # Total (charged) 구획(wave 3) — 모델 분해 + 웹 검색 자기 줄.
+    assert rows[3] == ["period", "charged_success_usd", "charged_failed_usd",
+                       "charged_cancelled_usd", "charged_web_search_usd", "charged_total_usd"]
+    assert rows[5] == []
+    assert rows[6] == ["period", "web_search_queries", "web_search_cost_usd",
                        "web_search_untracked_queries"]
-    assert rows[4] == ["2026-11", "4", "0.028000", "0"]
+    assert rows[7] == ["2026-11", "4", "0.028000", "0"]
     # 추적 시작·무료분 문구는 내보내지 않는다.
     assert "tracking" not in text and "free" not in text
 

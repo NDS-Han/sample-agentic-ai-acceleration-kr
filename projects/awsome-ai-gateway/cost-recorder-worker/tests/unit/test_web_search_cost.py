@@ -1,10 +1,11 @@
 # Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
 
-"""usage_logs.web_search_cost_usd — 기록 시점 단가 스냅샷, 예산·한도와 완전 분리.
+"""usage_logs.web_search_cost_usd — 기록 시점 단가 스냅샷, 청구 총액의 일부(wave 3 DECISION 2).
 
   - 비용 = web_search_count × 단가/1000 (6자리), 0회 → 0 (NULL 아님 = 추적 중)
   - 단가는 system_settings 에서 TTL 캐시로 읽고, 바뀌면 그 뒤 기록분부터 적용
-  - budget_usages UPSERT·일별 카운터·임계 알림은 웹 검색 유무와 무관하게 동일
+  - budget_usages UPSERT 는 모델 비용 + 웹 검색 비용(게이트웨이 Redis 정산과 같은 값).
+    일별 카운터(usage:daily:*)·임계 알림 페이로드는 종전대로 모델 비용 기준
   - 추적 시작 표지는 처음 기록한 배치의 가장 이른 requested_at 으로 1회
 """
 from __future__ import annotations
@@ -183,27 +184,52 @@ async def _budget_side_effects(entries: list[CostStreamEntry]):
 
 
 @pytest.mark.asyncio
-async def test_budget_and_limits_identical_with_and_without_web_search():
-    """회귀 방지 — 웹 검색 비용은 budget_usages(사용자·팀·앱별)·일별 카운터·임계 알림
-    어디에도 들어가지 않는다. 같은 요청에 검색 횟수만 다르게 해도 결과가 같아야 한다."""
+async def test_daily_counters_and_alerts_unchanged_budget_includes_web_search():
+    """DECISION 2 — budget_usages 는 검색 비용만큼 늘고, 일별 카운터·임계 알림은 그대로다."""
     plain = [_entry("a"), _entry("b", cost="0.25"), _entry("c-t", cost="0.05", client="cowork")]
     searched = [_entry("a", ws=40), _entry("b", ws=1, cost="0.25"),
                 _entry("c-t", ws=999, cost="0.05", client="cowork")]
-    base = await _budget_side_effects(plain)
-    upserts, counters, published = base
-    # 공허한 통과 방지 — 비교 대상이 실제로 채워져 있어야 한다.
-    assert upserts and counters and published
-    assert await _budget_side_effects(searched) == base
+    base_upserts, base_counters, base_published = await _budget_side_effects(plain)
+    assert base_upserts and base_counters and base_published
+    upserts, counters, published = await _budget_side_effects(searched)
+    assert counters == base_counters and published == base_published
+    total = {(p["scope"], p["client"]): Decimal(p["cost"]) for b in upserts for p in b}
+    base = {(p["scope"], p["client"]): Decimal(p["cost"]) for b in base_upserts for p in b}
+    # 검색 1,040회 × $7/1000 = $7.28 이 총합·팀에 더해진다.
+    assert total[("USER", None)] - base[("USER", None)] == Decimal("7.280000")
+    assert total[("TEAM", None)] - base[("TEAM", None)] == Decimal("7.280000")
 
 
 @pytest.mark.asyncio
-async def test_budget_upsert_amounts_are_model_cost_only():
+async def test_budget_upsert_amounts_are_model_plus_web_search():
     rec = _Recorder()
     flusher, _ = _flusher(rec, _FixedPricing("7.00"))
     await flusher.flush([_entry("x", ws=100, cost="0.40")])  # 검색비 $0.70
     amounts = {(p["scope"], p["client"]): p["cost"] for batch in rec.upserts for p in batch}
-    assert amounts == {("USER", None): "0.40", ("TEAM", None): "0.40",
-                       ("USER", "claude-code"): "0.40"}
+    assert amounts == {("USER", None): "1.100000", ("TEAM", None): "1.100000",
+                       ("USER", "claude-code"): "1.100000"}
+
+
+@pytest.mark.asyncio
+async def test_gateway_supplied_web_search_cost_wins_over_worker_price():
+    """게이트웨이가 Redis 정산에 쓴 값을 그대로 쓴다 — 워커 단가가 달라도 두 원장이 같은 숫자."""
+    rec = _Recorder()
+    flusher, _ = _flusher(rec, _FixedPricing("9.00"))
+    e = _entry("g", ws=10, cost="0.40")
+    e.web_search_cost_usd = Decimal("0.070000")
+    await flusher.flush([e])
+    assert rec.inserts[0]["web_search_cost_usd"] == "0.070000"
+    amounts = {(p["scope"], p["client"]): p["cost"] for batch in rec.upserts for p in batch}
+    assert amounts[("USER", None)] == "0.470000"
+
+
+@pytest.mark.asyncio
+async def test_search_only_row_with_zero_tokens_is_budgeted():
+    rec = _Recorder()
+    flusher, _ = _flusher(rec, _FixedPricing("7.00"))
+    await flusher.flush([_entry("z", ws=2, cost="0")])
+    amounts = {(p["scope"], p["client"]): p["cost"] for batch in rec.upserts for p in batch}
+    assert amounts[("USER", None)] == "0.014000"
 
 
 # ── 단가 공급자: TTL 스냅샷, 실패 폴백, 표지 1회 ────────────────────────────────────

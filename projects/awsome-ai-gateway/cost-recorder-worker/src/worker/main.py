@@ -28,7 +28,10 @@ from worker.config import get_settings
 from worker.daily_aggregator import run_daily_aggregation, run_hourly_rollup, run_startup_backfill
 from worker.db import create_aggregator_engine, create_db_engine, create_session_factory
 from worker.observability import WorkerMetrics, init_otel, shutdown_otel
+from worker.reconciliation import LAST as RECON_LAST
+from worker.reconciliation import run_reconciliation
 from worker.redis_client import create_redis_client
+from worker.repricer import run_reprice
 from worker.stream_consumer import StreamConsumer
 from worker.web_search_pricing import WebSearchPricing
 from worker.worker import TaskSupervisor
@@ -112,6 +115,9 @@ async def main() -> None:
         lambda _opts: [Observation(consumer.last_pending)]
     )
     daily_aggregator.set_metrics(metrics)
+    metrics.register_reconciliation_callback(
+        lambda _opts: [Observation(v, {"check": k}) for k, v in RECON_LAST.items()]
+    )
     metrics.register_rollup_success_callback(
         lambda _opts: [
             Observation(ts, {"job": job})
@@ -144,6 +150,21 @@ async def main() -> None:
             misfire_grace_time=1800,
             max_instances=1,
             coalesce=True,
+        )
+    # wave 3 — 단가 누락 행 재가격(B7)과 야간 비용 대조(B8, 리포팅 tz 01:00, 자기 락 727_002).
+    if settings.reprice_interval_sec > 0:
+        scheduler.add_job(
+            run_reprice, "interval", seconds=settings.reprice_interval_sec,
+            id="reprice_pricing_missing", args=[session_factory, redis, metrics],
+            replace_existing=True, max_instances=1, coalesce=True,
+        )
+    if settings.reconciliation_enabled:
+        scheduler.add_job(
+            run_reconciliation,
+            CronTrigger.from_crontab(settings.reconciliation_cron,
+                                     timezone=settings.reporting_timezone),
+            id="cost_reconciliation", args=[agg_session_factory, redis, metrics],
+            replace_existing=True, misfire_grace_time=3600, max_instances=1, coalesce=True,
         )
     scheduler.start()
     # Backfill은 비차단으로 이벤트 루프에 스케줄 — startup 블로킹 금지.

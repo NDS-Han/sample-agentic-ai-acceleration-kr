@@ -96,6 +96,14 @@ class GatewayMetrics:
             unit="1",
         )
 
+        # 단가 행 없이 $0 으로 계산된 토큰 사용 요청(wave 3 B7) — 행은 pricing_missing=true 로
+        # 기록되고 워커 재가격 잡이 단가가 생기면 채운다. 0 이 아니면 단가 등록 누락 → 알람.
+        self.pricing_missing_total: Counter = meter.create_counter(
+            "gateway_pricing_missing_total",
+            description="Requests billed $0: model has no pricing row (labels: model)",
+            unit="1",
+        )
+
         # Downgrade (FR-3.6)
         self.downgrade_applied_total: Counter = meter.create_counter(
             "gateway_downgrade_applied_total",

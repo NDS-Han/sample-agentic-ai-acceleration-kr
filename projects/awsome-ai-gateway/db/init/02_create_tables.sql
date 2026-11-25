@@ -210,7 +210,8 @@ CREATE TABLE IF NOT EXISTS budget.budget_usages (
     scope_id                UUID                NOT NULL,
     period                  VARCHAR(7)          NOT NULL,  -- YYYY-MM
     client                  VARCHAR(32)         NULL,
-    used_usd                NUMERIC(12,4)       NOT NULL DEFAULT 0,
+    -- NUMERIC(16,6)(0062) — 행 비용(NUMERIC(10,6))과 같은 소수 6자리. 4자리면 배치 합산마다 반올림 드리프트.
+    used_usd                NUMERIC(16,6)       NOT NULL DEFAULT 0,
     limit_usd               NUMERIC(12,4)       NOT NULL,
     last_updated            TIMESTAMPTZ         NOT NULL DEFAULT now(),
     threshold_notified_pcts INTEGER[]           NOT NULL DEFAULT '{}',
@@ -543,7 +544,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_web_search_policies_scope
 -- usage schema — Enums
 -- ============================================================
 
-DO $$ BEGIN CREATE TYPE usage.usage_status AS ENUM ('SUCCESS', 'ERROR', 'TIMEOUT'); EXCEPTION WHEN duplicate_object THEN null; END $$;
+-- CANCELLED(0062): 클라이언트가 끊은 스트림 — 업스트림이 처리한 토큰은 청구 대상(행은 남는다).
+-- 기존 설치본은 alembic 0062 가 ADD VALUE 로 수렴시킨다(트랜잭션 밖 실행).
+DO $$ BEGIN CREATE TYPE usage.usage_status AS ENUM ('SUCCESS', 'ERROR', 'TIMEOUT', 'CANCELLED'); EXCEPTION WHEN duplicate_object THEN null; END $$;
 DO $$ BEGIN CREATE TYPE usage.roi_scope    AS ENUM ('USER', 'TEAM', 'DEPT', 'GLOBAL'); EXCEPTION WHEN duplicate_object THEN null; END $$;
 
 -- ============================================================
@@ -596,7 +599,10 @@ CREATE TABLE IF NOT EXISTS usage.usage_logs (
     -- 요청을 인증한 VK 의 prefix (raw[:11]) — 키 단위 사용량 귀속 (migration 0051)
     key_prefix             VARCHAR(16),
     -- 클라이언트 대화 세션 키 — 본문-로그 세션 뷰어의 정확한 그룹핑 (migration 0054)
-    session_id             VARCHAR(128)
+    session_id             VARCHAR(128),
+    -- 단가 행이 없어 cost_usd=0 으로 기록된 행 (migration 0062, B7). 워커 재가격 잡이 단가가
+    -- 생기면 비용을 채우고 false 로 내린다. 토큰이 있으면 청구 대상(billable)이다.
+    pricing_missing        BOOLEAN       NOT NULL DEFAULT false
 );
 
 CREATE INDEX IF NOT EXISTS idx_usage_logs_user_time   ON usage.usage_logs (user_id, requested_at DESC);
@@ -1365,7 +1371,8 @@ BEGIN
             ('sso_subject',                 'VARCHAR(512)'),
             ('bedrock_request_id',          'VARCHAR(128)'),
             ('key_prefix',                  'VARCHAR(16)'),
-            ('session_id',                  'VARCHAR(128)')
+            ('session_id',                  'VARCHAR(128)'),
+            ('pricing_missing',             'BOOLEAN NOT NULL DEFAULT false')
         ) AS v(name, def)
     LOOP
         BEGIN
@@ -1387,6 +1394,52 @@ CREATE INDEX IF NOT EXISTS idx_usage_logs_session
     ON usage.usage_logs (session_id, requested_at) WHERE session_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_usage_logs_bedrock_req
     ON usage.usage_logs (bedrock_request_id);
+
+-- migration 0062: 단가 누락 행 부분 인덱스(재가격 잡). ⚠️ 행이 있는 설치본에서는 만들지 않는다 —
+-- 일반 CREATE INDEX 는 빌드 내내 usage_logs 쓰기를 막는다. 그 경우 alembic 0062 가
+-- CREATE INDEX CONCURRENTLY 로 같은 이름을 만든다. 빈 테이블(fresh-init)은 즉시 끝난다.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM usage.usage_logs LIMIT 1) THEN
+        CREATE INDEX IF NOT EXISTS idx_usage_logs_pricing_missing
+            ON usage.usage_logs (requested_at) WHERE pricing_missing;
+    END IF;
+END $$;
+
+-- migration 0062: 워커가 영구 오류(class 22/23)로 기록하지 못한 비용 행의 원본 페이로드.
+-- 예전에는 ACK 후 버렸다(B5). replayed_at 은 운영자가 고쳐서 다시 넣은 시각.
+CREATE TABLE IF NOT EXISTS usage.cost_dead_letters (
+    id           UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+    request_id   VARCHAR(128),
+    stream_id    VARCHAR(64),
+    reason       VARCHAR(32)  NOT NULL,
+    sqlstate     VARCHAR(5),
+    error        TEXT,
+    payload      TEXT         NOT NULL,
+    created_at   TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    replayed_at  TIMESTAMPTZ
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_cost_dead_letters_request
+    ON usage.cost_dead_letters (request_id) WHERE request_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_cost_dead_letters_open
+    ON usage.cost_dead_letters (created_at) WHERE replayed_at IS NULL;
+
+-- migration 0062: 야간 비용 대조(B8) 결과 — raw vs 롤업 vs 월 누적 vs budget_usages,
+-- Redis 예산 카운터 vs DB, $0-with-tokens, 추정 행 비율. checks 는 검사별 {mismatches, …}.
+CREATE TABLE IF NOT EXISTS usage.reconciliation_runs (
+    id              UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+    started_at      TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    finished_at     TIMESTAMPTZ,
+    report_date     DATE         NOT NULL,
+    period          VARCHAR(7)   NOT NULL,
+    tz              VARCHAR(64)  NOT NULL,
+    status          VARCHAR(16)  NOT NULL,
+    mismatch_count  INTEGER      NOT NULL DEFAULT 0,
+    checks          JSONB        NOT NULL DEFAULT '{}'::jsonb,
+    error           TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_reconciliation_runs_started
+    ON usage.reconciliation_runs (started_at DESC);
 
 -- migration 0045: (dept_id,name)/(org_id,name) 유니크 — check-then-act 경합으로
 -- 중복 행이 생기면 get_team_by_dept_and_name LIMIT 1 이 비결정이 된다.

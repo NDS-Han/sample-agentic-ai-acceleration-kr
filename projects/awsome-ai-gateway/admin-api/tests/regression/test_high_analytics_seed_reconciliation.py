@@ -303,7 +303,8 @@ async def test_date_param_scopes_the_plain_user(session):
 
 
 async def test_seed_appears_and_is_exposed_separately(session):
-    """월 전체: 실사용 SUCCESS $7 + seed $100 = $107.
+    """월 전체: 청구 대상 실사용 $16(성공 $7 + 토큰이 처리된 실패 $9, wave 3 DECISION 1)
+    + seed $100 = $116 — 예산 원장(budget_usages)과 같은 숫자다.
 
     seed 는 `116 − 16`(전-status 월 실사용)으로 역산된다. SUCCESS 만으로 뺐다면
     `116 − 7 = 109` 가 되어 실패 요청의 $9 만큼 과대계상된다.
@@ -313,20 +314,20 @@ async def test_seed_appears_and_is_exposed_separately(session):
     assert it.seeded_usd == Decimal("100.00"), (
         f"seed 역산이 틀렸다: {it.seeded_usd} (전-status 로 빼야 100)"
     )
-    assert it.cost_usd == Decimal("107.00")
+    assert it.cost_usd == Decimal("116.00")
 
 
 async def test_cost_usd_honours_date_even_with_a_seed(session):
     """여기가 `max(actual, month_total)` 형태가 틀리는 지점이다.
 
-    5/10 까지면 실사용 SUCCESS 는 $3 뿐이다. seed 는 월 상수이므로 그대로 더해져
-    $103 이 되어야 한다. `max` 형태였다면 월 총액 $116 이 이겨서, calls=1(일자 범위)
-    인데 cost_usd 는 월 전체를 말하는 응답이 된다.
+    5/10 까지면 청구 대상 실사용은 $3(5/03) + $9(5/05 ERROR, 토큰 처리됨) = $12 다. seed 는
+    월 상수이므로 그대로 더해져 $112 가 되어야 한다. `max` 형태였다면 월 총액 $116 이 이겨서,
+    calls=2(일자 범위)인데 cost_usd 는 월 전체를 말하는 응답이 된다.
     """
     items = await _by_user(session, date="2026-05-10")
     it = items[str(U_SEEDED)]
-    assert it.calls == 1, "일자 범위가 안 걸렸다 — 이 테스트의 전제가 깨졌다"
-    assert it.cost_usd == Decimal("103.00"), (
+    assert it.calls == 2, "일자 범위가 안 걸렸다 — 이 테스트의 전제가 깨졌다"
+    assert it.cost_usd == Decimal("112.00"), (
         f"date 가 무시됐다: {it.cost_usd} (월 총액 116 이 이겼다면 max 형태다)"
     )
     assert it.seeded_usd == Decimal("100.00")
@@ -340,8 +341,8 @@ async def test_model_breakdown_is_not_inflated_by_the_seed(session):
     resp = await _user_models(session)
     mine = [r for r in resp["rows"] if r["user_id"] == str(U_SEEDED)]
     assert mine, "사용자 × 모델 표에 해당 사용자가 없다"
-    assert Decimal(str(mine[0]["total"]["cost_usd"])) == Decimal("7.00"), (
-        "모델 단위 합이 실사용($7)을 넘었다 — seed 가 새어 들어갔다"
+    assert Decimal(str(mine[0]["total"]["cost_usd"])) == Decimal("16.00"), (
+        "모델 단위 합이 청구 대상 실사용($16)과 다르다 — seed 가 새거나 실패 청구분이 빠졌다"
     )
     assert str(U_SEED_ONLY) not in {r["user_id"] for r in resp["rows"]}
 
@@ -378,7 +379,7 @@ async def test_items_are_sorted_by_total_cost_descending(session):
     """seed 를 더한 뒤 재정렬되는가 — SQL 의 ORDER BY 는 실사용 기준이다.
 
     실사용만 보면 U_SEEDED($7) > U_PLAIN($3) > U_SEED_ONLY($0) 지만, 총액으로는
-    U_SEEDED($107) > U_SEED_ONLY($50) > U_PLAIN($3) 이다.
+    U_SEEDED($116) > U_SEED_ONLY($50) > U_PLAIN($3) 이다.
     """
     from app.services.analytics_service import AnalyticsService
 
@@ -498,7 +499,7 @@ async def test_analytics_chart_includes_the_seed(session):
     by_email = await _analytics_by_user(session, _admin_actor())
     assert "seeded@example.com" in by_email, "차트에 해당 사용자가 없다"
     # 월 SUCCESS $7 + seed $100
-    assert by_email["seeded@example.com"].cost_usd == Decimal("107.00")
+    assert by_email["seeded@example.com"].cost_usd == Decimal("116.00")  # 청구 대상 $16 + seed $100 (wave 3)
 
 
 async def test_analytics_chart_keeps_plain_users_untouched(session):

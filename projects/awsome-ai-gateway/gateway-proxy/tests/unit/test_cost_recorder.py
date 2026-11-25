@@ -62,9 +62,9 @@ async def test_finalize_publishes_to_stream(
     args, kwargs = mock_redis.xadd.call_args
     assert args[0] == COST_STREAM_KEY
     assert "payload" in args[1]
-    # MAXLEN approx trim — 메모리 백스톱(실제 정리는 워커의 XTRIM MINID)
-    assert kwargs.get("maxlen") == 500_000
-    assert kwargs.get("approximate") is True
+    # MAXLEN 없음(wave 3 B4) — 미소비 entry 를 자르면 청구 기록이 유실된다.
+    # 크기 제어는 워커의 XTRIM MINID(소비된 것만)가 한다.
+    assert "maxlen" not in kwargs and "approximate" not in kwargs
 
 
 @pytest.mark.asyncio

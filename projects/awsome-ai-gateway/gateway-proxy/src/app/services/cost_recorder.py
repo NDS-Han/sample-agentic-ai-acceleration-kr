@@ -22,14 +22,16 @@ COST_PRECISION = Decimal("0.000001")
 
 # Redis Stream key for cost-recorder-worker offload. Worker XREADGROUP에서 소비.
 COST_STREAM_KEY = "cost:stream"
-# MAXLEN approx trim — **메모리 백스톱 전용**. 미소비 entry 도 잘라 청구 기록을
-# 영구 유실시키므로 크게 둔다(500 RPS 기준 수십 분). 실제 크기 제어는 워커가
-# ACK 후 `XTRIM MINID <미처리 최솟값>` 로 한다 — 미소비 entry 는 절대 안 잘린다.
-COST_STREAM_MAXLEN = 500_000
+# ⚠️ XADD 에 MAXLEN 을 두지 않는다(wave 3 B4). 예전의 `MAXLEN ~500_000` 백스톱은
+# **미소비** entry 도 잘랐다 — 300 rps 에서 워커가 ~27분 멈추면 그 구간의 청구 기록이
+# 영구 유실됐다. 크기 제어는 워커가 ACK 후 `XTRIM MINID min(미처리 최솟값,
+# last-delivered-id)` 로만 한다(stream_consumer._trim_consumed) — 소비된 것만 잘린다.
+# 워커 장기 정지 시 스트림은 자란다(entry ≈ 0.5 KB) — lag 게이지/알람이 그 신호다.
 
 # usage.usage_status enum 값 — 이 집합 밖의 값은 DB INSERT 시 enum 캐스트 오류로
 # 배치 전체가 poison retry 루프에 빠지므로, 발행 전에 여기서 정규화한다.
-_VALID_USAGE_STATUSES = frozenset({"SUCCESS", "ERROR", "TIMEOUT"})
+# CANCELLED(migration 0062) = 클라이언트가 끊은 스트림 — 업스트림이 처리한 토큰은 청구된다.
+_VALID_USAGE_STATUSES = frozenset({"SUCCESS", "ERROR", "TIMEOUT", "CANCELLED"})
 
 
 # ── 예산 차감 내구성 ──────────────────────────────────────────────────────────
@@ -353,6 +355,14 @@ class CostRecorder:
                 }
             )
 
+        # 웹 검색 비용(DECISION 2) — 청구 총액의 일부. 단가는 프로세스 캐시(DB 를 기다리지
+        # 않는다). 이 값 하나를 Redis 예산 정산과 cost:stream 페이로드에 같이 싣는다.
+        from app.services.web_search_price import PRICE as _WS_PRICE
+        from app.services.web_search_price import web_search_cost
+
+        ws_count = int(usage.web_search_count or 0)
+        ws_cost = web_search_cost(ws_count, _WS_PRICE.current()) if ws_count else Decimal("0")
+
         # KI-08: usage 없는 disconnect 경로 — 예약을 **전부** 되돌린다.
         #
         # ⚠️ 오랫동안 여기서 TPM 만 해제했다. 비용(CPM/CPH) 예약은 그대로 남아, 응답을
@@ -363,12 +373,14 @@ class CostRecorder:
         # 캐시 토큰도 확인 — Converse 는 total 에 캐시를 안 넣고, 프로바이더가
         # input=0·output=0+cache_read>0 으로 보고하면 전액 환불해 캐시읽기 비용이
         # 증발한다(R22 r1 N5).
+        # 웹 검색이 실행됐으면(검색 비용 > 0) 토큰이 0 이어도 청구 대상이다 — 이 분기로 오지 않는다.
         if (
             usage.total_tokens == 0
             and usage.input_tokens == 0
             and usage.output_tokens == 0
             and getattr(usage, "cache_read_input_tokens", 0) == 0
             and getattr(usage, "cache_creation_input_tokens", 0) == 0
+            and ws_count == 0
         ):
             if rate_limit_state and redis is not None:
                 from app.services.rate_limit_service import RateLimitService
@@ -467,6 +479,20 @@ class CostRecorder:
                 model=model_config.alias,
             )
             cost_usd = Decimal("0")
+        # B7 — 단가 행이 없는 모델의 토큰 사용: $0 으로 기록하되 행에 표시하고 지표를 올린다.
+        pricing_missing = bool(getattr(model_config.pricing, "pricing_missing", False)) and bool(
+            usage.input_tokens or usage.output_tokens
+            or usage.cache_read_input_tokens or usage.cache_creation_input_tokens
+        )
+        if pricing_missing:
+            logger.warning("usage_pricing_missing", model=model_config.alias,
+                           request_id=request_id)
+            if self._metrics is not None and hasattr(self._metrics, "pricing_missing_total"):
+                self._metrics.pricing_missing_total.add(
+                    1, {"model": model_config.alias or model_config.provider_model_id})
+        # 예산(월 한도) 정산액 = 모델 토큰 비용 + 웹 검색 비용(DECISION 2). CPM/CPH(분·시간
+        # 비용 한도)는 토큰 비용만 본다 — 아래 2번 settle_cost 는 cost_usd 그대로.
+        charge = cost_usd + ws_cost
         # KST 월 — 아래 budget:*:{period} 키를 **쓰는** 쪽이다. 읽는 쪽
         # (middleware/budget.py, routers/usage.py)과 반드시 같은 경계여야 한다.
         # D-20/§6-4: **요청 시작 시각**의 월 — 완료 시각으로 잡으면 월 경계를
@@ -585,7 +611,7 @@ class CostRecorder:
                             redis.eval,
                             settle_script,
                             *settle_eval_args(resv),
-                            str(cost_usd), resv.get("fallback") or "",
+                            str(charge), resv.get("fallback") or "",
                             resv.get("idx_field") or "",
                             resv.get("reserved") or "",
                             str(resv.get("marker_ttl") or ""),
@@ -603,7 +629,7 @@ class CostRecorder:
                             user_usage_key,
                             user_config_key,
                             f"{user_usage_key}:ded:{request_id}",
-                            str(cost_usd),
+                            str(charge),
                             user_fallback,
                             idempotent=True,
                         )
@@ -628,14 +654,14 @@ class CostRecorder:
                 resv = budget_reservation.get("user")
                 await _mark_budget_lost(
                     redis, user_usage_key, suspects=self._suspects, scope="user",
-                    amount=cost_usd,
+                    amount=charge,
                     dedup_key=(
                         _settled_tombstone((resv or {}).get("marker_key") or "")
                         if resv else f"{user_usage_key}:ded:{request_id}"
                     ),
                     # settle 경로: 툼스톤 값이 우리 실비와 같아야 착륙 —
                     # 경쟁 환불 settle(0) 의 "0" 은 착륙이 아니다.
-                    expect_value=str(cost_usd) if resv else None,
+                    expect_value=str(charge) if resv else None,
                 )
 
             # 팀 예산 차감. ⚠️ 이 결과의 threshold_triggered 를 이전엔 버렸다 —
@@ -655,7 +681,7 @@ class CostRecorder:
                                 redis.eval,
                                 settle_script,
                                 *settle_eval_args(resv),
-                                str(cost_usd), resv.get("fallback") or "",
+                                str(charge), resv.get("fallback") or "",
                                 resv.get("idx_field") or "",
                                 resv.get("reserved") or "",
                                 str(resv.get("marker_ttl") or ""),
@@ -670,7 +696,7 @@ class CostRecorder:
                                 team_usage_key,
                                 team_config_key,
                                 f"{team_usage_key}:ded:{request_id}",
-                                str(cost_usd),
+                                str(charge),
                                 idempotent=True,
                             )
                     team_result = json.loads(team_raw)
@@ -693,13 +719,13 @@ class CostRecorder:
                     resv = budget_reservation.get("team")
                     await _mark_budget_lost(
                         redis, team_usage_key, suspects=self._suspects, scope="team",
-                        amount=cost_usd,
+                        amount=charge,
                         dedup_key=(
                             _settled_tombstone((resv or {}).get("marker_key") or "")
                             if resv else
                             f"{team_usage_key}:ded:{request_id}"
                         ),
-                        expect_value=str(cost_usd) if resv else None,
+                        expect_value=str(charge) if resv else None,
                     )
 
             # 앱(client) 예산 차감.
@@ -742,7 +768,7 @@ class CostRecorder:
                                     redis.eval,
                                     settle_script,
                                     *settle_eval_args(resv),
-                                    str(cost_usd), resv.get("fallback") or "",
+                                    str(charge), resv.get("fallback") or "",
                                     resv.get("idx_field") or "",
                                     resv.get("reserved") or "",
                                     str(resv.get("marker_ttl") or ""),
@@ -766,7 +792,7 @@ class CostRecorder:
                                 LuaScriptLoader.get("budget_deduct"),
                                 3, client_usage_key, client_config_key,
                                 f"{client_usage_key}:ded:{request_id}",
-                                str(cost_usd),
+                                str(charge),
                                 idempotent=True,
                             )
                 except Exception:
@@ -774,13 +800,13 @@ class CostRecorder:
                     resv = budget_reservation.get("client")
                     await _mark_budget_lost(
                         redis, client_usage_key, suspects=self._suspects, scope="client",
-                        amount=cost_usd,
+                        amount=charge,
                         dedup_key=(
                             _settled_tombstone((resv or {}).get("marker_key") or "")
                             if resv else
                             f"{client_usage_key}:ded:{request_id}"
                         ),
-                        expect_value=str(cost_usd) if resv else None,
+                        expect_value=str(charge) if resv else None,
                     )
 
         # 2. CPM/CPH 정산 (USER+TEAM 2 스코프, FR-4.6)
@@ -887,6 +913,8 @@ class CostRecorder:
             is_stream=is_stream,
             duration_ms=duration_ms,
             ttft_ms=ttft_ms,
+            web_search_cost_usd=ws_cost,
+            pricing_missing=pricing_missing,
             threshold_triggered=threshold_triggered,
             threshold_scope=threshold_scope if threshold_triggered is not None else None,
             downgraded_from=downgraded_from,
@@ -919,6 +947,8 @@ class CostRecorder:
         client: str | None = None,
         status: str = "SUCCESS",
         session_id: str | None = None,
+        web_search_cost_usd: Decimal | None = None,
+        pricing_missing: bool = False,
     ) -> None:
         """XADD cost:stream — worker가 배치 소비하여 DB 쓰기 + threshold pub/sub.
 
@@ -959,6 +989,10 @@ class CostRecorder:
             cache_read_tokens=usage.cache_read_input_tokens,
             reasoning_tokens=usage.reasoning_tokens,
             web_search_count=usage.web_search_count,
+            # None 이면 워커가 자기 단가로 계산한다(0 토큰 실패 마커 행 등 — 검색 0회면 0).
+            web_search_cost_usd=(web_search_cost_usd if web_search_cost_usd is not None
+                                 else (Decimal("0") if not usage.web_search_count else None)),
+            pricing_missing=pricing_missing,
             cost_usd=cost_usd,
             latency_ms=duration_ms,
             ttft_ms=ttft_ms,
@@ -1001,6 +1035,7 @@ class CostRecorder:
                 "cost_usd", "latency_ms", "ttft_ms",
             ):
                 degraded[k] = 0
+            degraded["web_search_cost_usd"] = None
             degraded["threshold_triggered"] = None
             degraded["context_tier"] = None
             entry = CostStreamEntry.make(**degraded)
@@ -1008,12 +1043,8 @@ class CostRecorder:
         published = False
         if redis is not None:
             try:
-                await redis.xadd(
-                    COST_STREAM_KEY,
-                    {"payload": payload_json},
-                    maxlen=COST_STREAM_MAXLEN,
-                    approximate=True,
-                )
+                # MAXLEN 없음 — 위 COST_STREAM_KEY 주석(B4).
+                await redis.xadd(COST_STREAM_KEY, {"payload": payload_json})
                 published = True
             except Exception:
                 logger.exception(

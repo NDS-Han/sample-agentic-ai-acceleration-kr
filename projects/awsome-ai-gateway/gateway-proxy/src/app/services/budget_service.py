@@ -793,7 +793,10 @@ class BudgetService:
                         # to_char(timezone(...)) 비교는 같은 월 경계지만 인덱스를 못 타서
                         # 핫패스 데드라인(hot_db_timeout_sec) 안에 끝나지 않는다(1c).
                         _start, _end = _period_bounds(period)
-                        stmt2 = select(func.coalesce(func.sum(UsageRecord.cost_usd), 0)).where(
+                        # 청구 총액 = 모델 + 웹 검색(DECISION 2) — budget_usages 와 같은 값.
+                        stmt2 = select(func.coalesce(func.sum(
+                            UsageRecord.cost_usd
+                            + func.coalesce(UsageRecord.web_search_cost_usd, 0)), 0)).where(
                             UsageRecord.user_id == user_id,
                             UsageRecord.requested_at >= _start,
                             UsageRecord.requested_at < _end,
@@ -932,7 +935,9 @@ class BudgetService:
                         _start, _end = _period_bounds(period)
                         return (
                             await db.execute(
-                                _s(_f.coalesce(_f.sum(UsageRecord.cost_usd), 0)).where(
+                                _s(_f.coalesce(_f.sum(
+                                    UsageRecord.cost_usd
+                                    + _f.coalesce(UsageRecord.web_search_cost_usd, 0)), 0)).where(
                                     UsageRecord.team_id == team_id,
                                     UsageRecord.requested_at >= _start,
                                     UsageRecord.requested_at < _end,

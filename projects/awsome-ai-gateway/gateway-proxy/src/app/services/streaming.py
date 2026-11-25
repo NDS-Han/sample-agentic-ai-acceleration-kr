@@ -47,6 +47,33 @@ def _spawn(coro) -> asyncio.Task:
     return t
 
 
+async def settle_shielded(coro, outcome: dict | None = None):
+    """정산 코루틴을 호출자 취소와 무관하게 끝까지 돌린다(wave 3 B1).
+
+    ⚠️ 왜 필요한가(proof 실측: /v1/messages 스트림 3건 행 유실). 상류가 끝난 뒤의 정산
+       (토크나이저 역산 → finalize)은 응답 태스크 안에서 await 된다. 그 사이 클라이언트가 끊으면
+       Starlette 가 태스크를 취소해 finalize 가 중간에 죽는다 — usage_fired 는 이미 서 있어
+       누구도 다시 정산하지 않고, usage_logs 행도 예산 차감도 없었다.
+
+    별도 태스크(_spawn — 강한 참조, 종료 시 drain_pending_tasks 가 기다린다)로 돌리고 shield 로
+    기다린다. 호출자가 취소돼도 정산은 계속된다. 그동안 ``outcome["drain_pending"]`` 을 세워
+    unsettled_reservation_guard 가 예약을 먼저 release(0) 하지 않게 한다(이미 서 있으면 드레인이
+    소유자다 — 건드리지 않는다).
+    """
+    owner = outcome is not None and not outcome.get("drain_pending")
+    if owner:
+        outcome["drain_pending"] = True
+
+    async def _run():
+        try:
+            return await coro
+        finally:
+            if owner:
+                outcome.pop("drain_pending", None)
+
+    return await asyncio.shield(_spawn(_run()))
+
+
 async def drain_pending_tasks(timeout: float) -> int:
     """아직 안 끝난 백그라운드 태스크(스트림 드레인)를 timeout 안에서 기다린다.
     shutdown 순서상 Redis/httpx 를 닫기 **전에** 호출해야 한다."""
@@ -63,32 +90,145 @@ async def drain_pending_tasks(timeout: float) -> int:
 
 
 def usage_status_of(outcome: dict | None, http_status: int | None = None) -> str:
-    """``usage_logs.status`` (SUCCESS/ERROR/TIMEOUT) 산출 — 라우터가 finalize 에 넘긴다.
+    """``usage_logs.status`` (SUCCESS/ERROR/TIMEOUT/CANCELLED) 산출 — 라우터가 finalize 에 넘긴다.
 
-    스트림 헬퍼가 ``outcome`` dict 에 자기 종결 경로("success"|"error"|"timeout")를
-    기록하고, 라우터는 그것과 자기가 아는 상류 HTTP 상태를 합성한다. outcome 의
-    실패 판정이 우선하고, 없으면 HTTP 상태로 판정한다(비-2xx 오류 제너레이터는
-    헬퍼에게 정상 종료로 보이므로 라우터 쪽 상태가 필요).
+    스트림 헬퍼가 ``outcome`` dict 에 자기 종결 경로("success"|"error"|"timeout"|
+    "cancelled")를 기록하고, 라우터는 그것과 자기가 아는 상류 HTTP 상태를 합성한다.
+    outcome 의 실패 판정이 우선하고, 없으면 HTTP 상태로 판정한다(비-2xx 오류
+    제너레이터는 헬퍼에게 정상 종료로 보이므로 라우터 쪽 상태가 필요).
 
-    클라이언트 끊김(disconnect drain)은 outcome 이 "success" 로 남는다 — 과금된
-    토큰은 정상 전달된 것이고 끊긴 것은 게이트웨이/상류 실패가 아니다.
+    클라이언트 끊김(disconnect drain)은 "cancelled" → CANCELLED (wave 3, migration 0062).
+    예전에는 SUCCESS 로 남아 끊긴 스트림이 정상 완료와 구분되지 않았다(dev 스모크 실측).
+    업스트림이 처리한 토큰은 그대로 청구 대상이다 — 상태는 결과를, 비용은 청구를 말한다.
     """
     o = (outcome or {}).get("status")
     if o == "timeout" or http_status in (408, 504):
         return "TIMEOUT"
     if o == "error" or (http_status is not None and http_status >= 400):
         return "ERROR"
+    if o == "cancelled":
+        return "CANCELLED"
     return "SUCCESS"
 
 
 def mark_outcome(outcome: dict | None, status: str) -> None:
     """스트림 종결 경로를 outcome dict 에 기록한다(None 이면 no-op).
 
-    값은 "success"|"error"|"timeout" 소문자 — usage_status_of 가 usage_logs 용
-    대문자 enum 으로 옮긴다.
+    값은 "success"|"error"|"timeout"|"cancelled" 소문자 — usage_status_of 가
+    usage_logs 용 대문자 enum 으로 옮긴다.
+
+    "cancelled" 는 덮어쓰지 않는다 — 클라이언트가 먼저 끊었으면 그 뒤 드레인이 본 상류
+    오류/종료는 결과를 바꾸지 않는다(먼저 일어난 종결이 그 요청의 상태다).
     """
-    if outcome is not None:
+    if outcome is not None and outcome.get("status") != "cancelled":
         outcome["status"] = status
+
+
+def mark_cancelled(outcome: dict | None) -> None:
+    """클라이언트 끊김 — 앞서 기록된 상류 실패(error/timeout)는 지킨다(setdefault)."""
+    if outcome is not None:
+        outcome.setdefault("status", "cancelled")
+
+
+class ShieldedUpstream:
+    """소비자(클라이언트 응답 태스크)의 취소에서 **상류 읽기를 보호**하는 비동기 이터레이터.
+
+    ⚠️ 왜 필요한가(B1, 실측 185/185). uvicorn 은 ASGI spec 2.3 을 알리고, 그러면 Starlette 는
+       클라이언트가 끊길 때 응답 태스크를 **취소**한다. 그 취소는 스트림 헬퍼가 기다리던
+       ``wait_for(iterator.__anext__())`` 로 들어가 상류 제너레이터(``_bedrock_stream_gen``)
+       안까지 전파되고, 제너레이터의 finally 가 botocore 스트림을 닫는다. 그래서 disconnect
+       드레인은 이미 끝난 이터레이터를 읽어 즉시 StopAsyncIteration — 최종 usage 를 한 번도
+       못 보고 ``message_start`` 의 output_tokens=1 로 청구됐다.
+
+    여기서는 상류 ``__anext__`` 를 **별도 태스크**로 돌리고 ``asyncio.shield`` 로 기다린다.
+    소비자가 취소돼도 읽기 태스크는 계속 돌고, 다음 ``__anext__`` (드레인)가 같은 결과를 받는다 —
+    읽은 청크도 잃지 않는다. idle/drain 타임아웃(``wait_for``)도 같은 방식이라 진행 중 읽기가
+    남을 수 있고, 그 정리는 ``aclose`` 가 한다(읽기 태스크 취소 → 상류 aclose).
+    """
+
+    def __init__(self, it: AsyncIterator[bytes]) -> None:
+        self._it = it.__aiter__()
+        self._pending: asyncio.Task | None = None
+        self._closed = False
+
+    def __aiter__(self) -> ShieldedUpstream:
+        return self
+
+    async def _read(self):
+        try:
+            return False, await self._it.__anext__()
+        except StopAsyncIteration:
+            return True, None
+
+    async def __anext__(self) -> bytes:
+        if self._closed:
+            raise StopAsyncIteration
+        if self._pending is None:
+            self._pending = asyncio.ensure_future(self._read())
+        task = self._pending
+        try:
+            done, chunk = await asyncio.shield(task)
+        except asyncio.CancelledError:
+            # 소비자 취소/타임아웃 — 읽기 태스크는 그대로 둔다(다음 호출이 결과를 받는다).
+            # 단 읽기 태스크 자체가 취소됐으면(aclose) 지운다.
+            if task.done() and task.cancelled():
+                self._pending = None
+            raise
+        except BaseException:
+            self._pending = None
+            raise
+        self._pending = None
+        if done:
+            self._closed = True
+            raise StopAsyncIteration
+        return chunk
+
+    async def aclose(self) -> None:
+        self._closed = True
+        task, self._pending = self._pending, None
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except BaseException:  # noqa: BLE001 — 취소/상류 오류 모두 정리 단계에서는 무시
+                pass
+        aclose = getattr(self._it, "aclose", None)
+        if aclose is not None:
+            try:
+                await aclose()
+            except Exception:
+                pass
+
+
+def shield_upstream(it):
+    """상류 이터레이터를 ``ShieldedUpstream`` 으로 감싼다(이미 감싼 것은 그대로)."""
+    if isinstance(it, ShieldedUpstream):
+        return it
+    return ShieldedUpstream(it)
+
+
+#: 토크나이저가 없거나 실패했을 때의 출력 토큰 근사(문자 4개 ≈ 1토큰). 0 으로 두면 전달된
+#: 출력이 무료가 된다 — 근사라도 남기고 ``estimated_usage=true`` 로 표시한다(B1).
+def heuristic_tokens(text: str) -> int:
+    return (len(text) + 3) // 4 if text else 0
+
+
+def anthropic_delta_text(delta: dict) -> str:
+    """content_block_delta 의 출력 텍스트 — text / thinking / tool input_json 모두 출력 토큰이다.
+
+    예전에는 ``text_delta`` 만 셌다 — extended thinking 과 tool_use 인자(input_json_delta)는
+    중간에 끊기면 추정에서 빠져 과소청구됐다(B1). signature_delta 는 출력이 아니다.
+    """
+    if not isinstance(delta, dict):
+        return ""
+    t = delta.get("type")
+    if t == "text_delta":
+        return delta.get("text") or ""
+    if t == "thinking_delta":
+        return delta.get("thinking") or ""
+    if t == "input_json_delta":
+        return delta.get("partial_json") or ""
+    return ""
 
 
 def outcome_from_http(
@@ -188,9 +328,11 @@ async def bedrock_anthropic_sse_stream(
         "cache_creation_1h": None,  # usage.cache_creation.ephemeral_1h_input_tokens
         "cache_read": 0,
     }
-    accumulated_text: list[str] = []  # KI-08: content_block_delta.delta.text 누적
+    # KI-08/B1: 전달된 출력 델타(text·thinking·input_json) 누적 — 최종 usage 없이 끊기면 역산.
+    accumulated_text: list[str] = []
     first_token_time: float | None = None
-    iterator = chunk_iter.__aiter__()
+    # 상류 읽기를 클라이언트 취소에서 보호한다(ShieldedUpstream 주석 — B1).
+    iterator = shield_upstream(chunk_iter)
     client_disconnected = False
     # 과금 멱등 가드. 종료 경로가 4개(정상/idle timeout/upstream 예외/클라이언트 끊김
     # → 백그라운드 drain)라, 가드 없이 각 경로에서 finalize 를 호출하면 **이중 과금**이
@@ -243,13 +385,11 @@ async def bedrock_anthropic_sse_stream(
             if isinstance(cc, dict) and "ephemeral_1h_input_tokens" in cc:
                 counters["cache_creation_1h"] = cc["ephemeral_1h_input_tokens"] or 0
         elif etype == "content_block_delta":
-            # KI-08: 스트림 도중 생성된 텍스트 누적. disconnect 시 tokenizer 역산용.
-            delta = data.get("delta", {})
-            if delta.get("type") == "text_delta":
-                if t := delta.get("text"):
-                    if first_token_time is None:
-                        first_token_time = time.monotonic()
-                    accumulated_text.append(t)
+            # KI-08/B1: 스트림 도중 생성된 출력 누적(text·thinking·tool 인자). disconnect 역산용.
+            if t := anthropic_delta_text(data.get("delta", {})):
+                if first_token_time is None:
+                    first_token_time = time.monotonic()
+                accumulated_text.append(t)
         elif etype == "message_delta":
             u = data.get("usage", {})
             if v := u.get("output_tokens"):
@@ -282,20 +422,26 @@ async def bedrock_anthropic_sse_stream(
         """KI-08: output_tokens=0 인데 누적 텍스트가 있으면 tokenizer로 역산.
 
         disconnect 케이스: message_start로 input_tokens는 있으나 message_delta 전
-        끊김 → output_tokens=0. 누적된 content_block_delta text로 역산.
+        끊김 → output_tokens=0. 누적된 출력 델타(text·thinking·input_json)로 역산.
+        토크나이저가 없거나 실패하면 문자 수 근사(heuristic_tokens) — 0 으로 두지 않는다(B1).
         """
-        if not tokenizer_hook or not accumulated_text:
+        if not accumulated_text:
             return usage
         it = counters["input_tokens"]
         ot = counters["output_tokens"]
         if ot > 0:
             return usage  # provider에서 실제 usage 이벤트 수신됨 → 역산 불필요
-        try:
-            estimated_ot = await tokenizer_hook("".join(accumulated_text))
-        except Exception:
-            logger.warning("tokenizer_hook_failed")
-            estimated_ot = None
+        text = "".join(accumulated_text)
+        estimated_ot = None
+        if tokenizer_hook:
+            try:
+                estimated_ot = await tokenizer_hook(text)
+            except Exception:
+                logger.warning("tokenizer_hook_failed")
+                estimated_ot = None
         if not estimated_ot or estimated_ot <= 0:
+            estimated_ot = heuristic_tokens(text)
+        if estimated_ot <= 0:
             return usage
         return TokenUsage(
             input_tokens=it,
@@ -336,19 +482,24 @@ async def bedrock_anthropic_sse_stream(
         if not on_usage or usage_fired:
             return
         usage_fired = True
-        base = _current_usage()
-        estimated = await _estimate_if_needed(base)
-        usage = estimated or base or TokenUsage(
-            input_tokens=0,
-            output_tokens=0,
-            total_tokens=0,
-            cache_creation_input_tokens=0,
-            cache_read_input_tokens=0,
-        )
-        try:
-            await on_usage(usage, first_token_time)
-        except Exception:
-            logger.exception("on_usage_callback_failed")
+
+        async def _settle() -> None:
+            base = _current_usage()
+            estimated = await _estimate_if_needed(base)
+            usage = estimated or base or TokenUsage(
+                input_tokens=0,
+                output_tokens=0,
+                total_tokens=0,
+                cache_creation_input_tokens=0,
+                cache_read_input_tokens=0,
+            )
+            try:
+                await on_usage(usage, first_token_time)
+            except Exception:
+                logger.exception("on_usage_callback_failed")
+
+        # 클라이언트 취소로 정산이 중간에 죽지 않게(settle_shielded 주석).
+        await settle_shielded(_settle(), outcome)
 
     async def _drain_remaining() -> None:
         deadline = time.monotonic() + drain_timeout
@@ -374,9 +525,11 @@ async def bedrock_anthropic_sse_stream(
         except Exception:
             logger.exception("stream_drain_error")
         finally:
+            # 상류를 먼저 닫는다 — 드레인 타임아웃이면 진행 중이던 읽기(ShieldedUpstream)를 멈춰
+            # 정산하는 동안 읽지 않은 출력이 더 생기지 않게 한다(B1).
+            await _aclose_iter(iterator)
             await _fire_on_usage()
             await _fire_on_complete("partial")
-            await _aclose_iter(iterator)
             if outcome is not None:
                 outcome.pop("drain_pending", None)
 
@@ -419,12 +572,11 @@ async def bedrock_anthropic_sse_stream(
         # drain so usage is still recorded, then re-raise per asyncio contract.
         logger.info("bedrock_stream_cancelled")
         client_disconnected = True
-        # 클라이언트 측 종결 — 게이트웨이/상류 실패가 아니라 과금은 정상 성공 건.
-        # setdefault: 직전에 상류 error 이벤트를 받았다면 그 판정이 우선한다.
-        if outcome is not None:
-            outcome.setdefault("status", "success")
-            # unsettled_reservation_guard 가 드레인 정산과 경쟁해 예약을 먼저
-            # release(0) 하면 실비가 유실/이중정산된다 — 정산 소유권 표시.
+        # 클라이언트 측 종결 → CANCELLED(B1). 업스트림이 처리한 토큰은 드레인이 회수해 청구한다.
+        # setdefault: 직전에 상류 error 이벤트를 받았다면 그 판정(ERROR)이 우선한다.
+        mark_cancelled(outcome)
+        # unsettled_reservation_guard 가 드레인 정산과 경쟁해 예약을 먼저
+        # release(0) 하면 실비가 유실/이중정산된다 — 정산 소유권 표시(아래 drain_pending).
         _spawn(_drain_remaining())
         if outcome is not None:
             # _spawn 성공 후에만 마킹 — 스폰 실패로 마커만 남으면 guard 가
@@ -488,7 +640,7 @@ async def openai_sse_stream(
     latest_usage: TokenUsage | None = None
     accumulated_text: list[str] = []  # KI-08: delta.content 누적
     first_token_time: float | None = None
-    iterator = chunk_iter.__aiter__()
+    iterator = shield_upstream(chunk_iter)  # B1 — ShieldedUpstream 주석
     client_disconnected = False
     usage_fired = False  # 과금 멱등 가드 — bedrock_anthropic_sse_stream 과 동일 계약
     # 본문 로깅용(on_complete 없으면 미사용) — BoundedCapture 상한(R22 r2 S3).
@@ -578,16 +730,22 @@ async def openai_sse_stream(
 
     async def _estimate_if_needed(usage: TokenUsage | None) -> TokenUsage | None:
         """KI-08: usage 없고 누적 텍스트 있으면 tokenizer 역산."""
-        if not tokenizer_hook or not accumulated_text:
+        if not accumulated_text:
             return usage
         if usage and usage.output_tokens > 0:
             return usage
-        try:
-            estimated_ot = await tokenizer_hook("".join(accumulated_text))
-        except Exception:
-            logger.warning("tokenizer_hook_failed")
-            estimated_ot = None
+        text = "".join(accumulated_text)
+        estimated_ot = None
+        if tokenizer_hook:
+            try:
+                estimated_ot = await tokenizer_hook(text)
+            except Exception:
+                logger.warning("tokenizer_hook_failed")
+                estimated_ot = None
         if not estimated_ot or estimated_ot <= 0:
+            # 토크나이저 부재/실패 — 0 이 아니라 근사로 남긴다(B1, estimated=True).
+            estimated_ot = heuristic_tokens(text)
+        if estimated_ot <= 0:
             return usage
         # ⚠️ 새로 만들지 않고 **복사 후 덮어쓴다** — Responses 방언(아래
         #    `_estimate_output_tokens`)과 같은 규칙. 새 TokenUsage 로 만들면
@@ -628,18 +786,22 @@ async def openai_sse_stream(
         if not on_usage or usage_fired:
             return
         usage_fired = True
-        estimated = await _estimate_if_needed(latest_usage)
-        usage = estimated or latest_usage or TokenUsage(
-            input_tokens=0,
-            output_tokens=0,
-            total_tokens=0,
-            cache_creation_input_tokens=0,
-            cache_read_input_tokens=0,
-        )
-        try:
-            await on_usage(usage, first_token_time)
-        except Exception:
-            logger.exception("on_usage_callback_failed")
+
+        async def _settle() -> None:
+            estimated = await _estimate_if_needed(latest_usage)
+            usage = estimated or latest_usage or TokenUsage(
+                input_tokens=0,
+                output_tokens=0,
+                total_tokens=0,
+                cache_creation_input_tokens=0,
+                cache_read_input_tokens=0,
+            )
+            try:
+                await on_usage(usage, first_token_time)
+            except Exception:
+                logger.exception("on_usage_callback_failed")
+
+        await settle_shielded(_settle(), outcome)  # B1 — 취소로 정산이 죽지 않게
 
     async def _drain_remaining() -> None:
         nonlocal latest_usage
@@ -664,13 +826,11 @@ async def openai_sse_stream(
         except Exception:
             logger.exception("stream_drain_error")
         finally:
+            await _aclose_iter(iterator)  # 정산 전에 상류를 닫는다(B1 — 위 같은 주석)
             if u := _flush_pending_usage():
                 latest_usage = u
             await _fire_on_usage()
             await _fire_on_complete("partial")
-            await _aclose_iter(iterator)
-            if outcome is not None:
-                outcome.pop("drain_pending", None)
             if outcome is not None:
                 outcome.pop("drain_pending", None)
 
@@ -711,11 +871,10 @@ async def openai_sse_stream(
         # handler in `bedrock_anthropic_sse_stream` for rationale.
         logger.info("openai_stream_cancelled")
         client_disconnected = True
-        # setdefault: 직전 상류 error 프레임 판정이 우선한다(E2E S5).
-        if outcome is not None:
-            outcome.setdefault("status", "success")
-            # unsettled_reservation_guard 가 드레인 정산과 경쟁해 예약을 먼저
-            # release(0) 하면 실비가 유실/이중정산된다 — 정산 소유권 표시.
+        # 클라이언트 끊김 → CANCELLED(B1). setdefault: 직전 상류 error 프레임 판정이 우선.
+        mark_cancelled(outcome)
+        # unsettled_reservation_guard 가 드레인 정산과 경쟁해 예약을 먼저
+        # release(0) 하면 실비가 유실/이중정산된다 — 정산 소유권 표시(아래 drain_pending).
         _spawn(_drain_remaining())
         if outcome is not None:
             # _spawn 성공 후에만 마킹 — 스폰 실패로 마커만 남으면 guard 가
@@ -778,7 +937,7 @@ async def responses_sse_stream(
     latest_usage: TokenUsage | None = None
     accumulated_text: list[str] = []
     first_token_time: float | None = None
-    iterator = chunk_iter.__aiter__()
+    iterator = shield_upstream(chunk_iter)  # B1 — ShieldedUpstream 주석
     client_disconnected = False
     usage_fired = False  # 과금 멱등 가드 — bedrock_anthropic_sse_stream 과 동일 계약
     # 본문 로깅용(on_complete 없으면 미사용) — BoundedCapture 상한(R22 r2 S3).
@@ -814,7 +973,9 @@ async def responses_sse_stream(
             return f"data: {raw}\n\n".encode()
         if isinstance(data, dict):
             etype = data.get("type", "")
-            if etype == "response.output_text.delta":
+            if etype in ("response.output_text.delta", "response.reasoning_summary_text.delta",
+                         "response.function_call_arguments.delta"):
+                # B1: 텍스트뿐 아니라 추론 요약·함수 인자도 출력 토큰이다.
                 if (d := data.get("delta")) and isinstance(d, str):
                     if first_token_time is None:
                         first_token_time = time.monotonic()
@@ -867,17 +1028,22 @@ async def responses_sse_stream(
            input+cache 를 담고 output 만 0 인 경우가 있어서, output 만으로 TokenUsage 를
            새로 만들면 캐시 버킷이 지워져 지금보다 더 과소청구가 된다.
         """
-        if not tokenizer_hook or not accumulated_text:
+        if not accumulated_text:
             return None
         base = latest_usage or TokenUsage()
         if base.output_tokens > 0:
             return None  # 실제 usage 를 받았다 — 역산 불필요
-        try:
-            estimated = await tokenizer_hook("".join(accumulated_text))
-        except Exception:
-            logger.warning("tokenizer_hook_failed")
-            return None
+        text = "".join(accumulated_text)
+        estimated = None
+        if tokenizer_hook:
+            try:
+                estimated = await tokenizer_hook(text)
+            except Exception:
+                logger.warning("tokenizer_hook_failed")
+                estimated = None
         if not estimated or estimated <= 0:
+            estimated = heuristic_tokens(text)  # B1 — 0 대신 근사(estimated=True)
+        if estimated <= 0:
             return None
         # ⚠️ 새로 만들지 않고 **복사 후 덮어쓴다.** TokenUsage 에는 output 과 무관한 필드가
         #    더 있다(web_search_count — 웹서치 귀속/과금, cache_ttl_1h — 캐시 단가 분기).
@@ -896,14 +1062,18 @@ async def responses_sse_stream(
         if not on_usage or usage_fired:
             return
         usage_fired = True
-        usage = latest_usage or TokenUsage()
-        estimated_usage = await _estimate_output_tokens()
-        if estimated_usage is not None:
-            usage = estimated_usage
-        try:
-            await on_usage(usage, first_token_time)
-        except Exception:
-            logger.exception("on_usage_callback_failed")
+
+        async def _settle() -> None:
+            usage = latest_usage or TokenUsage()
+            estimated_usage = await _estimate_output_tokens()
+            if estimated_usage is not None:
+                usage = estimated_usage
+            try:
+                await on_usage(usage, first_token_time)
+            except Exception:
+                logger.exception("on_usage_callback_failed")
+
+        await settle_shielded(_settle(), outcome)  # B1 — 취소로 정산이 죽지 않게
 
     async def _drain_remaining() -> None:
         deadline = time.monotonic() + drain_timeout
@@ -926,9 +1096,11 @@ async def responses_sse_stream(
         except Exception:
             logger.exception("responses_stream_drain_error")
         finally:
+            # 상류를 먼저 닫는다 — 드레인 타임아웃이면 진행 중이던 읽기(ShieldedUpstream)를 멈춰
+            # 정산하는 동안 읽지 않은 출력이 더 생기지 않게 한다(B1).
+            await _aclose_iter(iterator)
             await _fire_on_usage()
             await _fire_on_complete("partial")
-            await _aclose_iter(iterator)
             if outcome is not None:
                 outcome.pop("drain_pending", None)
 
@@ -958,11 +1130,10 @@ async def responses_sse_stream(
     except (asyncio.CancelledError, GeneratorExit):
         logger.info("responses_stream_cancelled")
         client_disconnected = True
-        # setdefault: 직전 상류 error 판정이 우선한다(E2E S5).
-        if outcome is not None:
-            outcome.setdefault("status", "success")
-            # unsettled_reservation_guard 가 드레인 정산과 경쟁해 예약을 먼저
-            # release(0) 하면 실비가 유실/이중정산된다 — 정산 소유권 표시.
+        # 클라이언트 끊김 → CANCELLED(B1). setdefault: 직전 상류 error 판정이 우선(E2E S5).
+        mark_cancelled(outcome)
+        # unsettled_reservation_guard 가 드레인 정산과 경쟁해 예약을 먼저
+        # release(0) 하면 실비가 유실/이중정산된다 — 정산 소유권 표시(아래 drain_pending).
         _spawn(_drain_remaining())
         if outcome is not None:
             # _spawn 성공 후에만 마킹 — 스폰 실패로 마커만 남으면 guard 가

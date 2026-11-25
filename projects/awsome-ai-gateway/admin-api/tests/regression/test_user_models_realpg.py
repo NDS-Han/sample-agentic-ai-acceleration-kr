@@ -4,7 +4,7 @@
 PROOF_DSN 이 있을 때만 돈다. 자기 소유 DB(<dbname>_umproof)를 만들고 init SQL 을 적용한다.
 
 검증 축:
-  * 하이브리드 결과 == usage_logs 직접 GROUP BY (SUCCESS·리포팅 tz 일자·앱·팀) — 여러 구간
+  * 하이브리드 결과 == usage_logs 직접 GROUP BY (청구 대상·리포팅 tz 일자·앱·팀) — 여러 구간
   * 신뢰할 수 없는 소스는 쓰지 않는다: dirty 날짜·레지스트리 없는 날짜·tz 다른 날짜·
     월 재구성 뒤 재집계된 날짜가 낀 달 — 이 소스들의 행을 일부러 **오염**시켜 두고도 같아야 한다
   * 긴 custom 구간은 통째 포함된 달을 월 누적에서 읽는다(src 분류로 확인)
@@ -223,14 +223,17 @@ async def session(owned_dsn, monkeypatch):
     await engine.dispose()
 
 
+#: wave 3 DECISION 1 — 청구 대상(상태 무관): 요청 수 = 계량 행(토큰·비용 > 0), 비용·토큰 = 전 상태.
+_MET = "(input_tokens+output_tokens+cache_creation_tokens+cache_read_tokens > 0 OR cost_usd > 0)"
 _RAW = """
-SELECT user_id::text, model_alias, count(*) n, sum(input_tokens) i, sum(output_tokens) o,
-       sum(cache_read_tokens) cr, sum(cache_creation_tokens) cw, sum(cost_usd) c,
-       sum(latency_ms) l
+SELECT user_id::text, model_alias, count(*) FILTER (WHERE {met}) n, sum(input_tokens) i,
+       sum(output_tokens) o, sum(cache_read_tokens) cr, sum(cache_creation_tokens) cw,
+       sum(cost_usd) c, sum(latency_ms) l
 FROM usage.usage_logs
-WHERE status='SUCCESS' AND (requested_at AT TIME ZONE :tz)::date BETWEEN :s AND :e
+WHERE (requested_at AT TIME ZONE :tz)::date BETWEEN :s AND :e
   {extra}
 GROUP BY 1,2
+HAVING bool_or({met} OR web_search_count > 0)
 """
 
 
@@ -245,7 +248,7 @@ async def _raw(session, s: date, e: date, *, teams=None, client=None):
     if client:
         extra += " AND COALESCE(client,'other') = :client"
         params["client"] = client
-    rows = (await session.execute(text(_RAW.format(extra=extra)), params)).all()
+    rows = (await session.execute(text(_RAW.format(extra=extra, met=_MET)), params)).all()
     return {(r.user_id, r.model_alias): (int(r.n), int(r.i), int(r.o), int(r.cr), int(r.cw),
                                          Decimal(r.c).quantize(Decimal("0.000001")))
             for r in rows}

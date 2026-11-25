@@ -237,12 +237,8 @@ async def test_streaming_no_usage_invokes_on_usage_with_zero():
     """KI-08: If no usage-bearing event arrives (disconnect, missing message_delta),
     on_usage MUST still fire with a zero-valued TokenUsage so cost_recorder can
     settle pre-reserved TPM (refund) and avoid a rate-limit leak."""
-    chunks = _sse_chunks(
-        [
-            {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "x"}},
-            {"type": "message_stop"},
-        ]
-    )
+    # 출력 델타도 없는 스트림 — 전달된 출력이 있으면 근사 추정이 붙는다(아래 테스트, B1).
+    chunks = _sse_chunks([{"type": "message_stop"}])
     captured: list[TokenUsage] = []
 
     async def on_usage(u: TokenUsage, first_token_time: float | None = None) -> None:
@@ -259,6 +255,33 @@ async def test_streaming_no_usage_invokes_on_usage_with_zero():
     assert u.input_tokens == 0
     assert u.output_tokens == 0
     assert u.total_tokens == 0
+
+
+@pytest.mark.asyncio
+async def test_streaming_delivered_output_without_usage_is_estimated_not_zero():
+    """B1 — 최종 usage 없이 끝나도 전달된 출력(text·thinking·input_json)은 근사로 남는다."""
+    chunks = _sse_chunks(
+        [
+            {"type": "content_block_delta", "delta": {"type": "thinking_delta", "thinking": "abcd"}},
+            {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "efgh"}},
+            {"type": "content_block_delta",
+             "delta": {"type": "input_json_delta", "partial_json": "{\"a\":1}"}},
+            {"type": "message_stop"},
+        ]
+    )
+    captured: list[TokenUsage] = []
+
+    async def on_usage(u: TokenUsage, first_token_time: float | None = None) -> None:
+        captured.append(u)
+
+    async for _ in bedrock_anthropic_sse_stream(
+        FakeRequest(), _aiter(chunks), on_usage=on_usage, idle_timeout=5.0
+    ):
+        pass
+    await asyncio.sleep(0.05)
+    u = captured[0]
+    assert u.output_tokens == 4  # 15 chars → ceil(15/4)
+    assert u.estimated is True
 
 
 @pytest.mark.asyncio

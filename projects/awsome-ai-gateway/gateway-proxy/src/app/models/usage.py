@@ -16,6 +16,8 @@ class UsageStatus(str, PyEnum):
     SUCCESS = "SUCCESS"
     ERROR = "ERROR"
     TIMEOUT = "TIMEOUT"
+    #: 클라이언트가 끊은 스트림(migration 0062) — 처리된 토큰은 청구 대상이다.
+    CANCELLED = "CANCELLED"
 
 
 class UsageRecord(Base):
@@ -36,6 +38,8 @@ class UsageRecord(Base):
     cache_creation_tokens: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     cache_read_tokens: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     cost_usd: Mapped[Decimal] = mapped_column(Numeric(10, 6), nullable=False)
+    #: 웹 검색 비용(0058) — NULL = 추적 이전. 예산 복원 SUM 이 cost_usd 와 함께 더한다(wave 3).
+    web_search_cost_usd: Mapped[Decimal | None] = mapped_column(Numeric(14, 6), nullable=True)
     latency_ms: Mapped[int] = mapped_column(Integer, nullable=False)
     ttft_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     status: Mapped[UsageStatus] = mapped_column(

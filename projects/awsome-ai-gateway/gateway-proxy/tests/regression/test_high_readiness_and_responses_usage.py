@@ -150,14 +150,15 @@ _TRUNCATED = [
 ]
 
 
-async def test_truncated_responses_stream_records_zero_without_the_hook():
-    """⚠️ 먼저 결함의 전제를 확인한다 — 훅이 없으면 usage 가 전부 0 이다.
+async def test_truncated_responses_stream_without_the_hook_is_approximated():
+    """훅이 없어도 전달된 출력은 0 이 아니다 — 문자 수 근사 + estimated (wave 3 B1).
 
-    그 상태에서 cost_recorder 는 usage_logs 행을 만들지 않는다.
+    예전에는 전부 0 이라 cost_recorder 가 usage_logs 행을 만들지 않았다(무료 출력).
     """
     _out, usage = await _drain_responses(_TRUNCATED, tokenizer_hook=None)
     assert usage is not None
-    assert usage.output_tokens == 0 and usage.total_tokens == 0
+    assert usage.output_tokens == 3  # len("hello world")=11 → ceil(11/4)
+    assert usage.estimated is True
 
 
 async def test_the_hook_estimates_output_tokens_on_a_truncated_stream():
@@ -240,7 +241,8 @@ async def test_a_failing_hook_does_not_break_the_stream():
 
     out, usage = await _drain_responses(_TRUNCATED, tokenizer_hook=boom)
     assert len(out) == 2
-    assert usage.output_tokens == 0  # 추정 실패 → 기존 동작으로 되돌아간다
+    # 추정 실패 → 0 이 아니라 문자 수 근사로 남는다(B1 — "never silently $0").
+    assert usage.output_tokens == 3 and usage.estimated is True
 
 
 # ─────────────────────────────────────────────────────────────────────────────

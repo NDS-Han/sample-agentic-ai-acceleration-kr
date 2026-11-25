@@ -188,8 +188,8 @@ async def test_openai_streaming_done_sentinel_invokes_on_usage_with_zero():
     async def on_usage(u: TokenUsage, first_token_time: float | None = None) -> None:
         captured.append(u)
 
+    # 전달된 출력이 없을 때 — 있으면 B1 근사 추정이 붙는다(estimated=True).
     chunks = [
-        _sse({"choices": [{"delta": {"content": "x"}}]}),
         b"data: [DONE]\n\n",
     ]
     async for _ in openai_sse_stream(

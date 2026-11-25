@@ -776,16 +776,27 @@ async def test_client_side_asyncpg_data_error_is_permanent():
     orig = _AdapterError("invalid input for query argument $1")
     orig.__cause__ = asyncpg.exceptions.DataError("invalid input for query")
 
+    dead: list = []
+
+    async def _exec(stmt, params=None):
+        if "cost_dead_letters" in str(stmt):
+            dead.extend(params)  # dead-letter 표 쓰기는 성공한다
+            return MagicMock()
+        raise DBAPIError("INSERT", {}, orig)
+
     session = AsyncMock()
     session.__aenter__ = AsyncMock(return_value=session)
     session.__aexit__ = AsyncMock(return_value=None)
-    session.execute = AsyncMock(side_effect=DBAPIError("INSERT", {}, orig))
+    session.execute = AsyncMock(side_effect=_exec)
     session.commit = AsyncMock()
     session_factory = MagicMock(return_value=session)
 
     flusher = BatchFlusher(session_factory=session_factory, redis=MagicMock())
     written, dropped = await flusher.flush_dead_letter([_make_entry(request_id="req-1")])
     assert written == 0 and dropped == 1  # 전파되지 않고 dead-letter 로 소화됨
+    # 버리지 않고 원본 페이로드가 dead-letter 표에 남는다(wave 3 B5).
+    assert [d["request_id"] for d in dead] == ["req-1"]
+    assert dead[0]["sqlstate"] == "22000" and '"request_id":"req-1"' in dead[0]["payload"]
 
 
 @pytest.mark.asyncio

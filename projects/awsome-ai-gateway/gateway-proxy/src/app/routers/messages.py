@@ -807,6 +807,10 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
         # 요청당 상한(정책) → 검색 턴 수. env 의 고정 2×3 대신 ceil(cap / 턴당).
         _ws_iterations = _ws_gate.max_iterations(
             _settings_ws.web_search_max_searches_per_turn, _settings_ws.web_search_max_iterations)
+        # 월예산 예약에 검색 비용 상한을 싣는다(rate_limit_enforcement, DECISION 2).
+        state["_ws_reserve_queries"] = (
+            _ws_gate.policy.per_request_cap if _ws_gate.policy is not None
+            else _ws_iterations * _settings_ws.web_search_max_searches_per_turn)
         _admission_body = conservative_admission_body(
             req_data, _ws_iterations,
             max_result_chars=_settings_ws.web_search_max_result_chars,
@@ -1400,19 +1404,21 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
             else None
         )
 
+        _gen = bedrock_anthropic_sse_stream(
+            request,
+            chunk_iter,
+            on_usage=_record,
+            tokenizer_hook=_estimate,
+            on_complete=_on_complete,
+            outcome=outcome,
+        )
         return StreamingResponse(
-            bedrock_anthropic_sse_stream(
-                request,
-                chunk_iter,
-                on_usage=_record,
-                tokenizer_hook=_estimate,
-                on_complete=_on_complete,
-                outcome=outcome,
-            ),
+            _gen,
             status_code=status,
             media_type="text/event-stream",
             headers=response_headers,
-            background=unsettled_reservation_guard(state),
+            # 첫 바이트 전 끊김이면 제너레이터를 깨워 정산한다(B1 — fallback_loop 주석).
+            background=unsettled_reservation_guard(state, stream_gen=_gen),
         )
     else:
         response_body, headers, usage = result.payload

@@ -1,10 +1,10 @@
 // Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
 
 /**
- * 대시보드 COST & BUDGET 줄 계산 — 모델 비용 + (표시 규칙이 참이면) 웹 검색 비용.
+ * 대시보드 COST & BUDGET 줄 계산 — Total (charged) = 모델 비용(성공+실패+취소) + 웹 검색 비용.
  *
- * ⚠️ **표시 전용**. 예산 사용률(budget_utilization_pct)·예산·HARD_BLOCK·CPM/CPH 는
- *    여기와 무관하게 모델 비용만 쓴다 — 이 모듈은 예산 값을 읽지도 바꾸지도 않는다.
+ * 백엔드가 charged 를 주면(wave 3) 그 값을 쓴다(청구 대상 정의는 서버 한 곳 — core/usage_filters).
+ * 이 모듈은 예산 값을 읽지도 바꾸지도 않는다 — 예산 사용률은 백엔드 값 그대로.
  */
 
 import type { DashboardKPI } from '@/lib/actions/dashboard';
@@ -55,10 +55,11 @@ export function costBudgetView(
   now?: { y: number; m: number; d: number },
 ): CostBudgetView {
   const showWebSearch = webSearchVisible(kpi.web_search);
-  const modelCost = kpi.total_cost_usd;
+  const modelCost = kpi.charged?.model_usd ?? kpi.total_cost_usd;
   const webSearchCost = showWebSearch ? (kpi.web_search?.cost_usd ?? 0) : 0;
   const webSearchTracked = kpi.web_search?.cost_usd != null;
-  const usageCost = modelCost + webSearchCost;
+  // 웹 검색은 청구 총액의 일부(DECISION 2) — 표시 규칙과 무관하게 기록된 비용이 있으면 총액에 든다.
+  const usageCost = kpi.charged ? kpi.charged.total_usd : modelCost + webSearchCost;
   const avgPerUser = showWebSearch
     ? kpi.active_users > 0
       ? usageCost / kpi.active_users

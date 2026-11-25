@@ -546,18 +546,20 @@ async def _handle_openai(request: Request, path: str):
             else None
         )
 
+        _gen = openai_sse_stream(
+            request,
+            chunk_iter,
+            on_usage=_record,
+            tokenizer_hook=_estimate,
+            on_complete=_on_complete,
+            outcome=outcome,
+        )
         return StreamingResponse(
-            openai_sse_stream(
-                request,
-                chunk_iter,
-                on_usage=_record,
-                tokenizer_hook=_estimate,
-                on_complete=_on_complete,
-                outcome=outcome,
-            ),
+            _gen,
             status_code=status,
             media_type="text/event-stream",
-            background=unsettled_reservation_guard(state),
+            # 첫 바이트 전 끊김이면 제너레이터를 깨워 정산한다(B1 — fallback_loop 주석).
+            background=unsettled_reservation_guard(state, stream_gen=_gen),
             # nginx ingress 버퍼링으로 SSE 가 막히지 않게(E2E S4).
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
@@ -881,6 +883,10 @@ async def _handle_responses(request: Request):
             _s = _gs()
             _ws_iters_adm = _ws_gate.max_iterations(
                 _s.web_search_max_searches_per_turn, _s.web_search_max_iterations)
+            # 월예산 예약에 검색 비용 상한(DECISION 2 — rate_limit_enforcement).
+            state["_ws_reserve_queries"] = (
+                _ws_gate.policy.per_request_cap if _ws_gate.policy is not None
+                else _ws_iters_adm * _s.web_search_max_searches_per_turn)
             _admission_body = conservative_admission_body(
                 req_data, _ws_iters_adm,
                 max_result_chars=_s.web_search_max_result_chars,
@@ -1355,22 +1361,24 @@ async def _handle_responses(request: Request):
 
         from app.services.streaming import responses_sse_stream
 
+        _gen = responses_sse_stream(
+            request,
+            chunk_iter,
+            on_usage=_record,
+            on_complete=_on_complete,
+            # KI-08 역산 — 이 방언은 usage 가 종결 이벤트 안에만 있어서, 그 전에
+            # 끊기면 역산이 없으면 usage_logs 행이 아예 만들어지지 않는다.
+            tokenizer_hook=_estimate,
+            outcome=outcome,
+        )
         return StreamingResponse(
-            responses_sse_stream(
-                request,
-                chunk_iter,
-                on_usage=_record,
-                on_complete=_on_complete,
-                # KI-08 역산 — 이 방언은 usage 가 종결 이벤트 안에만 있어서, 그 전에
-                # 끊기면 역산이 없으면 usage_logs 행이 아예 만들어지지 않는다.
-                tokenizer_hook=_estimate,
-                outcome=outcome,
-            ),
+            _gen,
             status_code=status,
             media_type="text/event-stream",
             # nginx ingress 버퍼링으로 SSE 가 막히지 않게(E2E S4).
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-            background=unsettled_reservation_guard(state),
+            # 첫 바이트 전 끊김이면 제너레이터를 깨워 정산한다(B1 — fallback_loop 주석).
+            background=unsettled_reservation_guard(state, stream_gen=_gen),
         )
     else:
         try:

@@ -162,12 +162,12 @@ async def lifespan(app: FastAPI):
 
     # 9b. Cost-stream dead-letter spool (P0-②): catches cost:stream XADD failures
     # (Redis down at finalize) and re-publishes on recovery → no permanent loss.
-    from app.services.cost_recorder import COST_STREAM_KEY, COST_STREAM_MAXLEN
+    from app.services.cost_recorder import COST_STREAM_KEY
 
+    # 재발행 XADD 도 MAXLEN 없음(B4 — 미소비 청구 기록을 자르지 않는다).
     cost_stream_spool = CostStreamSpool(
         stream_key=COST_STREAM_KEY,
         maxlen=settings.usage_buffer_max,
-        maxlen_field=COST_STREAM_MAXLEN,
     )
 
     # 예산 차감 실패 카운터의 :lost 센티넬 재배달 큐 — cost_recorder 의 인라인
@@ -414,6 +414,12 @@ async def lifespan(app: FastAPI):
     app.state.redis = redis
     app.state.db_engine = db_engine
     app.state.session_factory = session_factory
+    # 웹 검색 단가 캐시(wave 3) — 예산 정산에 검색 비용을 싣는다. 기동 시 한 번 읽고(1 s 상한,
+    # 실패하면 정가), 이후에는 백그라운드로 60 s 마다 갱신한다.
+    from app.services.web_search_price import PRICE as _WS_PRICE
+
+    _WS_PRICE.configure(session_factory)
+    await _WS_PRICE.refresh()
     app.state.httpx_client = httpx_client
     app.state.bedrock_client = bedrock_client
     app.state.degradation_manager = degradation_manager
