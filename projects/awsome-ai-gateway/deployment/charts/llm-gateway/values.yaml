@@ -578,6 +578,21 @@ gatewayProxy:
   #   BUDGET_POLICY_REFRESH_TIMEOUT_SEC: "2.0" # background policy re-read deadline (main pool)
   #   BUDGET_POLICY_REFRESH_RETRY_SEC: "10"    # wait before retrying a failed background re-read
   #   BUDGET_LOCAL_CACHE_MAX_ENTRIES: "20000"
+  #
+  # Router model/catalog cache (wave 1d — model config, alias→provider, model list, routing
+  # profile cached per process) — code defaults:
+  #   MODEL_CACHE_ENABLED: "true"                  # false = legacy Redis GET + DB per request
+  #   MODEL_CACHE_REFRESH_SEC: "60"                # older entries served + re-read in background
+  #   MODEL_CACHE_REFRESH_UNSUBSCRIBED_SEC: "10"   # same, while the invalidation sub is down
+  #   MODEL_CACHE_MAX_STALE_SEC: "3600"            # last known value limit when DB+Redis fail
+  #   MODEL_CACHE_NEGATIVE_TTL_SEC: "15"           # unknown model / no profile (like model:nx)
+  #   MODEL_CACHE_MAX_ENTRIES: "5000"
+  #   MODEL_CACHE_REDIS_TIMEOUT_SEC: "0.3"         # Redis read on a local miss (DB: HOT_DB_TIMEOUT_SEC)
+  #   MODEL_CACHE_REFRESH_TIMEOUT_SEC: "2.0"       # background re-read deadline (main pool)
+  #   MODEL_CACHE_REFRESH_RETRY_SEC: "10"
+  #   MODEL_INVALIDATION_CHANNEL: "gateway:model:invalidate"  # admin-api publishes here
+  #   Metric: gateway_model_cache_total{result}. Force a fleet-wide reload after a direct-SQL
+  #   catalog change: redis-cli PUBLISH gateway:model:invalidate '{"all": true}'
   #   DEGRADED_LOOKUP_TIMEOUT_SEC: "0.5"     # downgrade / web-search policy lookups
   #   WEB_SEARCH_REBUILD_TIMEOUT_SEC: "20"   # background web-search counter rebuild
   #   WEB_SEARCH_REBUILD_LOCK_TTL_SEC: "60"
