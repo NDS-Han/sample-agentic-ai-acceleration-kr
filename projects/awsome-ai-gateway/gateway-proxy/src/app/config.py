@@ -113,6 +113,32 @@ class Settings(BaseSettings):
     db_connect_timeout: float = 5.0
     db_command_timeout: float = 30.0
 
+    # ── Hot-path isolation (wave 1) ────────────────────────────────────────────
+    # Per-request DB lookups on the proxy path (VK is_active / user + entitlements on a
+    # cache miss) use a small dedicated in-process pool with a hard deadline. A slow DB
+    # costs at most this long, then the request is served from the last known good value.
+    hot_db_timeout_sec: float = 0.3
+    hot_db_pool_size: int = 4
+    hot_db_max_overflow: int = 2
+    # Below the RDS Proxy idle_client_timeout (1800 s) so pre_ping can be off on this pool.
+    hot_db_pool_recycle: int = 1500
+    # After a hot-path DB timeout/error, skip the DB for this long (per process).
+    hot_db_breaker_cooldown_sec: float = 2.0
+    # In-process auth cache: is_active per user + AuthContext per VK hash.
+    auth_local_cache_ttl_sec: float = 45.0
+    # How old a last-known-good entry may be when the DB/Redis is unavailable.
+    auth_local_cache_max_stale_sec: float = 300.0
+    auth_local_cache_max_entries: int = 20000
+    # Redis lookups during auth give up after this long when a local fallback exists.
+    auth_redis_fallback_timeout_sec: float = 0.5
+    # admin-api publishes {"user_ids": [...], "key_hashes": [...]} here on changes.
+    auth_invalidation_channel: str = "gateway:auth:invalidate"
+    # Downgrade policy / web-search policy DB lookups (A5).
+    degraded_lookup_timeout_sec: float = 0.5
+    # Background web-search counter rebuild (off the request path).
+    web_search_rebuild_timeout_sec: float = 20.0
+    web_search_rebuild_lock_ttl_sec: int = 60
+
     # Timeouts
     lua_timeout_ms: int = 1000
     stream_timeout: int = 300

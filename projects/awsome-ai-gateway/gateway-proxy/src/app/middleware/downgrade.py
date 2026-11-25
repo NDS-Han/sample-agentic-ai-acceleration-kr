@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import urllib.parse
 import uuid
@@ -11,6 +12,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from app.observability.metrics import GatewayMetrics
 from app.services.downgrade_loader import DowngradePolicyLoader, apply_chain
+from app.services.hot_path import DB_BREAKER, HotDbUnavailable
 from app.services.router_service import RouterService, check_client_model_scope
 from app.services.thinking_normalizer import normalize_thinking
 
@@ -59,6 +61,31 @@ def _model_from_bedrock_path(path: str) -> tuple[str, str] | None:
                 return urllib.parse.unquote(mid), op
     return None
 
+
+
+async def _bounded_lookup(session_factory, fn, what: str):
+    """Run a DB-backed lookup with a hard deadline; honour degraded mode (wave 1, A5).
+
+    - DB degraded / hot-path breaker open → ``fn(None)`` (Redis-only / local fallback).
+    - Otherwise ``fn(db)`` under ``degraded_lookup_timeout_sec``. A timeout trips the
+      shared breaker and raises ``HotDbUnavailable`` — callers fall back (raw model
+      matching / last known rules) instead of waiting on the database again.
+    """
+    from app.config import get_settings
+
+    timeout = get_settings().degraded_lookup_timeout_sec
+    use_db = session_factory is not None and DB_BREAKER.available()
+    try:
+        async with asyncio.timeout(timeout):
+            if not use_db:
+                return await fn(None)
+            async with session_factory() as db:
+                return await fn(db)
+    except TimeoutError as e:
+        # Redis 행(hang)도 같은 데드라인에 걸린다 — DB 를 썼을 때만 DB 브레이커를 연다.
+        if use_db:
+            DB_BREAKER.trip(f"downgrade.{what}:timeout")
+        raise HotDbUnavailable(f"downgrade {what} timed out after {timeout}s") from e
 
 class DowngradeMiddleware:
     """Pure ASGI 미들웨어 — request body의 model alias를
@@ -174,11 +201,9 @@ class DowngradeMiddleware:
         normalized = original
         _resolved_ok = True
         try:
-            if session_factory is not None:
-                async with session_factory() as db:
-                    cfg = await _resolve_for_path(redis, db, original)
-            else:
-                cfg = await _resolve_for_path(redis, None, original)
+            cfg = await _bounded_lookup(
+                session_factory, lambda db: _resolve_for_path(redis, db, original), "resolve"
+            )
             normalized = cfg.alias or original
         except Exception:
             # 미등록/INACTIVE/DB 미가용 — raw 매칭으로 fallback
@@ -203,11 +228,11 @@ class DowngradeMiddleware:
             _client_id = state.get("client")
             if _prof_loader is not None and _client_id:
                 try:
-                    if session_factory is not None:
-                        async with session_factory() as db:
-                            _prof = await _prof_loader.load(redis, db, _client_id)
-                    else:
-                        _prof = await _prof_loader.load(redis, None, _client_id)
+                    _prof = await _bounded_lookup(
+                        session_factory,
+                        lambda db: _prof_loader.load(redis, db, _client_id),
+                        "profile",
+                    )
                     _default = getattr(_prof, "default_model", None)
                     if isinstance(_default, str) and _default:
                         normalized = _default
@@ -216,30 +241,28 @@ class DowngradeMiddleware:
                     pass
 
         try:
-            if session_factory is not None:
-                async with session_factory() as db:
-                    rules = await self.loader.get_active_rules(
-                        redis,
-                        db,
-                        _coerce_uuid(team_id),
-                    )
-            else:
-                rules = await self.loader.get_active_rules(
-                    redis,
-                    None,
-                    _coerce_uuid(team_id),
-                )
+            rules = await _bounded_lookup(
+                session_factory,
+                lambda db: self.loader.get_active_rules(redis, db, _coerce_uuid(team_id)),
+                "rules",
+            )
         except Exception as exc:
+            # 시간 초과/장애 — 마지막으로 본 정책이 있으면 그것으로 계속(stale),
+            # 없으면 기존처럼 강등 없이 통과.
+            _stale = self.loader.last_known(_coerce_uuid(team_id))
             logger.warning(
                 "downgrade_lookup_failed",
                 reason=type(exc).__name__,
-                exc_info=True,
+                served_stale=_stale is not None,
+                exc_info=not isinstance(exc, (TimeoutError, HotDbUnavailable)),
             )
             metrics = self._get_metrics()
             if metrics:
                 metrics.downgrade_lookup_failed_total.add(1, {"reason": type(exc).__name__})
-            await self.app(scope, _replay(body_bytes, receive), send)
-            return
+            if _stale is None:
+                await self.app(scope, _replay(body_bytes, receive), send)
+                return
+            rules = _stale
 
         current_pct = int(getattr(budget_status, "threshold_pct", 0) or 0)
         effective, hops = apply_chain(normalized, rules, current_pct)
@@ -274,11 +297,9 @@ class DowngradeMiddleware:
         # 재작성 뒤 404/400 이 된다 — 강등 자체가 가용성을 해치는 최악의 모드다.
         # 해석 캐시(최대 300s)라 추가 비용은 사실상 없다.
         try:
-            if session_factory is not None:
-                async with session_factory() as db:
-                    _target_cfg = await _resolve_for_path(redis, db, effective)
-            else:
-                _target_cfg = await _resolve_for_path(redis, None, effective)
+            _target_cfg = await _bounded_lookup(
+                session_factory, lambda db: _resolve_for_path(redis, db, effective), "target"
+            )
             check_client_model_scope(_target_cfg, state.get("client"))
         except Exception:
             logger.info(

@@ -68,16 +68,27 @@ class AuthMiddleware:
             degradation_level = dm.level
 
         from app.schemas.domain import DegradationLevel
+        from app.services import auth_service as _auth_service
 
-        if degradation_level == DegradationLevel.BOTH_DEGRADED:
+        if (
+            degradation_level == DegradationLevel.BOTH_DEGRADED
+            and _auth_service.AUTH_LOCAL_CACHES is None
+        ):
             await self._send_503(scope, send)
             return
 
+        # BOTH_DEGRADED 에서도 로컬 인증 캐시가 있으면 아는 VK 는 통과시킨다
+        # (redis=None, db=None → VK 전략이 마지막 정상값을 쓰거나 503).
         effective_redis = (
-            redis if (degradation_level != DegradationLevel.REDIS_DEGRADED) else None
+            redis
+            if degradation_level
+            not in (DegradationLevel.REDIS_DEGRADED, DegradationLevel.BOTH_DEGRADED)
+            else None
         )
         use_db = (
-            degradation_level != DegradationLevel.DB_DEGRADED and session_factory is not None
+            degradation_level
+            not in (DegradationLevel.DB_DEGRADED, DegradationLevel.BOTH_DEGRADED)
+            and session_factory is not None
         )
 
         # inner app 의 send 를 감싸 응답 시작 여부를 추적한다 — 응답이 이미 시작된

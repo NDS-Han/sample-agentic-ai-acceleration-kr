@@ -14,8 +14,10 @@ monthly_limit_reached``) > 요청당 상한(루프 안에서 초과분은 실행
     풀**이라 사용자 기본값으로 상속하지 않는다 — 예산의 팀 풀 + 개인 한도와 같은 구조.
   - 팀 공용 풀 = TEAM 행(없으면 무제한). 사용자·팀 둘 다 걸리면 둘 다 확인한다.
   - 요청당 상한 = USER ?? TEAM ?? ORG ?? env ``web_search_max_searches_per_request``(5).
-  - 프로세스 안 30초 TTL 캐시 — 관리자 변경은 최대 30초 뒤 반영된다.
-  - DB 조회 실패 = 무제한 + env 상한(fail-open: 웹 검색 통제는 모델 호출을 막는 경계가 아니다).
+  - 프로세스 안 30초 TTL 캐시(LRU) — 관리자 변경은 최대 30초 뒤 반영된다.
+  - DB 조회는 데드라인(``degraded_lookup_timeout_sec``)·열화/브레이커를 따른다. 실패 시
+    마지막 값(stale), 없으면 무제한 + env 상한(fail-open: 웹 검색 통제는 모델 호출을 막는
+    경계가 아니다) — 이 기본값은 짧게(10초) 음성 캐시해 장애 중 DB 재시도 폭주를 막는다.
 
 ## 카운터 (Redis, 리포팅 TZ 월)
   ``wsq:user:{<user_id>}:<YYYY-MM>`` / ``wsq:team:{<team_id>}:<YYYY-MM>`` (TTL 40일).
@@ -25,13 +27,18 @@ monthly_limit_reached``) > 요청당 상한(루프 안에서 초과분은 실행
     usage_logs.web_search_count 와 같은 정의.
   - 범위별 예약이 원자적이라 동시 요청도 한도를 넘지 않는다(초과 0). 사용자 예약 후 팀
     거절 → 되돌리기 사이의 찰나에 같은 사용자의 다른 요청이 보수적으로 거절될 수는 있다.
-  - 키가 없으면(새 달·축출·장애 복구) ``SUM(usage_logs.web_search_count)`` 로 재구성하되
-    이미 있는 값과 **큰 쪽**을 남긴다(in-flight·워커 지연분 보존). Redis 가 통째로 날아가면
-    워커가 아직 쓰지 않은 최근 검색만큼은 덜 셀 수 있다 — 그 이상은 아니다.
+  - 키가 없으면(새 달·축출·장애 복구) 요청 경로에서는 **기다리지 않는다**: 이 프로세스가
+    마지막으로 본 값(없으면 0 — 기존 fail-open 정책)으로 판정하고, 재구성은 백그라운드에서
+    한 번만(프로세스 single-flight + Redis 락 ``wsq:rebuild:{key}`` NX EX) 돌린다.
+    재구성 = ``SUM(usage_logs.web_search_count)`` 와 현재 값 중 **큰 쪽**(in-flight·워커
+    지연분 보존). 롤업(daily/monthly_aggregates)에는 웹 검색 열이 없어 원천 합계를 쓰되,
+    요청 경로 밖·팀/사용자당 1회·자체 데드라인이다. 재구성이 끝나기 전 짧은 구간은 한도를
+    살짝 넘길 수 있다(소프트 통제라 의도된 교환).
   - Redis 실패 = 검색 허용(fail-open, 로그).
 """
 from __future__ import annotations
 
+import asyncio
 import math
 import time
 from dataclasses import dataclass
@@ -149,67 +156,142 @@ def period_utc_range(period: str) -> tuple[datetime, datetime]:
 
 
 class PolicyLoader:
-    """budget.web_search_policies 를 (user, team) 별로 30초 캐시."""
+    """budget.web_search_policies 를 (user, team) 별로 30초 캐시(LRU)."""
 
-    def __init__(self, ttl: float = POLICY_CACHE_TTL_S, clock=time.monotonic) -> None:
+    #: DB 실패 후 기본 정책을 다시 묻기까지(음성 캐시).
+    NEGATIVE_TTL_S = 10.0
+
+    def __init__(self, ttl: float = POLICY_CACHE_TTL_S, clock=time.monotonic,
+                 max_entries: int = _POLICY_CACHE_MAX) -> None:
+        from collections import OrderedDict
+
         self._ttl = ttl
         self._clock = clock
-        self._cache: dict[tuple[str, str], tuple[float, WebSearchPolicy]] = {}
+        self._max = max_entries
+        # key → (stored_at, policy, ttl)
+        self._cache: OrderedDict[tuple[str, str], tuple[float, WebSearchPolicy, float]] = (
+            OrderedDict()
+        )
+
+    def _put(self, key, policy: WebSearchPolicy, ttl: float) -> None:
+        self._cache[key] = (self._clock(), policy, ttl)
+        self._cache.move_to_end(key)
+        while len(self._cache) > self._max:
+            self._cache.popitem(last=False)
 
     async def load(self, session_factory, user_id: str, team_id: str | None,
                    default_cap: int) -> WebSearchPolicy:
+        from app.services.hot_path import HotDbUnavailable, run_db
+
         key = (user_id, team_id or "")
         hit = self._cache.get(key)
         now = self._clock()
-        if hit and now - hit[0] < self._ttl:
+        if hit and now - hit[0] < hit[2]:
+            self._cache.move_to_end(key)
             return hit[1]
-        rows: list = []
-        if session_factory is not None:
-            try:
-                async with session_factory() as db:
-                    res = await db.execute(_POLICY_SQL, {
-                        "user_id": user_id,
-                        "team_id": team_id or "00000000-0000-0000-0000-000000000000",
-                    })
-                    rows = [tuple(r) for r in res.all()]
-            except Exception:
-                # fail-open — 마지막 값이 있으면 그것, 없으면 무제한 + env 상한.
-                logger.warning("web_search_policy_load_failed", exc_info=True)
-                if hit:
-                    return hit[1]
+        if session_factory is None:
+            return hit[1] if hit else resolve_policy([], default_cap)
+
+        async def _q(db):
+            res = await db.execute(_POLICY_SQL, {
+                "user_id": user_id,
+                "team_id": team_id or "00000000-0000-0000-0000-000000000000",
+            })
+            return [tuple(r) for r in res.all()]
+
+        try:
+            from app.config import get_settings
+
+            rows = await run_db(_q, timeout=get_settings().degraded_lookup_timeout_sec,
+                                session_factory=session_factory, what="web_search.policy")
+        except HotDbUnavailable:
+            # fail-open — 마지막 값이 있으면 그것(stale), 없으면 무제한 + env 상한(짧게 음성 캐시).
+            logger.warning("web_search_policy_load_failed", served_stale=bool(hit))
+            if hit:
+                self._put(key, hit[1], self.NEGATIVE_TTL_S)
+                return hit[1]
+            policy = resolve_policy([], default_cap)
+            self._put(key, policy, self.NEGATIVE_TTL_S)
+            return policy
         policy = resolve_policy(rows, default_cap)
-        if len(self._cache) >= _POLICY_CACHE_MAX:
-            self._cache.clear()
-        self._cache[key] = (now, policy)
+        self._put(key, policy, self._ttl)
         return policy
 
 
 POLICY_LOADER = PolicyLoader()
 
 
-async def _sum_from_db(session_factory, sql, scope_id: str, period: str) -> int | None:
+async def _sum_from_db(session_factory, sql, scope_id: str, period: str,
+                       timeout: float | None = None) -> int | None:
     if session_factory is None:
         return None
     start, end = period_utc_range(period)
     try:
-        async with session_factory() as db:
-            return int((await db.execute(sql, {"id": scope_id, "start": start, "end": end}))
-                       .scalar() or 0)
+        async with asyncio.timeout(timeout):
+            async with session_factory() as db:
+                return int((await db.execute(sql, {"id": scope_id, "start": start, "end": end}))
+                           .scalar() or 0)
     except Exception:
         logger.warning("web_search_counter_db_sum_failed", exc_info=True)
         return None
 
 
+#: 이 프로세스가 마지막으로 본 카운터 값(키 → 값). 키가 사라진 동안의 판정에 쓴다.
+_LAST_COUNTER: dict[str, int] = {}
+_LAST_COUNTER_MAX = 20000
+
+
+def _remember(key: str, value: int) -> None:
+    if key not in _LAST_COUNTER and len(_LAST_COUNTER) >= _LAST_COUNTER_MAX:
+        _LAST_COUNTER.pop(next(iter(_LAST_COUNTER)))
+    _LAST_COUNTER[key] = value
+
+
+async def rebuild_counter(redis, key: str, session_factory, sql, scope_id: str,
+                          period: str) -> int | None:
+    """백그라운드 재구성 — Redis 락으로 플릿 전체에서 키당 1회. 값(또는 None) 반환."""
+    from app.config import get_settings
+
+    settings = get_settings()
+    lock = f"wsq:rebuild:{key}"
+    try:
+        got = await redis.set(lock, "1", nx=True, ex=settings.web_search_rebuild_lock_ttl_sec)
+    except Exception:
+        logger.warning("web_search_counter_rebuild_lock_failed", key=key)
+        return None
+    if not got:
+        return None
+    try:
+        db_sum = await _sum_from_db(session_factory, sql, scope_id, period,
+                                    timeout=settings.web_search_rebuild_timeout_sec)
+        if db_sum is None:
+            return None
+        value = int(await redis.eval(_REBUILD_LUA, 1, key, db_sum, COUNTER_TTL_S))
+        _remember(key, value)
+        logger.info("web_search_counter_rebuilt", key=key, value=value)
+        return value
+    finally:
+        try:
+            await redis.delete(lock)
+        except Exception:
+            pass
+
+
 async def ensure_counter(redis, key: str, session_factory, sql, scope_id: str,
                          period: str) -> int:
-    """카운터 값. 키가 없으면 usage_logs 합계로 재구성(큰 쪽 유지)."""
+    """카운터 값. 키가 없으면 기다리지 않고 마지막 값(없으면 0)을 쓰고 재구성을 예약한다."""
     raw = await redis.get(key)
     if raw is not None:
-        return int(raw)
-    db_sum = await _sum_from_db(session_factory, sql, scope_id, period)
-    if db_sum is None:
-        return 0
-    return int(await redis.eval(_REBUILD_LUA, 1, key, db_sum, COUNTER_TTL_S))
+        value = int(raw)
+        _remember(key, value)
+        return value
+    from app.services.hot_path import single_flight
+
+    single_flight(
+        f"wsq-rebuild:{key}",
+        lambda: rebuild_counter(redis, key, session_factory, sql, scope_id, period),
+    )
+    return _LAST_COUNTER.get(key, 0)
 
 
 @dataclass
@@ -256,14 +338,19 @@ async def gate_web_search(*, state: dict, redis, session_factory, auth_context,
                          period=period)
     if redis is None:
         return gate
+    from app.config import get_settings
+
     try:
-        gate.user_used = await ensure_counter(redis, user_key(user_id, period), session_factory,
-                                              _SUM_USER_SQL, user_id, period)
-        if team_id:
-            gate.team_used = await ensure_counter(redis, team_key(team_id, period),
-                                                  session_factory, _SUM_TEAM_SQL, team_id, period)
-    except Exception:
-        logger.warning("web_search_quota_counter_read_failed", exc_info=True)
+        # Redis 행(hang)에도 요청을 오래 붙잡지 않는다 — 실패 = 검색 허용(fail-open).
+        async with asyncio.timeout(get_settings().degraded_lookup_timeout_sec):
+            gate.user_used = await ensure_counter(redis, user_key(user_id, period),
+                                                  session_factory, _SUM_USER_SQL, user_id, period)
+            if team_id:
+                gate.team_used = await ensure_counter(redis, team_key(team_id, period),
+                                                      session_factory, _SUM_TEAM_SQL, team_id,
+                                                      period)
+    except Exception as e:
+        logger.warning("web_search_quota_counter_read_failed", error=type(e).__name__)
         return gate
     over_user = policy.user_limit is not None and gate.user_used >= policy.user_limit
     over_team = (team_id is not None and policy.team_limit is not None

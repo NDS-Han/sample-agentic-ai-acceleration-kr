@@ -2,9 +2,9 @@
 
 """Unit tests for the /health/ready readiness probe (견고성 6축검증 축⑤).
 
-readiness 는 liveness(/health)와 분리돼야 한다: DB 단독 열화(DB_DEGRADED)나 커넥션 풀
-포화 시 503 을 반환해 고장 파드를 endpoint 로테이션에서 제외한다. /health 는 여전히
-DB_DEGRADED 에 200 을 주는 관대한 liveness 로 남아 재시작 cascade 를 피한다.
+wave 1 (A1): readiness 는 **프로세스 로컬** 신호(기동 완료·종료 중 아님)만 본다. DB/Redis
+열화와 풀 포화는 플릿 공통 상태라 판정에 쓰면 전 파드가 동시에 빠진다 — 본문으로 보고만
+한다. /health(liveness)는 여전히 항상 200 이다.
 """
 
 from __future__ import annotations
@@ -24,6 +24,8 @@ def _build_app(level: DegradationLevel, *, checked_out=0, pool_size=20, max_over
     app = FastAPI()
     app.include_router(health_router.router)
     app.state.degradation_manager = SimpleNamespace(level=level)
+    app.state.started = True
+    app.state.shutting_down = False
     if engine:
         pool = MagicMock()
         pool.checkedout.return_value = checked_out
@@ -50,18 +52,18 @@ async def test_ready_when_healthy_and_pool_free():
 
 
 @pytest.mark.asyncio
-async def test_not_ready_when_db_degraded():
-    # 핵심 회귀 방지: DB 단독 열화는 /health 에선 200 이지만 readiness 는 503 이어야 한다.
+async def test_ready_when_db_degraded():
+    # wave 1 (A1): DB 열화는 플릿 공통 상태라 readiness 판정에 쓰지 않는다(보고만).
     resp = await _get(_build_app(DegradationLevel.DB_DEGRADED, checked_out=0))
-    assert resp.status_code == 503
-    assert resp.json()["status"] == "not_ready"
+    assert resp.status_code == 200
+    assert resp.json()["db_degraded"] is True
 
 
 @pytest.mark.asyncio
-async def test_not_ready_at_hard_cap():
-    # 포화 기준 = hard_cap(size+max_overflow=30) 소진(보수적). 모든 슬롯 점유=명백한 고갈.
+async def test_pool_saturation_is_reported_not_routed():
+    # 풀 포화는 보고만 한다 — 메인 풀 포화가 인증 경로를 막지 않는다(인증은 전용 hot-path 풀).
     resp = await _get(_build_app(DegradationLevel.HEALTHY, checked_out=30, pool_size=20, max_overflow=10))
-    assert resp.status_code == 503
+    assert resp.status_code == 200
     assert resp.json()["pool_saturated"] is True
 
 
@@ -82,9 +84,20 @@ async def test_ready_when_pool_has_room():
 
 
 @pytest.mark.asyncio
-async def test_both_degraded_not_ready():
+async def test_both_degraded_still_ready():
     resp = await _get(_build_app(DegradationLevel.BOTH_DEGRADED))
-    assert resp.status_code == 503
+    assert resp.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_not_ready_while_starting_or_shutting_down():
+    app = _build_app(DegradationLevel.HEALTHY)
+    app.state.started = False
+    assert (await _get(app)).status_code == 503
+    app.state.started = True
+    app.state.shutting_down = True
+    resp = await _get(app)
+    assert resp.status_code == 503 and resp.json()["status"] == "shutting_down"
 
 
 @pytest.mark.asyncio
@@ -93,6 +106,7 @@ async def test_pool_introspection_failure_is_lenient():
     app = FastAPI()
     app.include_router(health_router.router)
     app.state.degradation_manager = SimpleNamespace(level=DegradationLevel.HEALTHY)
+    app.state.started = True
     bad_pool = MagicMock()
     bad_pool.checkedout.side_effect = RuntimeError("boom")
     app.state.db_engine = SimpleNamespace(pool=bad_pool)

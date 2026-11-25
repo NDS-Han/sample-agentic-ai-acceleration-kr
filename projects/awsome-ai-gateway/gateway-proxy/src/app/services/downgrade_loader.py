@@ -64,7 +64,21 @@ class DowngradePolicyLoader:
 
     캐시 invalidate는 admin-api budget_service가 담당
     (budget_service.py:525, 558). 본 loader는 read-only.
+
+    Wave 1 (A5): the last rules seen per team are kept in-process (``last_known``) so a
+    slow/unavailable DB or Redis keeps applying the last known policy instead of
+    silently dropping downgrades or waiting. The local copy is never preferred over a
+    healthy Redis/DB answer, so admin changes still apply within the Redis TTL.
     """
+
+    def __init__(self, max_stale_sec: float = 600.0, max_entries: int = 5000) -> None:
+        from app.services.hot_path import LocalCache
+
+        self._last: LocalCache = LocalCache(ttl=max_stale_sec, max_stale=max_stale_sec,
+                                            max_entries=max_entries)
+
+    def last_known(self, team_id: uuid.UUID) -> list[DowngradeRule] | None:
+        return self._last.get_stale(str(team_id))
 
     async def get_active_rules(
         self,
@@ -79,15 +93,18 @@ class DowngradePolicyLoader:
             try:
                 cached = await redis.get(cache_key)
                 if cached is not None:
-                    return self._deserialize(cached)
+                    rules = self._deserialize(cached)
+                    self._last.put(str(team_id), rules)
+                    return rules
             except Exception:
                 logger.warning("downgrade_redis_get_failed", team_id=str(team_id))
 
-        # 2) DB fallback
+        # 2) DB fallback (degraded/breaker → db None → 마지막으로 본 정책)
         if db is None:
-            return []
+            return self._last.get_stale(str(team_id)) or []
 
         rules = await self._query_db(db, team_id)
+        self._last.put(str(team_id), rules)
 
         # 3) 캐시 write-through
         if redis is not None:

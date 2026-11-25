@@ -13,7 +13,7 @@ from botocore.config import Config as BotoConfig
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from app.config import get_settings
-from app.db import create_db_engine, create_session_factory
+from app.db import create_db_engine, create_hot_db_engine, create_session_factory
 from app.degradation.manager import DegradationManager
 from app.middleware.auth import AuthMiddleware
 from app.middleware.budget import BudgetMiddleware
@@ -412,6 +412,32 @@ async def lifespan(app: FastAPI):
     app.state.httpx_client = httpx_client
     app.state.bedrock_client = bedrock_client
     app.state.degradation_manager = degradation_manager
+
+    # ── Wave 1 hot-path isolation: dedicated auth pool + local caches + invalidation ──
+    from app.services import auth_service as _auth_service
+    from app.services import hot_path as _hot_path
+
+    hot_db_engine = create_hot_db_engine(settings)
+    _hot_path.configure(
+        session_factory=create_session_factory(hot_db_engine),
+        degradation_manager=degradation_manager,
+        cooldown_sec=settings.hot_db_breaker_cooldown_sec,
+    )
+    _auth_caches = _auth_service.AuthLocalCaches(
+        ttl=settings.auth_local_cache_ttl_sec,
+        max_stale=settings.auth_local_cache_max_stale_sec,
+        max_entries=settings.auth_local_cache_max_entries,
+        redis_fallback_timeout=settings.auth_redis_fallback_timeout_sec,
+        db_timeout=settings.hot_db_timeout_sec,
+    )
+    _auth_service.configure_auth_local_caches(_auth_caches)
+    auth_invalidation = _hot_path.AuthInvalidationListener(
+        settings.redis_url, settings.auth_invalidation_channel, _auth_caches.invalidate
+    )
+    auth_invalidation.start()
+    app.state.hot_db_engine = hot_db_engine
+    app.state.auth_invalidation = auth_invalidation
+    app.state.shutting_down = False
     app.state.degradation_notifier = degradation_notifier
     app.state.cost_stream_spool = cost_stream_spool
     app.state.budget_suspects = budget_suspects
@@ -439,7 +465,10 @@ async def lifespan(app: FastAPI):
     app.state.alias_provider_map = _alias_provider_map
 
     logger.info("gateway_proxy_started")
+    app.state.started = True
     yield
+    # readiness flips to 503 from here on (process-local signal).
+    app.state.shutting_down = True
 
     # Shutdown
     logger.info("gateway_proxy_shutting_down")
@@ -537,6 +566,12 @@ async def lifespan(app: FastAPI):
     await httpx_client.aclose()
     await mantle_http.aclose()
     await redis.aclose()
+    try:
+        await auth_invalidation.stop()
+    except Exception:
+        pass
+    _auth_service.configure_auth_local_caches(None)
+    await hot_db_engine.dispose()
     await db_engine.dispose()
     await shutdown_otel()
 

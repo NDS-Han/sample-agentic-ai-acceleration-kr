@@ -553,6 +553,21 @@ gatewayProxy:
   affinity: {}
 
   # 앱 고유 env 변수 (configmap에서 읽거나 직접 주입)
+  #
+  # Hot-path isolation (wave 1) — code defaults shown; override only if needed:
+  #   HOT_DB_TIMEOUT_SEC: "0.3"              # deadline for per-request auth DB lookups
+  #   HOT_DB_POOL_SIZE: "4"                  # dedicated auth pool per uvicorn worker
+  #   HOT_DB_MAX_OVERFLOW: "2"               #   (+6 connections per worker at most)
+  #   HOT_DB_POOL_RECYCLE: "1500"            # < RDS Proxy idle_client_timeout (1800 s); no pre_ping
+  #   HOT_DB_BREAKER_COOLDOWN_SEC: "2.0"     # skip DB for this long after a hot-path timeout
+  #   AUTH_LOCAL_CACHE_TTL_SEC: "45"         # in-process is_active / auth-context TTL
+  #   AUTH_LOCAL_CACHE_MAX_STALE_SEC: "300"  # max age of last-known-good when DB/Redis fail
+  #   AUTH_LOCAL_CACHE_MAX_ENTRIES: "20000"
+  #   AUTH_REDIS_FALLBACK_TIMEOUT_SEC: "0.5" # Redis wait in auth when a local fallback exists
+  #   AUTH_INVALIDATION_CHANNEL: "gateway:auth:invalidate"  # admin-api publishes here
+  #   DEGRADED_LOOKUP_TIMEOUT_SEC: "0.5"     # downgrade / web-search policy lookups
+  #   WEB_SEARCH_REBUILD_TIMEOUT_SEC: "20"   # background web-search counter rebuild
+  #   WEB_SEARCH_REBUILD_LOCK_TTL_SEC: "60"
   env:
     LOG_LEVEL: "INFO"
     # uvicorn 워커 수 — gateway-proxy Dockerfile CMD 가 ${WORKERS:-4} 로 읽는다(1.0.98+).

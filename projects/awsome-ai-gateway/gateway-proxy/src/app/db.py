@@ -40,6 +40,31 @@ def create_db_engine(settings: Settings) -> AsyncEngine:
     )
 
 
+def create_hot_db_engine(settings: Settings) -> AsyncEngine:
+    """Small dedicated pool for per-request proxy lookups (auth). Wave 1 isolation.
+
+    - no pool_pre_ping (saves a round trip per checkout); safety comes from
+      pool_recycle below the RDS Proxy idle timeout (1800 s) plus the caller's hard
+      deadline + fail-to-cache (a dead connection costs one failed lookup, served from cache);
+    - pool_timeout = the hot-path deadline, so a saturated pool never queues a request.
+    """
+    connect_args: dict = {}
+    if settings.db_ssl_mode != "disable":
+        connect_args["ssl"] = settings.db_ssl_mode
+    connect_args["statement_cache_size"] = settings.db_statement_cache_size
+    connect_args["timeout"] = settings.db_connect_timeout
+    connect_args["command_timeout"] = settings.db_command_timeout
+    return create_async_engine(
+        settings.db_url,
+        pool_size=settings.hot_db_pool_size,
+        max_overflow=settings.hot_db_max_overflow,
+        pool_timeout=settings.hot_db_timeout_sec,
+        pool_recycle=settings.hot_db_pool_recycle,
+        pool_pre_ping=False,
+        connect_args=connect_args,
+    )
+
+
 def create_session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
     return async_sessionmaker(
         engine,

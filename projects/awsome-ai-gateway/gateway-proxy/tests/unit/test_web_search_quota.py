@@ -217,11 +217,19 @@ class _SumSession:
 
 class TestRebuild:
     async def test_missing_key_is_rebuilt_from_usage_logs(self, redis, monkeypatch):
+        """wave 1: 요청 경로는 기다리지 않고(0 = fail-open) 재구성은 백그라운드 1회."""
         monkeypatch.setattr("app.periods.request_period", lambda: PERIOD)
         sf = _SumSession(7)
         v = await q.ensure_counter(redis, q.user_key(USER, PERIOD), sf, q._SUM_USER_SQL,
                                    USER, PERIOD)
-        assert v == 7 and await redis.get(q.user_key(USER, PERIOD)) == "7"
+        assert v == 0
+        for _ in range(100):
+            if await redis.get(q.user_key(USER, PERIOD)) == "7":
+                break
+            await asyncio.sleep(0.01)
+        assert await redis.get(q.user_key(USER, PERIOD)) == "7"
+        # 재구성 뒤엔 이 프로세스의 마지막 값으로도 남는다
+        assert q._LAST_COUNTER[q.user_key(USER, PERIOD)] == 7
         sql, params = sf.params[0]
         assert "SUM(web_search_count)" in sql and "user_id" in sql
         assert params["id"] == USER
@@ -247,7 +255,9 @@ class TestRebuild:
     async def test_db_unavailable_counts_from_zero_without_writing(self, redis):
         assert await q.ensure_counter(redis, q.user_key(USER, PERIOD), None, q._SUM_USER_SQL,
                                       USER, PERIOD) == 0
+        await asyncio.sleep(0.05)  # 백그라운드 재구성이 DB 없이 끝나게
         assert await redis.exists(q.user_key(USER, PERIOD)) == 0
+        assert await redis.exists(f"wsq:rebuild:{q.user_key(USER, PERIOD)}") == 0  # 락 해제
 
 
 # ── 예약: 동시성·되돌림·요청당 상한 ────────────────────────────────────────────
