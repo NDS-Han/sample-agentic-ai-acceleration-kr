@@ -6,6 +6,7 @@
 ```
 메트릭:   pod → otel-collector → Prometheus → Grafana / prometheus-adapter → HPA
 알림:     Aurora·ElastiCache·RDS events → CloudWatch alarms → SNS topic → email
+          앱 메트릭 → PrometheusRule → Alertmanager → Slack (env 별 Secret 이 있을 때, §10)
 로그:     AWS managed 서비스 → CloudWatch Logs (이미 동작)
           컨테이너 stdout/stderr → kubectl logs 만 (log_shipping 켜면 CloudWatch)
 ```
@@ -19,12 +20,12 @@
 
 | 계층 | 구성 | 소유 | 알림 가능? |
 |---|---|---|---|
-| **In-cluster** | kube-prometheus-stack (Prometheus+Grafana), otel-collector, prometheus-adapter | `deployment/observability/install.sh` — **수동 설치**, managed overlay 아님 | Alertmanager 는 `enabled: false` — 켜면 가능 |
+| **In-cluster** | kube-prometheus-stack (Prometheus+Grafana+Alertmanager), otel-collector, prometheus-adapter | `deployment/observability/install.sh` — **수동 설치**, managed overlay 아님 | ✅ Slack — env 별 Secret 이 있을 때만 전달(§10) |
 | **AWS managed** | CloudWatch alarms + SNS + Fargate 로그 라우터 | `module.alerting` — `features.alerting` 선언 시 **managed overlay** | ✅ 이 문서의 기능 |
 
 In-cluster 스택은 부하테스트 관측용으로 만들어진 상태입니다:
-Prometheus retention **24h**, `emptyDir` 스토리지(파드 재시작 시 메트릭 소실),
-Alertmanager 비활성, PrometheusRule·receiver 없음. HPA 의
+Prometheus retention **24h**, `emptyDir` 스토리지(파드 재시작 시 메트릭 소실).
+Alertmanager 1 파드 + 게이트웨이/비용 PrometheusRule 이 있고, 수신자는 Slack 하나입니다(§10). HPA 의
 `executorInflightTarget` 커스텀 메트릭은 prometheus-adapter 경유로 이미
 동작합니다 — 스택을 지우면 HPA 가 깨집니다.
 
@@ -173,7 +174,7 @@ kubectl -n observability port-forward svc/kube-prometheus-stack-grafana 3000:80
 - **executor 큐 포화**: `gateway_bedrock_executor_queue_depth > 0` 지속은
   용량 상한 신호 — §10(op-guide) 의 scale-out 판단 기준과 같은 메트릭입니다.
 - **HPA**: `kubectl -n llm-gateway get hpa` — CPU + `executor_inflight` 두 축.
-- **Alertmanager 를 켜려면**: 절차는 §8-B — 이 스택은 managed overlay 소유가
+- **Alertmanager / Slack 알림**: §10 — 이 스택은 managed overlay 소유가
   아니라 `deployment/observability/` 의 수동 설치 자산입니다.
 
 ## 6. 비용 (ap-northeast-2 기준 대략)
@@ -198,8 +199,8 @@ kubectl -n observability port-forward svc/kube-prometheus-stack-grafana 3000:80
 - [ ] `log_shipping` 켰다면 `/aws/eks/<cluster>/fargate-logs` 에 스트림 유입 확인
 - [ ] 로그 그룹 retention 정책 결정(기본 무제한)
 - [ ] 알림 수신 채널·당번 체계 합의 — 알람이 울려도 보는 사람이 없으면 의미 없음
-- [ ] (선택) Alertmanager + PrometheusRule + persistent Prometheus 스토리지 —
-      파드/앱 레벨 알림이 필요하면 (§8-B)
+- [ ] env 별 Slack Secret 생성 → kube-prometheus-stack `install.sh` 재실행 → 테스트 알림 도착 확인 (§10)
+- [ ] (선택) persistent Prometheus 스토리지 — 현재 emptyDir+24h (§8-B)
 - [ ] ALB 5xx/UnHealthyHost 알람 — `deploy apply` 가 ingress ALB 를 발견해
       자동 생성 (첫 배포 직후엔 다음 apply 에서 수렴, §8-A)
 - [ ] (선택) 앱 에러율 알람 — `log_shipping` 켠 뒤 metric filter 경로 (§8-C)
@@ -264,22 +265,13 @@ dimension(ARN suffix)을 그때 부여합니다 — `deploy apply` 는 이를 �
 
 ### 8-B. Alertmanager + PrometheusRule (in-cluster 알림)
 
-`deployment/observability/` 는 managed overlay 소유가 아닌 수동 설치 자산 —
-이 디렉토리에서 직접 변경합니다.
+구현됨 — §10. 남은 follow-up:
 
-1. `kube-prometheus-stack/values.yaml`:
-   - `alertmanager.enabled: true`
-   - `alertmanager.config.receivers` — email(SES SMTP) 또는 Slack webhook.
-     SNS 직결은 지원하지 않으므로 SNS 경유가 필요하면 SNS→Lambda→webhook.
-   - `prometheus.prometheusSpec.retention: 7d` + `storageSpec`(gp3 PVC 10Gi+)
-     — 현 `emptyDir`+24h 는 재시작 시 소실.
-2. `serverFiles.alerts`(또는 PrometheusRule) 시작 세트:
-   - `KubePodCrashLooping`, container restart 급증, deployment replica 불일치
-   - `gateway_bedrock_executor_queue_depth > 0` 지속 (큐 포화 → 스케일 한계)
-   - budget/rate-limit 실패율, gateway-proxy 5xx 비율 (export 된 메트릭명 확인 후)
-3. `deployment/observability/install.sh` 재실행 또는 `helm upgrade`.
-4. 검증: 크래시 테스트 파드 → alertmanager UI + 실제 채널 도착 확인.
-   silence 규칙으로 유지보수 창구 묵음 처리.
+- `prometheus.prometheusSpec.retention: 7d` + `storageSpec`(gp3 PVC 10Gi+) — 현 `emptyDir`+24h 는
+  재시작 시 소실되고, 24h 보다 긴 창(`[25h]`)을 쓰는 대조 규칙은 재시작 직후 하루 동안 짧은 창으로 동작합니다.
+  Fargate 에는 EBS CSI 가 없으므로 EC2 노드그룹 또는 AMP(Amazon Managed Prometheus)가 필요합니다 — 인프라 변경.
+- prod Alertmanager HA(2+ replica, gossip mesh).
+- Slack 외 수신자 — 예시만 [alerting-receivers.md](alerting-receivers.md).
 
 ### 8-C. 앱 에러율 알람 (`log_shipping` 전제)
 
@@ -311,3 +303,95 @@ aws cloudwatch put-metric-alarm --region <region> \
   그룹 삭제 전까지 남습니다.
 - **긴급 조용히**: SNS subscription 을 콘솔에서 삭제 — topic·alarm 상태는
   유지되고 메일만 멈춥니다(알람 이력은 콘솔에서 계속 조회 가능).
+
+## 10. In-cluster 알림 — Alertmanager + Slack
+
+```
+앱(OTel) → otel-collector → Prometheus ─ PrometheusRule kube-prometheus-stack-llm-gateway-alerts
+                                         └→ Alertmanager (kps-alertmanager, 1 파드) → Slack (env 별 webhook)
+```
+
+| 파일 (`deployment/observability/kube-prometheus-stack/`) | 내용 |
+|---|---|
+| `values.yaml` | Alertmanager 1 replica(emptyDir), 기본 route = `"null"`(전달 꺼짐), 억제 규칙, Slack 메시지 템플릿, EKS 컨트롤 플레인 잡음 규칙 끄기 |
+| `alerting-rules.yaml` | 게이트웨이/비용 알림 규칙 (항상 적용) |
+| `alertmanager-slack.yaml` | Slack 수신자 + route (Secret 이 있을 때만 `install.sh` 가 적용) |
+| `install.sh` | env 판별 → Secret 확인 → 오버레이·마운트 결정, Prometheus `externalLabels.env` 설정 |
+| `check-alerting.sh`, `tests/` | 오프라인 검증 — `promtool check/test rules`, `amtool check-config`, 라우팅 확인 |
+
+### Slack 켜기 (env 마다 1회, 사용자 작업)
+
+Slack 앱의 **Incoming Webhook** 을 env 별 채널로 하나씩 만듭니다(dev 와 prod 는 다른 채널).
+URL 은 git·values·`--set` 어디에도 넣지 않습니다 — k8s Secret 에만 둡니다.
+
+```bash
+# 대상 클러스터 context 를 먼저 확인 (dev 와 prod 를 섞지 않게)
+kubectl config current-context
+ENV=dev    # prod 클러스터에서는 prod
+read -rs SLACK_WEBHOOK_URL   # https://hooks.slack.com/services/... 붙여넣기 (화면·기록에 안 남음)
+kubectl -n observability create secret generic "alertmanager-slack-${ENV}" \
+  --from-literal=api_url="$SLACK_WEBHOOK_URL"
+unset SLACK_WEBHOOK_URL
+
+# 적용 — Secret 이 있으면 install.sh 가 Slack 오버레이를 켠다
+ALERT_ENV="$ENV" bash deployment/observability/kube-prometheus-stack/install.sh
+```
+
+- env 판별: `ALERT_ENV` → 없으면 현재 context 의 클러스터 이름 끝(`llm-gateway-dev` → `dev`).
+  `install-eks.sh` 의 `ensure_observability` 는 `ALERT_ENV=<dev|prod>` 를 넘깁니다.
+- Secret 이 없거나 `api_url` 이 비면: `⚠ Alertmanager: Secret ... 없음 → 알림 전달 꺼짐` 경고 후 그대로
+  설치합니다. Alertmanager 는 떠서 UI 에서 알림을 보여 주지만 모든 알림이 `"null"` 로 갑니다.
+- URL 교체: 같은 이름으로 Secret 을 다시 만듭니다(`kubectl -n observability delete secret alertmanager-slack-<env>`
+  후 위 create). 마운트된 파일은 kubelet 이 ~1분 안에 갱신하고 Alertmanager 는 보낼 때마다 파일을 읽으므로
+  재설치가 필요 없습니다(마운트가 `optional` 이라 잠시 비어도 파드는 그대로).
+- 끄기: Secret 삭제 후 `install.sh` 재실행(마운트·Slack route 제거). 재실행 전에는 Slack 전송 실패가
+  `alertmanager_notifications_failed_total` 과 차트 기본 알림 `AlertmanagerFailedToSendAlerts` 로 보입니다.
+
+### 규칙 (`alerting-rules.yaml`)
+
+| 알림 | 조건 | for / 등급 |
+|---|---|---|
+| CostReconciliationMismatch | `sum by (check) (increase(reconciliation_mismatch_total[25h])) > 0` | — / warning |
+| CostReconciliationStale | 마지막 성공 대조가 26h 넘게 전, 또는 `reconciliation_last_success_timestamp` 30m 부재 | 15m / critical |
+| CostStreamLagHigh | `max(cost_recorder_stream_lag) > 1000` / `> 20000` | 10m / warning, critical |
+| CostWorkerMetricsAbsent | `absent_over_time(cost_recorder_stream_lag[10m])` | 5m / critical — 워커의 다른 알림을 억제 |
+| CostDeadLetterGrowth | `cost_recorder_dead_letter_rows_total` 30m 증가 또는 새 시리즈 | — / warning |
+| CostDeadLetterDropped | `cost_recorder_dead_letter_dropped_total` 30m 증가 또는 새 시리즈 | — / critical |
+| GatewayHigh5xxRatio | `gateway_request_total{status=~"5.."}` 비율 `> 5%` / `> 20%` (5분 ~15건 이상일 때) | 10m warning / 5m critical |
+| GatewayHigh503Ratio | `status="503"` 비율 `> 5%` | 5m / warning |
+| GatewayBudgetDegraded | `gateway_budget_degraded_total` — `grace_*`·`last_known_*` 증가 / `stale_policy`·`rebuild_skipped` 지속 | 2m critical / 15m warning |
+
+메모:
+
+- 앱 메트릭은 scrape 가 아니라 remote-write 로 오므로 staleness marker 가 없습니다. 부재는
+  `absent_over_time` 으로 봅니다. OTel 카운터는 첫 증가 때 시리즈가 생기므로, dead-letter 규칙은
+  "30m 전에 없던 시리즈" 항으로 재시작 뒤 첫 이벤트도 잡습니다(Prometheus 자체 재시작 후 30m 은 그 항을 끔).
+- 대조 잡이 꺼진 환경(`RECONCILIATION_ENABLED=false`)에서는 CostReconciliationStale 이 계속 울립니다 —
+  그 env 에서는 silence 를 걸거나 규칙을 지웁니다.
+- 끈 차트 기본 규칙: `kubeControllerManager`·`kubeScheduler`·`kubeProxy`·`kubeEtcd` 컴포넌트(EKS 가 노출하지
+  않음, Fargate 에 kube-proxy 없음)와 `KubeVersionMismatch`(Fargate kubelet 버전 차이). `Watchdog`·
+  `InfoInhibitor` 와 `severity=info` 알림은 `"null"` 로 보냅니다(UI 에서만 보임).
+- Slack 메시지 제목: `[FIRING:n] [<env>] <alertname>` — env 는 Prometheus `externalLabels.env`.
+
+### 확인
+
+```bash
+# 오프라인 (렌더 + promtool + amtool) — 배포 전
+bash deployment/observability/kube-prometheus-stack/check-alerting.sh
+
+# 클러스터
+kubectl -n observability get pods -l app.kubernetes.io/name=alertmanager
+kubectl -n observability port-forward svc/kps-alertmanager 9093:9093   # http://localhost:9093
+kubectl -n observability port-forward svc/kps-prometheus 9090:9090     # Alerts 탭 / Status → Rules
+
+# 테스트 알림 1건 → Slack 채널 도착 확인 (resolve_timeout 5m 뒤 자동 해소)
+kubectl -n observability exec alertmanager-kps-alertmanager-0 -c alertmanager -- \
+  amtool alert add GatewayAlertingTest severity=warning service=test env=<env> \
+  --annotation='summary="alerting test - ignore"' --alertmanager.url=http://localhost:9093
+```
+
+유지보수 창 묵음: Alertmanager UI → Silences, 또는
+`amtool silence add 'alertname=~"Gateway.*"' --duration=2h --comment=maintenance --alertmanager.url=http://localhost:9093`.
+silence 는 emptyDir 이라 Alertmanager 파드 재시작 시 사라집니다.
+
+다른 수신자(Teams, webhook, PagerDuty, Opsgenie, Discord, email/SES, SNS) 예시: [alerting-receivers.md](alerting-receivers.md).

@@ -506,7 +506,8 @@ Lifecycle: **Deactivate** preserves history (preferred for retiring);
   full request/response bodies **unmasked** in S3 — a debugging tool,
   not an always-on feature; every view is audited.
 - **Dashboards + opt-in alerts** — the Prometheus/Grafana stack collects
-  metrics and feeds the HPA (Alertmanager still disabled — §14), and
+  metrics and feeds the HPA; Alertmanager sends gateway/cost alerts to
+  Slack once the per-env webhook Secret exists (observability.md §10), and
   `features.alerting` adds SNS + CloudWatch alarms for Aurora/
   ElastiCache plus optional Fargate→CloudWatch log shipping through the
   managed overlay. See [observability.md](../observability.md) — until
@@ -741,10 +742,11 @@ received — an unchecked row here is a future incident.
       ([observability.md](../observability.md) §3). ALB 5xx/UnHealthyHost
       alarms are auto-discovered by `deploy apply` (eks) — verify they
       exist after the apply following ingress creation
-      (§8-A). Pod/app-level alerts are still unwired: in-cluster
-      Alertmanager is `enabled: false`, Prometheus retention 24h on
-      emptyDir — enable rules + receivers + persistent storage, or
-      formally accept pull monitoring
+      (§8-A). Pod/app-level alerts: in-cluster Alertmanager + gateway/cost
+      PrometheusRules ship with the observability stack; Slack delivery
+      starts once the user creates `alertmanager-slack-<env>`
+      ([observability.md](../observability.md) §10). Prometheus retention
+      is still 24h on emptyDir — persistent storage is a follow-up
 - [ ] **Notification channel** — `features.notifications.provider`
       (ses/smtp/internal_api): sender address ownership, who receives
       budget-alert emails

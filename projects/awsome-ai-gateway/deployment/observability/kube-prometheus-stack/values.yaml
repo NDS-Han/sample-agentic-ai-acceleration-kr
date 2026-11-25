@@ -18,8 +18,90 @@ prometheus-node-exporter:
   hostRootFsMount:
     enabled: false
 
-alertmanager:
+# ─── EKS 관리형 컨트롤 플레인 — 긁을 수 없어 *Down 알림이 상시 firing ──────
+# EKS 는 controller-manager / scheduler / etcd 를 노출하지 않고, Fargate 에는
+# kube-proxy DaemonSet 이 없다. 끄면 해당 ServiceMonitor 와 기본 알림 규칙
+# (KubeControllerManagerDown, KubeSchedulerDown, KubeProxyDown, etcd*)이 같이 빠진다.
+kubeControllerManager:
   enabled: false
+kubeScheduler:
+  enabled: false
+kubeProxy:
+  enabled: false
+kubeEtcd:
+  enabled: false
+
+defaultRules:
+  disabled:
+    # Fargate kubelet 과 API 서버의 패치 버전이 다른 것이 EKS 의 정상 상태 — 상시 firing.
+    KubeVersionMismatch: true
+
+# ─── Alertmanager — Slack 만 구현된 수신자 ───────────────────────────────
+# 이 파일은 **전달 꺼짐** 기본 설정이다(모든 알림 → "null"). Slack 전달은
+# install.sh 가 env 별 Secret(alertmanager-slack-<env>, key api_url)을 찾았을 때만
+# alertmanager-slack.yaml 을 덧씌워 켠다. Webhook URL 은 git·values 어디에도 없다 —
+# 파드가 Secret 을 파일로 마운트하고 Alertmanager 가 api_url_file 로 읽는다.
+# 다른 수신자(Teams, webhook, PagerDuty, …)는 docs/NDS/alerting-receivers.md 의 예시.
+alertmanager:
+  enabled: true
+  alertmanagerSpec:
+    replicas: 1           # dev/prod 공통 1 파드. prod HA(2+, gossip)는 REPORT 의 sizing 메모
+    storage: {}           # emptyDir — Fargate 에 EBS CSI 없음. 재시작 시 silence·알림 로그 소실
+    retention: 120h
+    resources:
+      requests:
+        cpu: "50m"
+        memory: "64Mi"
+      limits:
+        cpu: "200m"
+        memory: "128Mi"
+  config:
+    global:
+      resolve_timeout: 5m
+    route:
+      receiver: "null"
+      group_by: ["alertname", "namespace", "severity"]
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 12h
+      routes:
+        - receiver: "null"
+          matchers: ['alertname = "Watchdog"']
+        - receiver: "null"
+          matchers: ['alertname = "InfoInhibitor"']
+    receivers:
+      - name: "null"
+    # 차트 기본 억제 규칙 4개 + 워커 부재 시 그 워커의 파생 알림 억제.
+    inhibit_rules:
+      - source_matchers: ['severity = critical']
+        target_matchers: ['severity =~ warning|info']
+        equal: ["namespace", "alertname"]
+      - source_matchers: ['severity = warning']
+        target_matchers: ['severity = info']
+        equal: ["namespace", "alertname"]
+      - source_matchers: ['alertname = InfoInhibitor']
+        target_matchers: ['severity = info']
+        equal: ["namespace"]
+      - target_matchers: ['alertname = InfoInhibitor']
+      - source_matchers: ['alertname = CostWorkerMetricsAbsent']
+        target_matchers: ['service = cost-recorder-worker', 'alertname != CostWorkerMetricsAbsent']
+    templates:
+      - "/etc/alertmanager/config/*.tmpl"
+  # Slack 메시지 형식 — Slack 모드에서만 쓰인다(전달 꺼짐 모드에서는 로드만 됨).
+  # env 는 Prometheus externalLabels.env(install.sh 가 --set)에서 온다.
+  templateFiles:
+    slack.tmpl: |-
+      {{ define "gw.slack.title" -}}
+      [{{ .Status | toUpper }}{{ if eq .Status "firing" }}:{{ .Alerts.Firing | len }}{{ end }}] [{{ or .CommonLabels.env "?" }}] {{ .CommonLabels.alertname }}
+      {{- end }}
+      {{ define "gw.slack.text" -}}
+      {{ range .Alerts -}}
+      *{{ .Labels.severity | toUpper }}* {{ .Annotations.summary }}
+      {{ with .Annotations.description }}{{ . }}
+      {{ end }}{{ range .Labels.SortedPairs }}{{ if and (ne .Name "alertname") (ne .Name "severity") (ne .Name "prometheus") }}`{{ .Name }}={{ .Value }}` {{ end }}{{ end }}
+      {{ with .Annotations.runbook_url }}<{{ . }}|runbook> {{ end }}<{{ .GeneratorURL }}|query>
+      {{ end -}}
+      {{- end }}
 
 prometheusOperator:
   # admissionWebhooks 를 전부 비활성화.

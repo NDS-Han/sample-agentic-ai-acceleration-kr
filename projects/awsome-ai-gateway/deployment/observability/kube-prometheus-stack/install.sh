@@ -84,11 +84,41 @@ fi
 REGION_SET=()
 [ -n "$CW_REGION" ] && REGION_SET=(--set "grafana.additionalDataSources[0].jsonData.defaultRegion=${CW_REGION}")
 
+# ─── Alertmanager Slack 전달 — env 별 Secret 이 있을 때만 켠다 ─────────────
+# env: ALERT_ENV → 없으면 현재 kube context 의 클러스터 이름 끝(llm-gateway-dev → dev).
+# Secret: alertmanager-slack-<env> (ns observability, key api_url = Slack incoming-webhook URL).
+# 사용자가 직접 만든다 — 명령은 docs/NDS/observability.md §10. Secret 이 없거나 api_url 이
+# 비어 있으면 Alertmanager 는 뜨되 모든 알림을 "null" 로 보낸다(전달 꺼짐). 나머지는 그대로.
+ALERT_ENV="${ALERT_ENV:-}"
+if [ -z "$ALERT_ENV" ]; then
+  cur_cluster="$(kubectl config view --minify -o jsonpath='{.contexts[0].context.cluster}' 2>/dev/null || true)"
+  cur_cluster="${cur_cluster##*/}"          # EKS context 는 ARN — 마지막 경로 조각이 클러스터 이름
+  [ -n "$cur_cluster" ] && ALERT_ENV="${cur_cluster##*-}"
+fi
+ALERT_ENV="${ALERT_ENV:-unknown}"
+SLACK_SECRET="${SLACK_SECRET_NAME:-alertmanager-slack-${ALERT_ENV}}"
+
+# 알림에 env 라벨을 붙인다(Slack 제목의 [dev]/[prod]). 로컬 쿼리·HPA 에는 영향 없음.
+ALERT_SET=(-f alerting-rules.yaml --set-string "prometheus.prometheusSpec.externalLabels.env=${ALERT_ENV}")
+slack_url_b64="$(kubectl -n "$NS" get secret "$SLACK_SECRET" -o jsonpath='{.data.api_url}' 2>/dev/null || true)"
+if [ -n "$slack_url_b64" ]; then
+  ok "Alertmanager: Slack 전달 켬 (env=${ALERT_ENV}, Secret ${NS}/${SLACK_SECRET})"
+  ALERT_SET+=(-f alertmanager-slack.yaml
+    --set "alertmanager.alertmanagerSpec.volumes[0].name=slack-webhook"
+    --set-string "alertmanager.alertmanagerSpec.volumes[0].secret.secretName=${SLACK_SECRET}"
+    --set "alertmanager.alertmanagerSpec.volumes[0].secret.optional=true")
+else
+  warn "Alertmanager: Secret ${NS}/${SLACK_SECRET} (key api_url) 없음 → 알림 전달 꺼짐 (env=${ALERT_ENV})."
+  warn "  켜려면 Secret 을 만들고 이 스크립트를 다시 실행 (docs/NDS/observability.md §10)"
+fi
+unset slack_url_b64
+
 if [ -n "${GRAFANA_ROLE_ARN}" ]; then
   helm upgrade --install kps prometheus-community/kube-prometheus-stack \
     --namespace "$NS" \
     --version "$KPS_VERSION" \
     -f values.yaml \
+    "${ALERT_SET[@]}" \
     --set "grafana.serviceAccount.annotations.eks\.amazonaws\.com/role-arn=${GRAFANA_ROLE_ARN}" \
     "${REGION_SET[@]}" \
     --timeout 10m \
@@ -98,6 +128,7 @@ else
     --namespace "$NS" \
     --version "$KPS_VERSION" \
     -f values.yaml \
+    "${ALERT_SET[@]}" \
     "${REGION_SET[@]}" \
     --timeout 10m \
     --wait
