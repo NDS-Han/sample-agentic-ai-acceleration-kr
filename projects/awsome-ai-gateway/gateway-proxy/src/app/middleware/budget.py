@@ -107,35 +107,27 @@ class BudgetMiddleware:
         )
 
         effective_redis = None if is_redis_degraded else redis
-        use_db = not is_db_degraded and session_factory is not None
 
         client = state.get("client")
 
         try:
-            # short-lived session: budget 조회 후 즉시 반환.
+            # DB 는 세션을 요청 내내 쥐지 않고 팩토리로 넘긴다 — 예산 서비스가 읽기마다
+            # hot-path 풀에서 짧은 세션을 데드라인 안에서 연다(wave 1c). DB_DEGRADED 면
+            # 시도 없이 마지막으로 알던 정책/상태로 판정한다.
             # ⚠️ try 범위는 체크 호출뿐이어야 한다 — await self.app(...) 까지
             #    감싸면 다운스트림(라우터/다른 미들웨어)의 PermissionError 가
             #    예산 거절 429 로 오보고되고, 응답이 이미 시작된 뒤라면 두 번째
             #    response.start 로 ASGI 오류가 된다.
-            if use_db:
-                async with session_factory() as db:
-                    budget_status = await _budget_service.check_budget(
-                        effective_redis,
-                        db,
-                        auth_context.user_id,
-                        auth_context.team_id,
-                        period,
-                        client=client,
-                    )
-            else:
-                budget_status = await _budget_service.check_budget(
-                    effective_redis,
-                    None,
-                    auth_context.user_id,
-                    auth_context.team_id,
-                    period,
-                    client=client,
-                )
+            budget_status = await _budget_service.check_budget(
+                effective_redis,
+                None,
+                auth_context.user_id,
+                auth_context.team_id,
+                period,
+                client=client,
+                session_factory=session_factory,
+                db_degraded=bool(is_db_degraded),
+            )
         except BudgetBackendUnavailableError as e:
             # DB+Redis 양쪽 다 예산 체크 불가 — 'no_budget_assigned' 429 로 오보하지
             # 않고 인프라 장애를 503 으로 돌려준다 (PermissionError 서브클래스라
@@ -153,6 +145,14 @@ class BudgetMiddleware:
         except PermissionError as e:
             reason = str(e)
             await self._send_429_budget(scope, send, reason)
+            return
+
+        if budget_status is None:
+            # 정책도 상태도 몰라 유예 창 안에서 허용(budget_degraded). 판정 근거가 없으니
+            # budget_status(헤더·강등·스로틀 입력)는 비워 두고, 월예산 선예약도 건너뛴다 —
+            # Redis 에 팀 설정이 없으면 reserve 가 team_budget_unset 으로 다시 막는다.
+            state["budget_degraded"] = "grace"
+            await self.app(scope, receive, send)
             return
 
         state["budget_status"] = budget_status

@@ -86,6 +86,16 @@ class GatewayMetrics:
             description="Budget suspect scopes dropped from the sentinel re-delivery queue",
         )
 
+        # 예산 체크 열화 모드(wave 1c) — Redis/DB 가 답하지 못해 마지막으로 알던 값이나
+        # 유예 창으로 판정한 횟수. reason: stale_policy | last_known_allow |
+        # last_known_block | grace_allow | grace_expired | rebuild_skipped.
+        # grace_* 가 0 이 아니면 예산을 확인하지 못한 채 통과/거절 중 → 알람 대상.
+        self.budget_degraded_total: Counter = meter.create_counter(
+            "gateway_budget_degraded_total",
+            description="Budget checks decided in degraded mode (last known values / grace window)",
+            unit="1",
+        )
+
         # Downgrade (FR-3.6)
         self.downgrade_applied_total: Counter = meter.create_counter(
             "gateway_downgrade_applied_total",

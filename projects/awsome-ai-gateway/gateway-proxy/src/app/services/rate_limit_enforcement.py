@@ -522,53 +522,68 @@ async def enforce_rate_limits(
             min(max_output, _res_out_cap) if _res_out_cap else max_output,
             tier_input=estimated_input_billing,
         )
-        try:
-            budget_reservation = await BudgetService().reserve_budget(
-                redis,
-                str(auth_context.user_id),
-                str(auth_context.team_id) if auth_context.team_id else None,
-                request_period(),
-                worst_cost,
-                reservation_id or request_id,
-                client=state.get("client"),
-                marker_ttl=get_settings().budget_reservation_ttl_seconds,
-            )
-        except PermissionError as exc:
-            # 앞서 커밋된 TPM + 비용 예약을 되돌린다 — 월예산 거절로 요청이 나가도
-            # 분/시간 한도를 실비 없이 물고 있으면 같은 기아 피드백이 생긴다.
-            try:
-                await svc.settle_tpm(redis, tpm_committed, reserved, 0, reserved_at=tpm_now_sec)
-                _released["tpm"] = True
-            except Exception:
-                logger.warning("tpm_unwind_on_budget_reject_failed")
-            if cost_result.reserved_cost is not None and cost_result.reserved_cost != Decimal("0"):
-                try:
-                    await svc.settle_cost(
-                        redis,
-                        user_id=str(auth_context.user_id),
-                        actual_cost=Decimal("0"),
-                        reserved_cost=cost_result.reserved_cost,
-                        team_id=str(auth_context.team_id) if auth_context.team_id else None,
-                        committed_scopes=cost_result.committed_scopes,
-                        cpm_window_ts=cost_result.cpm_window_ts or None,
-                        cph_window_ts=cost_result.cph_window_ts or None,
-                        committed_keys=cost_result.committed_keys or None,
-                    )
-                    _released["cost"] = True
-                except Exception:
-                    logger.warning("cost_unwind_on_budget_reject_failed")
-            await svc.undo_rpm(redis, descriptors, request_id, committed_keys=rpm_result.committed_keys)
-            _released["rpm"] = True
-            # BudgetBackendUnavailableError 도 PermissionError 서브클래스라 여기에
-            # 잡힌다 — 인프라 장애를 'no_budget_assigned' 429 로 오보하면 BudgetMiddleware
-            # 의 503 계약과 어긋나고 클라이언트가 rate-limit 백오프로 잘못 재시도한다.
-            reason = "budget_backend_unavailable" if isinstance(exc, BudgetBackendUnavailableError) else str(exc)
-            return _build_budget_429(reason, metrics)
-        except Exception:
-            # 예약 경로 자체의 장애(스크립트 미로드·직렬화 오류 등)는 요청을 막지
-            # 않는다 — 예약 없이 진행하면 기존 체크 전용 동작으로 회귀할 뿐이다.
-            logger.exception("budget_reserve_unexpected_failure")
+        if state.get("budget_degraded") == "grace":
+            # 예산 미들웨어가 정책·상태를 몰라 유예 창으로 통과시킨 요청(wave 1c) — Redis 에
+            # 팀 설정이 없을 수 있어 reserve 가 team_budget_unset 으로 다시 막는다. 예약 없이
+            # 진행한다(예약 eval 실패의 fail-open 과 같은 결과). 비용 기록은 그대로다.
             budget_reservation = []
+        else:
+            try:
+                budget_reservation = await BudgetService().reserve_budget(
+                    redis,
+                    str(auth_context.user_id),
+                    str(auth_context.team_id) if auth_context.team_id else None,
+                    request_period(),
+                    worst_cost,
+                    reservation_id or request_id,
+                    client=state.get("client"),
+                    marker_ttl=get_settings().budget_reservation_ttl_seconds,
+                )
+            except PermissionError as exc:
+                # 앞서 커밋된 TPM + 비용 예약을 되돌린다 — 월예산 거절로 요청이 나가도
+                # 분/시간 한도를 실비 없이 물고 있으면 같은 기아 피드백이 생긴다.
+                try:
+                    await svc.settle_tpm(redis, tpm_committed, reserved, 0, reserved_at=tpm_now_sec)
+                    _released["tpm"] = True
+                except Exception:
+                    logger.warning("tpm_unwind_on_budget_reject_failed")
+                if (
+                    cost_result.reserved_cost is not None
+                    and cost_result.reserved_cost != Decimal("0")
+                ):
+                    try:
+                        await svc.settle_cost(
+                            redis,
+                            user_id=str(auth_context.user_id),
+                            actual_cost=Decimal("0"),
+                            reserved_cost=cost_result.reserved_cost,
+                            team_id=str(auth_context.team_id) if auth_context.team_id else None,
+                            committed_scopes=cost_result.committed_scopes,
+                            cpm_window_ts=cost_result.cpm_window_ts or None,
+                            cph_window_ts=cost_result.cph_window_ts or None,
+                            committed_keys=cost_result.committed_keys or None,
+                        )
+                        _released["cost"] = True
+                    except Exception:
+                        logger.warning("cost_unwind_on_budget_reject_failed")
+                await svc.undo_rpm(
+                    redis, descriptors, request_id, committed_keys=rpm_result.committed_keys
+                )
+                _released["rpm"] = True
+                # BudgetBackendUnavailableError 도 PermissionError 서브클래스라 여기에
+                # 잡힌다 — 인프라 장애를 'no_budget_assigned' 429 로 오보하면 BudgetMiddleware
+                # 의 503 계약과 어긋나고 클라이언트가 rate-limit 백오프로 잘못 재시도한다.
+                reason = (
+                    "budget_backend_unavailable"
+                    if isinstance(exc, BudgetBackendUnavailableError)
+                    else str(exc)
+                )
+                return _build_budget_429(reason, metrics)
+            except Exception:
+                # 예약 경로 자체의 장애(스크립트 미로드·직렬화 오류 등)는 요청을 막지
+                # 않는다 — 예약 없이 진행하면 기존 체크 전용 동작으로 회귀할 뿐이다.
+                logger.exception("budget_reserve_unexpected_failure")
+                budget_reservation = []
 
         # 통과 — settle용 정보 주입. 윈도우/커밋 스코프도 싣는다 — settle 이
         # **예약이 실제로 들어간** 버킷/스코프 키를 치게 하는 근거이다(윈도우 경계를

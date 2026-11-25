@@ -161,6 +161,7 @@ database:
 
 # Rate-limit 정책(deepdive Q50). failMode: open=eval 실패 시 통과(가용성·기본),
 # closed=차단(쿼타 정확성). **무단 전환 금지** — budget/auth 는 이미 fail-closed 라
+# (budget 은 wave 1c 부터 마지막으로 알던 값으로 판정, 모를 때만 유예 창 뒤 fail-closed)
 # 의도적 비대칭(RL 은 남용방지지 과금 게이트 아님). 운영 정책 결정 후에만 closed.
 rateLimit:
   failMode: open
@@ -560,6 +561,18 @@ gatewayProxy:
   #   AUTH_LOCAL_CACHE_MAX_ENTRIES: "20000"
   #   AUTH_REDIS_FALLBACK_TIMEOUT_SEC: "0.5" # Redis wait in auth when a local fallback exists
   #   AUTH_INVALIDATION_CHANNEL: "gateway:auth:invalidate"  # admin-api publishes here
+  #
+  # Budget check degraded mode (wave 1c — decide from last known values) — code defaults:
+  #   BUDGET_POLICY_REFRESH_SEC: "60"          # in-process budget policy cache, background re-read
+  #   BUDGET_STALE_MAX_SECONDS: "900"          # max age of last known policy/state when DB/Redis fail
+  #   BUDGET_FAILOPEN_GRACE_SECONDS: "300"     # nothing known (cold pod + DB down): allow this long
+  #                                            #   per uvicorn worker, then 503. Metric:
+  #                                            #   gateway_budget_degraded_total{reason}
+  #   BUDGET_REDIS_TIMEOUT_SEC: "1.0"          # deadline for the Redis part of the budget check
+  #   BUDGET_DEGRADED_CONFIG_TTL_SEC: "60"     # TTL of Redis config keys rebuilt from the cache
+  #   BUDGET_POLICY_REFRESH_TIMEOUT_SEC: "2.0" # background policy re-read deadline (main pool)
+  #   BUDGET_POLICY_REFRESH_RETRY_SEC: "10"    # wait before retrying a failed background re-read
+  #   BUDGET_LOCAL_CACHE_MAX_ENTRIES: "20000"
   #   DEGRADED_LOOKUP_TIMEOUT_SEC: "0.5"     # downgrade / web-search policy lookups
   #   WEB_SEARCH_REBUILD_TIMEOUT_SEC: "20"   # background web-search counter rebuild
   #   WEB_SEARCH_REBUILD_LOCK_TTL_SEC: "60"

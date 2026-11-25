@@ -625,8 +625,19 @@ async def test_app_budget_enforced_for_d_user_without_individual_config(mock_red
     assert calls == ["team", "user", "client"]
 
 
+@pytest.fixture
+def grace_expired():
+    """wave 1c: 정책·상태를 모르는 판정은 유예 창(기본 300 s) 동안 허용된다. 아래 503 계약
+    테스트들은 유예가 끝난 쪽(fail-closed)을 검증한다 — 창 안쪽은 test_budget_degraded.py."""
+    from app.services import budget_degraded
+
+    budget_degraded.DEGRADED.grace.seconds = -1.0
+    yield
+    budget_degraded.DEGRADED.grace.seconds = 300.0
+
+
 @pytest.mark.asyncio
-async def test_check_budget_both_backends_down_raises_unavailable():
+async def test_check_budget_both_backends_down_raises_unavailable(grace_expired):
     """DB+Redis 모두 없으면 예산 미설정(429)이 아니라 백엔드 불가(503) 계약."""
     from app.services.budget_service import BudgetBackendUnavailableError
 
@@ -636,7 +647,7 @@ async def test_check_budget_both_backends_down_raises_unavailable():
 
 
 @pytest.mark.asyncio
-async def test_check_budget_redis_fail_db_none_raises_unavailable(mock_redis):
+async def test_check_budget_redis_fail_db_none_raises_unavailable(mock_redis, grace_expired):
     """Redis 경로 실패 + DB_DEGRADED(db=None) → BudgetBackendUnavailableError.
 
     'no_budget_assigned' PermissionError 로 오보하면 인프라 장애가 예산
@@ -654,7 +665,7 @@ async def test_check_budget_redis_fail_db_none_raises_unavailable(mock_redis):
 
 
 @pytest.mark.asyncio
-async def test_check_budget_db_fallback_error_raises_unavailable(mock_redis):
+async def test_check_budget_db_fallback_error_raises_unavailable(mock_redis, grace_expired):
     """Redis 경로 실패 후 DB fallback 자체가 터져도 백엔드 불가로 보존."""
     from app.services.budget_service import BudgetBackendUnavailableError
     from app.services.lua_loader import LuaScriptLoader
@@ -680,7 +691,7 @@ def test_backend_unavailable_is_permission_error():
 
 
 @pytest.mark.asyncio
-async def test_team_config_hydrate_db_error_is_not_reported_as_unset(mock_redis):
+async def test_team_config_hydrate_db_error_is_not_reported_as_unset(mock_redis, grace_expired):
     """team config 콜드캐시 + DB 조회 실패 → team_budget_unset(429) 이 아니라
     백엔드 불가(503) 여야 한다 — '조회 실패' 와 '행 없음' 의 구분."""
     from app.services.budget_service import BudgetBackendUnavailableError

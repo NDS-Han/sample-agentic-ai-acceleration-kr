@@ -16,7 +16,7 @@ class FakeApp:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("reason,expected_code,status_label", [
-    ("team_budget_unset",    "team_budget_unset",    "팀 예산이 설정되지 않았습니다"),
+    ("team_budget_unset",    "team_budget_unset",    "Team budget is not configured"),
     ("team_budget_exceeded", "team_budget_exceeded", "Budget limit exceeded"),
     ("user_budget_exceeded", "user_budget_exceeded", "Budget limit exceeded"),
     ("hard_block",           "hard_block",           "Monthly budget exhausted"),
