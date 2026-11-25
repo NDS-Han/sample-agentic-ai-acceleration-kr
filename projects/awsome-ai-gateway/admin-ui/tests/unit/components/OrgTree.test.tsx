@@ -161,4 +161,18 @@ describe('OrgTree', () => {
       secondary: null,
     });
   });
+
+  it('rowLabels — 합성 이메일(<sub>@unknown)은 둘째 줄에 나오지 않는다', () => {
+    const u = (name: string, email: string | null) => ({ id: 'u', name, type: 'USER' as const, children: [], meta: meta({ email }) });
+    // 이름 + 합성 이메일 → 이름만
+    expect(rowLabels(u('heomk@nongshim.co.kr', '61739d0a-8081-7068-b73f-55872f2b0000@unknown'))).toEqual({
+      primary: 'heomk@nongshim.co.kr',
+      secondary: null,
+    });
+    // 이름도 합성 이메일 → UUID 대신 unnamed
+    const syn = 'abc-123@unknown';
+    expect(rowLabels(u(syn, syn), 'Unnamed user')).toEqual({ primary: 'Unnamed user', secondary: null });
+    // 실제 이메일은 그대로 둘째 줄
+    expect(rowLabels(u('Load Test', 'loadtest@mock.local'))).toEqual({ primary: 'Load Test', secondary: 'loadtest@mock.local' });
+  });
 });

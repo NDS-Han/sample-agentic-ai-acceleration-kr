@@ -14,8 +14,10 @@ import { useTranslations } from 'next-intl';
 import { ArrowUpRight } from 'lucide-react';
 
 import { RoleBadge } from '@/components/common/Badge';
-import { useReportingTz } from '@/components/common/ReportingTimezoneProvider';
-import { fmtDateMinute, fmtTokensCompact, fmtUsd } from '@/lib/utils/format';
+import { EmailText } from '@/components/common/UnverifiedEmailBadge';
+import { usePointInTime } from '@/components/common/usePointInTime';
+import { fmtTokensCompact, fmtTokensCount, fmtUsd } from '@/lib/utils/format';
+import { userNameParts } from '@/lib/userLabel';
 import { modelDisplay } from '@/lib/utils/modelLabel';
 import type { OrgTreeNode } from '@/types/entities';
 
@@ -31,10 +33,14 @@ import { usePolicyText } from './usePolicyText';
 
 type DialogKind = null | 'apps' | 'models' | 'rate';
 
-export function userTitle(node: OrgTreeNode): { title: string; email: string | null; hasName: boolean } {
+export function userTitle(
+  node: OrgTreeNode,
+  unnamed = '',
+): { title: string; email: string | null; hasName: boolean; unverified: boolean } {
+  // email 은 Body Logs·API Keys 필터용 원래 값(합성 포함). 화면에는 합성 이메일을 내보내지 않는다.
   const email = node.meta.email ?? null;
-  const hasName = !!node.name && node.name !== email;
-  return { title: hasName ? node.name : (email ?? node.name), email, hasName };
+  const u = userNameParts(node.name, email, unnamed);
+  return { title: u.primary, email, hasName: !!u.name, unverified: u.unverified };
 }
 
 export function UserDetail({
@@ -51,7 +57,8 @@ export function UserDetail({
 }) {
   const t = useTranslations('usersDetail');
   const tu = useTranslations('users');
-  const tz = useReportingTz();
+  const pit = usePointInTime();
+  const tc = useTranslations('common');
   const period = useCurrentPeriod();
   const [dialog, setDialog] = useState<DialogKind>(null);
   const catalog = useCatalog();
@@ -61,11 +68,11 @@ export function UserDetail({
   const activity = useActivity([node.id]);
   const cat = catalog.status === 'ready' ? catalog.data : [];
   const text = usePolicyText(cat);
-  const { title, email, hasName } = userTitle(node);
+  const { title, email, hasName, unverified } = userTitle(node, tc('unnamedUser'));
   const role = node.meta.role;
   const teamName = node.meta.team_display_name || node.meta.team_name || t('user.noTeam');
   const act = activity.status === 'ready' ? activity.data.get(node.id) : undefined;
-  const lastUsed = act ? (act.last_used_at ? fmtDateMinute(act.last_used_at, tz) : t('user.never')) : '—';
+  const lastUsed = act ? (act.last_used_at ? pit.stampZ(act.last_used_at) : t('user.never')) : '—';
 
   const p = policy.status === 'ready' ? policy.data : null;
   const apps = p ? appsSummary(p, 'user') : null;
@@ -106,7 +113,7 @@ export function UserDetail({
           <div className="min-w-0">
             <h2 className="break-all text-xl font-bold" data-testid="user-title">{title}</h2>
             <p className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-muted-foreground">
-              {hasName && email && <span className="break-all">{email}</span>}
+              {unverified ? <EmailText email={email} info /> : hasName && email && <span className="break-all">{email}</span>}
               {role && <RoleBadge role={role} label={tu(`roleLabel.${role}` as 'roleLabel.ADMIN')} />}
               <span>
                 {teamName} · {t('user.lastUsed', { when: lastUsed })}
@@ -131,7 +138,7 @@ export function UserDetail({
               value={total ? fmtUsd(Number(total.cost_usd)) : '—'}
               sub={share != null ? t('kpi.shareOfTeam', { pct: share.toFixed(0) }) : t('kpi.thisMonth')}
             />
-            <KpiCard label={t('kpi.tokens')} value={total ? fmtTokensCompact(total.total_tokens) : '—'} sub={t('kpi.tokensSub')} />
+            <KpiCard label={t('kpi.tokens')} value={total ? fmtTokensCount(total.total_tokens) : '—'} sub={t('kpi.tokensSub')} />
             <KpiCard label={t('kpi.requests')} value={total ? total.requests.toLocaleString('en-US') : '—'} sub={t('kpi.thisMonth')} />
             <KpiCard
               label={t('kpi.webSearches')}

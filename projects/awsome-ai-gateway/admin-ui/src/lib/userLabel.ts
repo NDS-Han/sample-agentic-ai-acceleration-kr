@@ -44,3 +44,23 @@ export function userLabel({
   if (name) return name;
   return email ? shortSyntheticId(email) : '';
 }
+
+/**
+ * 이름·이메일 두 줄 표시용 조각 — 합성 이메일(`<sub>@unknown`)은 어느 줄에도 내보내지 않는다.
+ *
+ * - name: 표시 이름(이메일과 같거나 합성 이메일이면 null).
+ * - email: 실제 이메일만(합성이면 null).
+ * - unverified: 합성 이메일 — 호출부가 "이메일 미인증" 배지를 붙일 수 있다.
+ * - primary: 첫 줄 = 이름 → 실제 이메일 → fallback(UUID 식별자는 쓰지 않는다).
+ */
+export function userNameParts(
+  name: string | null | undefined,
+  email: string | null | undefined,
+  fallback = '',
+): { primary: string; name: string | null; email: string | null; unverified: boolean } {
+  const unverified = isSyntheticEmail(email);
+  const realEmail = email && !unverified ? email : null;
+  const n = name?.trim() ?? '';
+  const cleanName = n && n !== email && !isSyntheticEmail(n) ? n : null;
+  return { primary: cleanName ?? realEmail ?? fallback, name: cleanName, email: realEmail, unverified };
+}

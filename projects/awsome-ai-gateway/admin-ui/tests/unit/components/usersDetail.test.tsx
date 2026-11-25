@@ -19,6 +19,12 @@ import { ReportingTimezoneProvider } from '@/components/common/ReportingTimezone
 import { TeamDetail } from '@/components/users/detail/TeamDetail';
 import { UserDetail } from '@/components/users/detail/UserDetail';
 import type { EffectivePolicy, OrgTreeNode } from '@/types/entities';
+import { fmtDateMinute } from '@/lib/utils/format';
+import { tzZoneLabel, withTzAbbr } from '@/lib/utils/timezone';
+
+// 시점(마지막 사용·마지막 동기화)은 브라우저 TZ + 이름 — 보고 TZ(Asia/Kolkata)가 아니다.
+const BROWSER_TZ = Intl.DateTimeFormat().resolvedOptions().timeZone;
+const stampZ = (iso: string) => withTzAbbr(fmtDateMinute(iso, BROWSER_TZ), BROWSER_TZ, iso);
 
 const { users, models } = vi.hoisted(() => ({
   users: {
@@ -167,6 +173,17 @@ describe('팀 상세', () => {
     await waitFor(() => expect(rows[0].textContent).toContain('3'));
     expect(rows[0].textContent).toContain('Own');
     expect(rows[1].textContent).toContain('Leader');
+    // 합성 이메일은 보이지 않고 미인증 배지 — 이름 + 역할만
+    expect(rows[1].textContent).not.toContain('@unknown');
+    expect(within(rows[1]).getByText(en.common.unverifiedEmail)).toBeTruthy();
+    // 실제 0 은 '0' — 토큰도 요청·검색 수처럼
+    const cells = within(rows[1]).getAllByRole('cell');
+    expect(cells[2].textContent).toBe('0');
+    expect(cells[3].textContent).toBe('0');
+    // 마지막 사용 — 열 제목에 브라우저 TZ, 셀은 브라우저 TZ 시각
+    expect(within(members).getByRole('columnheader', { name: `Last used (${tzZoneLabel(BROWSER_TZ)})` })).toBeTruthy();
+    expect(rows[0].textContent).toContain(fmtDateMinute('2026-11-06T08:50:00Z', BROWSER_TZ));
+    expect(within(members).getByText(/Last used: your browser time zone/)).toBeTruthy();
     await userEvent.setup().click(rows[0]);
     expect(onOpenUser).toHaveBeenCalledWith(U2);
   });
@@ -206,7 +223,7 @@ describe('사용자 상세', () => {
     wrap(<UserDetail node={USER} teamId="dev" breadcrumb={['Default Organization', 'NDS', 'Developers']} onChanged={vi.fn()} />);
     expect(screen.getByTestId('user-title').textContent).toBe('seunghwan');
     expect(screen.getByText('seunghwan@nongshim.co.kr')).toBeTruthy();
-    await screen.findByText(/last used 2026-11-06 14:20/); // Asia/Kolkata
+    await screen.findByText(`last used ${stampZ('2026-11-06T08:50:00Z')}`, { exact: false });
     expect(screen.getByRole('link', { name: /Analytics/ }).getAttribute('href')).toBe(`/analytics?group_by=user&user=${U2}`);
     expect(screen.getByRole('link', { name: /Body Logs/ }).getAttribute('href')).toBe('/monitoring/body-logs?user=seunghwan%40nongshim.co.kr');
     expect(screen.getByRole('link', { name: /API Keys/ }).getAttribute('href')).toBe('/keys?email=seunghwan%40nongshim.co.kr');
@@ -239,5 +256,28 @@ describe('사용자 상세', () => {
     const matrix = within(eff).getByTestId('effective-matrix');
     expect(within(matrix).getByRole('columnheader', { name: 'Claude Code' })).toBeTruthy();
     expect(within(matrix).queryByRole('columnheader', { name: 'claude-code' })).toBeNull();
+  });
+
+  it('합성 이메일 사용자 — 이름만 + 미인증 배지, 팀이 세 앱을 명시 허용하면 "(team allows all)"', async () => {
+    const SYN: OrgTreeNode = {
+      id: U1,
+      name: 'heomk@nongshim.co.kr',
+      type: 'USER',
+      children: [],
+      meta: meta({ email: '61739d0a-8081-7068-b73f-55872f2b0000@unknown', role: 'ADMIN', team_name: 'Developers' }),
+    };
+    users.getEffectivePolicyAction.mockResolvedValue(
+      ok(policy({ user_id: U1, allowed_clients: ['claude-code', 'cowork', 'codex'], allowed_clients_source: 'team' })),
+    );
+    users.getTeamEffectivePolicyAction.mockResolvedValue(ok(policy()));
+    const { container } = wrap(<UserDetail node={SYN} teamId="dev" breadcrumb={[]} onChanged={vi.fn()} />);
+    expect(screen.getByTestId('user-title').textContent).toBe('heomk@nongshim.co.kr');
+    expect(screen.getAllByText(en.common.unverifiedEmail).length).toBeGreaterThan(0);
+    const apps = await screen.findByTestId('policy-apps');
+    expect(within(apps).getByText('All 3 apps (team allows all)')).toBeTruthy();
+    expect(within(apps).queryByText(/explicit/)).toBeNull();
+    // 화면 어디에도 합성 주소·UUID 가 글자로 나오지 않는다(바로가기 href 는 필터라 제외)
+    expect(container.textContent).not.toContain('@unknown');
+    expect(container.textContent).not.toContain('61739d0a');
   });
 });

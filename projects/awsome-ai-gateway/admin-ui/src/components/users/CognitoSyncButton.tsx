@@ -10,9 +10,8 @@ import { RefreshCw } from 'lucide-react';
 import { syncCognitoAction } from '@/lib/actions/users';
 import { AppDialog } from '@/components/common/AppDialog';
 import { InfoTooltip } from '@/components/common/InfoTooltip';
-import { useReportingTz } from '@/components/common/ReportingTimezoneProvider';
+import { usePointInTime } from '@/components/common/usePointInTime';
 import { useToast } from '@/components/common/ToastProvider';
-import { fmtDateMinute } from '@/lib/utils/format';
 
 /**
  * Cognito 동기화 버튼 + "조직 구조 출처: Cognito · 마지막 동기화 …" 캡션.
@@ -24,7 +23,7 @@ export function CognitoSyncButton({ lastSyncAt }: { lastSyncAt?: string | null }
   const tCommon = useTranslations('common');
   const { toast } = useToast();
   const router = useRouter();
-  const tz = useReportingTz();
+  const pit = usePointInTime();
   const [isPending, startTransition] = useTransition();
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [lastSync, setLastSync] = useState<string | null>(lastSyncAt ?? null);
@@ -62,7 +61,7 @@ export function CognitoSyncButton({ lastSyncAt }: { lastSyncAt?: string | null }
     <div className="flex flex-wrap items-center gap-3">
       <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground" data-testid="cognito-sync-caption">
         {lastSync
-          ? t('cognitoSync.caption', { when: fmtDateMinute(lastSync, tz) })
+          ? t('cognitoSync.caption', { when: pit.stampZ(lastSync) })
           : t('cognitoSync.captionUnknown')}
         <InfoTooltip label={t('cognitoSync.noteLabel')} align="center">
           {t('cognitoNote')}

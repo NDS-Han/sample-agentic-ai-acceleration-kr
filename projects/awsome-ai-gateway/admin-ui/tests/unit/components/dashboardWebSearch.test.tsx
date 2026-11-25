@@ -179,7 +179,11 @@ describe('WEB SEARCH · AGENTCORE 섹션', () => {
     const s = screen.getByTestId('web-search-section');
     expect(within(s).getByText('Web search · AgentCore')).toBeTruthy();
     expect(screen.getByTestId('web-search-center').textContent).toBe('96');
-    expect(within(s).getByText('queries this month')).toBeTruthy();
+    expect(within(s).getByText('this month')).toBeTruthy();
+    // 가운데 글자는 구멍(지름 94px) 안 72px 상자 — 최대 두 줄로 줄바꿈, 링에 닿지 않는다
+    const label = screen.getByTestId('web-search-center-label');
+    expect((label.parentElement as HTMLElement).style.width).toBe('72px');
+    expect(label.className).toContain('line-clamp-2');
     const legend = [...screen.getByTestId('web-search-legend').querySelectorAll('li')].map((li) => li.textContent);
     expect(legend).toEqual(['Claude Code6062.5%', 'Cowork3031.3%', 'Codex66.2%']); // 합 100.0% 로 맞춘 반올림
     expect(screen.getByTestId('web-search-cost').textContent).toBe('$0.67');

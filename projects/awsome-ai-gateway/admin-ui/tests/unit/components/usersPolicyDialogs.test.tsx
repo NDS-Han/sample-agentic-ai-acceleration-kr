@@ -157,6 +157,12 @@ describe('허용 모델 대화상자', () => {
     const dialog = await screen.findByRole('dialog');
     const user = userEvent.setup();
     await within(dialog).findByText('All 3');
+    // 스크롤바는 하나 — 모달은 넘침을 숨기고(flex 열), 목록만 남은 높이에서 스크롤
+    expect(dialog.className).toContain('overflow-hidden');
+    expect(dialog.className).not.toContain('overflow-y-auto');
+    const list = within(dialog).getByTestId('model-groups');
+    expect(list.className).toContain('overflow-y-auto');
+    expect(list.className).toContain('flex-1');
     await user.type(within(dialog).getByRole('searchbox', { name: 'Model name or ID' }), 'haiku');
     expect(within(dialog).getAllByRole('checkbox')).toHaveLength(1);
     await user.clear(within(dialog).getByRole('searchbox', { name: 'Model name or ID' }));
@@ -197,6 +203,10 @@ describe('Rate limit 대화상자', () => {
     const dialog = await screen.findByRole('dialog');
     await within(dialog).findByText('req/min');
     expect(within(dialog).getByText('tokens/min')).toBeTruthy();
+    // 입력 오른쪽에 단위 자리를 비워 둔다 — 'Empty = inherit' 자리표시가 'tokens/min' 에 닿지 않게
+    for (const input of within(dialog).getAllByPlaceholderText('Empty = inherit')) {
+      expect(input.className).toContain('pr-[5.5rem]');
+    }
     expect(within(dialog).getByText('$/min')).toBeTruthy();
     expect(within(dialog).getByText('$/hour')).toBeTruthy();
     expect(within(dialog).getByText('team: 60 → org: none = 60')).toBeTruthy();
