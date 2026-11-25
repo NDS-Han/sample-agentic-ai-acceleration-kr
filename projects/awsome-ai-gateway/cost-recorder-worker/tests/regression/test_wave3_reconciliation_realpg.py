@@ -81,7 +81,9 @@ def _settings(**kw):
     base = dict(reporting_timezone="Asia/Kolkata", daily_usage_agg_command_timeout=60.0,
                 rollup_dirty_margin_sec=120, reconciliation_dirty_alert_hours=48,
                 reconciliation_estimated_warn_pct=0.5, reprice_batch_size=500,
-                cost_stream_key="cost:stream", cost_stream_group="g")
+                cost_stream_key="cost:stream", cost_stream_group="g",
+                reconciliation_redis_epsilon_usd=0.0001, reconciliation_hourly_stale_sec=7200,
+                daily_usage_agg_hourly_bridge_days=2, hourly_rollup_enabled=True)
     base.update(kw)
     return MagicMock(**base)
 
@@ -269,6 +271,14 @@ async def test_redis_vs_db_check(sf):
     assert (r["checked"], r["absent_in_redis"], r["mismatches"]) == (2, 1, 0)
     bad = dict(good)
     bad[f"budget:team:{{{TEAM}}}:{period}"] = b"0.0104"
+    async with sf() as s:
+        r = await _r4(s, _R(bad), _settings(reconciliation_redis_epsilon_usd=0), period)
+    assert r["mismatches"] == 1
+    # wave 3c — 허용 오차 이하($0.0001)는 일치, 넘으면 불일치.
+    async with sf() as s:
+        r = await _r4(s, _R(bad), _settings(), period)
+    assert r["mismatches"] == 0 and r["epsilon_usd"] == "0.0001"
+    bad[f"budget:team:{{{TEAM}}}:{period}"] = b"0.010398"
     async with sf() as s:
         r = await _r4(s, _R(bad), _settings(), period)
     assert r["mismatches"] == 1

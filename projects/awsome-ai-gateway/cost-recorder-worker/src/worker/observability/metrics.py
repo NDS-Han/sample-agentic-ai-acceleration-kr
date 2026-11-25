@@ -15,6 +15,27 @@ from collections.abc import Callable
 
 from opentelemetry import metrics
 
+#: 비용 대조 검사 이름 — 카운터 시리즈를 기동 시 0 으로 만들어 둔다(increase() 가 첫 증가를 본다).
+RECONCILIATION_CHECKS = ("raw_vs_daily", "monthly_vs_daily", "budget_vs_raw", "redis_vs_db",
+                         "pricing", "dirty_stale", "dead_letters_open")
+
+
+def _fanout(callbacks: list[Callable]) -> list[Callable]:
+    """관측 게이지에 넘길 콜백 — 등록 목록을 **수집 시점에** 읽는다.
+
+    OTel SDK 는 ``create_observable_gauge(callbacks=…)`` 에서 목록을 복사한다. 그래서 생성 뒤
+    ``register_*_callback`` 으로 붙인 콜백은 한 번도 불리지 않았고, 이 워커의 관측 게이지
+    (stream_lag·stream_pending·reconciliation_mismatches·rollup_last_success)는 dev Prometheus 에
+    시리즈 자체가 없었다(wave 3c 실측). 목록을 감싼 콜백 하나를 넘겨 늦은 등록도 보이게 한다.
+    """
+    def _observe(options):
+        out = []
+        for cb in list(callbacks):
+            out.extend(cb(options))
+        return out
+
+    return [_observe]
+
 
 class WorkerMetrics:
     def __init__(self, meter_name: str = "cost-recorder-worker") -> None:
@@ -124,9 +145,30 @@ class WorkerMetrics:
         self._reconciliation_callbacks: list[Callable] = []
         self.reconciliation_mismatches = self._meter.create_observable_gauge(
             "cost_recorder_reconciliation_mismatches",
-            callbacks=self._reconciliation_callbacks,
+            callbacks=_fanout(self._reconciliation_callbacks),
             description="Mismatches found by the last reconciliation run (labels: check)",
+            # 게이지 unit "1" 은 Prometheus 이름에 _ratio 가 붙는다(collector 변환) — 단위 없음.
+            unit="",
+        )
+
+        # wave 3c — 알림용 신호. 검사별 불일치 누적(실행마다 그 실행의 불일치 수를 더한다)과
+        # 마지막 성공 실행 시각(오류 없이 끝나 결과를 남긴 실행 — 불일치가 있어도 성공이다).
+        # Prometheus 이름 그대로: reconciliation_mismatch_total{check},
+        # reconciliation_last_success_timestamp (unix 초, 단위 접미사 없음).
+        self.reconciliation_mismatch_total = self._meter.create_counter(
+            "reconciliation_mismatch_total",
+            description="Mismatches found by cost reconciliation runs, summed per check "
+                        "(labels: check)",
             unit="1",
+        )
+        for check in RECONCILIATION_CHECKS:
+            self.reconciliation_mismatch_total.add(0, {"check": check})
+        self._reconciliation_success_callbacks: list[Callable] = []
+        self.reconciliation_last_success = self._meter.create_observable_gauge(
+            "reconciliation_last_success_timestamp",
+            callbacks=_fanout(self._reconciliation_success_callbacks),
+            description="Unix time of the last reconciliation run that finished without error",
+            unit="",
         )
 
         # 롤업 잡(시간/야간/기동) — 실행 시간·단위(날짜/시간/월) 실패·성공 수·마지막 성공 시각.
@@ -149,7 +191,7 @@ class WorkerMetrics:
         self._rollup_success_callbacks: list[Callable] = []
         self.rollup_last_success = self._meter.create_observable_gauge(
             "cost_recorder_rollup_last_success_timestamp_seconds",
-            callbacks=self._rollup_success_callbacks,
+            callbacks=_fanout(self._rollup_success_callbacks),
             description="Unix time of the last successful rollup job run (label: job)",
             unit="s",
         )
@@ -158,18 +200,18 @@ class WorkerMetrics:
         self._stream_lag_callbacks: list[Callable] = []
         self.stream_lag = self._meter.create_observable_gauge(
             "cost_recorder_stream_lag",
-            callbacks=self._stream_lag_callbacks,
+            callbacks=_fanout(self._stream_lag_callbacks),
             description="Unprocessed entries in the cost stream consumer group (lag)",
-            unit="1",
+            unit="",
         )
         # PEL(unacked·배달됐지만 미처리) 크기 — lag 은 미배달+pending 합산이라
         # 미배달 백로그와 회수 대기를 구분하려면 별도 게이지가 필요하다.
         self._stream_pending_callbacks: list[Callable] = []
         self.stream_pending = self._meter.create_observable_gauge(
             "cost_recorder_stream_pending",
-            callbacks=self._stream_pending_callbacks,
+            callbacks=_fanout(self._stream_pending_callbacks),
             description="Pending (delivered but unacked) entries in the consumer group",
-            unit="1",
+            unit="",
         )
 
     def register_stream_lag_callback(self, callback: Callable) -> None:
@@ -180,6 +222,9 @@ class WorkerMetrics:
 
     def register_reconciliation_callback(self, callback: Callable) -> None:
         self._reconciliation_callbacks.append(callback)
+
+    def register_reconciliation_success_callback(self, callback: Callable) -> None:
+        self._reconciliation_success_callbacks.append(callback)
 
     def register_rollup_success_callback(self, callback: Callable) -> None:
         self._rollup_success_callbacks.append(callback)
