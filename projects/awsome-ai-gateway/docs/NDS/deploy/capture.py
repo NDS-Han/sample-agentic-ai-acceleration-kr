@@ -814,6 +814,14 @@ def _kubectl_json(resource: str, namespace: str, context: str = "") -> dict:
         return {}
 
 
+def _merge_sizing(base: dict, extra: dict) -> dict:
+    """deploy.sizing 서비스별 병합 — gateway-proxy 의 HPA 키와 db_* 키가 공존한다."""
+    out = {k: dict(v) for k, v in base.items()}
+    for svc, kv in extra.items():
+        out.setdefault(svc, {}).update(kv)
+    return out
+
+
 def _val(d: dict, *path, default=""):
     cur = d
     for p in path:
@@ -1602,6 +1610,37 @@ def capture_eks(namespace: str = "llm-gateway", release: str = "llm-gateway",
     if pool.isdigit():
         sizing["redis"] = {"pool_size": int(pool)}
 
+    # 서비스별 DB pool 상한 — render/eks.py 의 sizing db_* → <chart>.db.* 역매핑.
+    # 버리면 재캡처/채택 후 apply 가 db 블록을 지워 공통 ConfigMap 값으로 되돌린다
+    # (rv-swe P2-3). capacity_tier 는 db 를 표현하지 않으므로 밴드 일치와 무관하게
+    # 별도로 보존한다.
+    # 스키마 범위(EKS_DB_POOL_BOUNDS) 밖의 라이브 값은 기록하면 채택본이 validate
+    # 에서 거부되므로 노트로만 남긴다 (그 값은 계속 env values 가 소유).
+    from .schema import EKS_DB_POOL_BOUNDS
+    from .tiers import EKS_DB_SERVICES
+    _db_keys = (("poolSize", "db_pool_size"), ("maxOverflow", "db_max_overflow"),
+                ("poolTimeout", "db_pool_timeout"), ("poolRecycle", "db_pool_recycle"))
+    db_sizing: dict = {}
+    for _svc, (_hk, _ovf_env, _surge) in EKS_DB_SERVICES.items():
+        _db = _dmap(_val(v, _hk, "db", default={}))
+        _kv: dict = {}
+        for src, dst in _db_keys:
+            raw = _db.get(src)
+            if raw is None or isinstance(raw, bool) or not str(raw).isdigit():
+                continue
+            lo, hi = EKS_DB_POOL_BOUNDS[dst]
+            if lo <= int(str(raw)) <= hi:
+                _kv[dst] = int(str(raw))
+            else:
+                notes.append(f"{_hk}.db.{src}={raw} 는 deploy.sizing 허용 범위"
+                             f"({lo}..{hi}) 밖이라 기록하지 않았습니다 — env values "
+                             "가 계속 소유합니다")
+        if _kv:
+            db_sizing[_svc] = _kv
+    if db_sizing:
+        notes.append("라이브 서비스별 DB pool(<svc>.db)을 deploy.sizing.<svc>.db_* 로 "
+                     "기록했습니다")
+
     capacity_tier = ""
     if sizing:
         from .tiers import EKS_CAPACITY_TIERS
@@ -1656,8 +1695,10 @@ def capture_eks(namespace: str = "llm-gateway", release: str = "llm-gateway",
                    # repo 상대경로로 기록 — 절대경로는 다른 개발자 환경에서 깨진다
                    "tf_env_dir": _relpath(env_dir) if env_dir else "",
                    **tfstate,
-                   **({"capacity_tier": capacity_tier} if capacity_tier
-                      else {"sizing": sizing} if sizing else {})},
+                   **({"capacity_tier": capacity_tier} if capacity_tier else {}),
+                   **({"sizing": _merge_sizing({} if capacity_tier else sizing,
+                                               db_sizing)}
+                      if (sizing and not capacity_tier) or db_sizing else {})},
         "network": {"mode": net_mode, "allowed_cidrs": cidrs,
                     "admin_internal": admin_internal},
         "domain": domain,

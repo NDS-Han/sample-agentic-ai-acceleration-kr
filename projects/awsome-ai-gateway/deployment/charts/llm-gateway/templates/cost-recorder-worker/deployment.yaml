@@ -73,7 +73,7 @@ spec:
               value: {{ $value | quote }}
             {{- end }}
             {{- with .Values.costRecorderWorker.db }}
-            {{- include "llm-gateway.dbPoolEnv" (dict "db" . "overflowEnv" "DB_POOL_OVERFLOW") | trim | nindent 12 }}
+            {{- include "llm-gateway.dbPoolEnv" (dict "db" . "env" $.Values.costRecorderWorker.env "svc" "costRecorderWorker" "overflowEnv" "DB_POOL_OVERFLOW" "timeoutEnv" "WORKER_DB_POOL_TIMEOUT" "recycleEnv" "WORKER_DB_POOL_RECYCLE") | trim | nindent 12 }}
             {{- end }}
           envFrom:
             - configMapRef:

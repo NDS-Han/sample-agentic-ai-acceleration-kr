@@ -66,7 +66,7 @@ spec:
               value: {{ $value | quote }}
             {{- end }}
             {{- with .Values.scheduler.db }}
-            {{- include "llm-gateway.dbPoolEnv" (dict "db" . "overflowEnv" "DB_MAX_OVERFLOW") | trim | nindent 12 }}
+            {{- include "llm-gateway.dbPoolEnv" (dict "db" . "env" $.Values.scheduler.env "svc" "scheduler") | trim | nindent 12 }}
             {{- end }}
           envFrom:
             - configMapRef:

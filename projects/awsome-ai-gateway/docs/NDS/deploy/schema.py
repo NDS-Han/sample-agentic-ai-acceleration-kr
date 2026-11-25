@@ -172,6 +172,21 @@ ECS_SERVICES = frozenset((
 _EKS_DB_POOL_SIZING = frozenset((
     "db_pool_size", "db_max_overflow", "db_pool_timeout", "db_pool_recycle",
 ))
+# db_* 값의 허용 범위 (프로세스당, 양끝 포함). 차트 helper 는 형식만 보고 크기는
+# 모른다 — gateway.yaml 오타 하나가 pods × WORKERS 배로 곱해져 RDS Proxy 백엔드를
+# 고갈시키지 않도록 여기서 절대 상한을 건다 (rv-swe P1-1).
+# - db_pool_size ≥ 1: SQLAlchemy pool_size=0 은 "무제한" 이다.
+# - db_max_overflow ≥ 0: 0 은 pool_size 를 정확한 상한으로 쓰는 하드캡(P2-1),
+#   -1 은 무제한 overflow 라 거부한다.
+# - db_pool_timeout ≤ 10: wave-1b AC4 — 풀 고갈 시 요청이 오래 매달리지 않게.
+# - db_pool_recycle < 1800: RDS Proxy idle_client_timeout(1800s,
+#   modules/aurora-postgresql/variables.tf) 보다 먼저 재생성.
+EKS_DB_POOL_BOUNDS: dict[str, tuple[int, int]] = {
+    "db_pool_size": (1, 50),
+    "db_max_overflow": (0, 50),
+    "db_pool_timeout": (1, 10),
+    "db_pool_recycle": (60, 1799),
+}
 EKS_SIZING = {
     "gateway-proxy": frozenset((
         "min_replicas", "max_replicas", "bedrock_thread_pool_size",
@@ -748,6 +763,10 @@ class GatewayConfig:
                          f"(허용: {sorted(allowed_svc)})")
                 _sizing_ints_ok = False
             for svc, ov in self.deploy.sizing.items():
+                if svc not in allowed_svc:
+                    # 위의 "알 수 없는 서비스" 오류로 충분 — 키 검사까지 돌면
+                    # "(허용: [])" 같은 두 번째 오류가 붙어 혼란스럽다(P2-6).
+                    continue
                 if not isinstance(ov, dict):
                     e.append(f"deploy.sizing.{svc} 는 mapping 이어야 합니다: {ov!r}")
                     _sizing_ints_ok = False
@@ -760,7 +779,15 @@ class GatewayConfig:
                     _sizing_ints_ok = False
                     continue
                 for k, val in ov.items():
-                    if not isinstance(val, int) or isinstance(val, bool) or val <= 0:
+                    is_int = isinstance(val, int) and not isinstance(val, bool)
+                    bounds = EKS_DB_POOL_BOUNDS.get(k) if is_eks else None
+                    if bounds:
+                        lo, hi = bounds
+                        if not is_int or not lo <= val <= hi:
+                            e.append(f"deploy.sizing.{svc}.{k} 는 {lo}..{hi} 범위의 "
+                                     f"정수여야 합니다: {val!r}")
+                            _sizing_ints_ok = False
+                    elif not is_int or val <= 0:
                         e.append(f"deploy.sizing.{svc}.{k} 는 양의 정수여야 합니다: {val!r}")
                         _sizing_ints_ok = False
             if self.deploy.target not in ("ecs", "eks"):

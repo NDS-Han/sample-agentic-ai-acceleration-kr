@@ -206,12 +206,13 @@ deploy:
       bedrock_thread_pool_size: 192   # → gatewayProxy.env.BEDROCK_THREAD_POOL_SIZE
       db_pool_size: 5          # → gatewayProxy.db.poolSize (프로세스당)
       db_max_overflow: 5       # → gatewayProxy.db.maxOverflow
-      db_pool_recycle: 1500    # → gatewayProxy.db.poolRecycle (RDS Proxy idle 1800s 하회 권장)
-      # db_pool_timeout        # → gatewayProxy.db.poolTimeout (미선언 시 공통 ConfigMap 10s)
+      db_pool_recycle: 1500    # → gatewayProxy.db.poolRecycle (60..1799, RDS Proxy idle 1800s 미만)
+      # db_pool_timeout        # → gatewayProxy.db.poolTimeout (1..10, 미선언 시 공통 ConfigMap 10s)
     admin-api:                 # db_* 키 지원 서비스: gateway-proxy, admin-api,
       db_pool_size: 5          #   cost-recorder-worker, notification-worker, scheduler
       db_max_overflow: 5
     scheduler: { db_pool_size: 2, db_max_overflow: 3 }
+    cost-recorder-worker: { db_pool_size: 5, db_max_overflow: 0 }   # 0 = 하드캡
     redis:
       pool_size: 200           # → redis.poolSize (워커 프로세스당)
 ```
@@ -225,6 +226,29 @@ deploy:
 
 지정한 키만 바뀌고 나머지는 밴드/티어 값이 유지됩니다.
 
+- eks 의 `db_*` — **프로세스당** SQLAlchemy pool. 소유자는 gateway.yaml 하나다
+  (tracked `values-eks-fargate-dev.yaml` 에는 `db:` 블록을 두지 않는다). 범위는
+  `validate` 가 강제한다: `db_pool_size` 1..50 (0 은 SQLAlchemy 무제한),
+  `db_max_overflow` 0..50 (0 = pool_size 가 정확한 상한, -1 은 무제한이라 거부),
+  `db_pool_timeout` 1..10, `db_pool_recycle` 60..1799. null·문자열·float·bool 은
+  거부됩니다. 미선언 키/서비스는 공통 ConfigMap(`database.external.*`) 값을 씁니다.
+  - 워커(cost-recorder/notification)는 env 이름이 다릅니다: overflow 는
+    `DB_POOL_OVERFLOW`(없으면 공통 `DB_MAX_OVERFLOW`, 그것도 없으면 코드 기본 5/3),
+    timeout/recycle 은 `WORKER_DB_POOL_TIMEOUT`/`WORKER_DB_POOL_RECYCLE` 이고
+    **선언했을 때만** 적용됩니다. 미선언이면 SQLAlchemy 기본(30s, recycle 없음) —
+    공통 ConfigMap 의 `DB_POOL_TIMEOUT`/`DB_POOL_RECYCLE` 은 워커가 읽지 않습니다.
+  - gateway-proxy 의 hot-path 풀(`HOT_DB_POOL_SIZE` 4 + `HOT_DB_MAX_OVERFLOW` 2,
+    프로세스당 최대 6)은 `db_*`/`db:` 로 바꿀 수 없고 `gatewayProxy.env.HOT_DB_*`
+    로만 바뀝니다 — 예산에는 항상 더해야 합니다.
+  - **DB 커넥션 예산 (eks)**: render 가 chart → env overlay → gen 병합값으로
+    worst-case = Σ (HPA max 또는 replicaCount + 롤아웃 surge) × 프로세스 ×
+    (pool+overflow) + gateway hot pool + migration 1 을 계산하고, 기준 518 을
+    넘으면 노트로 경고합니다. surge 는 gateway/admin `maxSurge 25%`(올림),
+    워커 `maxSurge 1`, scheduler Recreate 0 입니다. 기준 518 = dev Aurora
+    Serverless v2 max 4 ACU 의 `max_connections` 823 (AWS 표, 플랫폼 버전별
+    823–844 의 하한) × RDS Proxy `MaxConnectionsPercent` 90% × 70%. eks 는
+    인스턴스 크기를 모르므로 차단하지 않습니다 — 더 큰 클러스터(prod)는 그
+    `max_connections` 로 다시 계산하세요. dev 현재 사이징의 worst-case 는 184 입니다.
 - eks 의 `redis.pool_size` — **워커 프로세스당** 커넥션 수. 노드 총량 ≈
   pool × WORKERS(2) × max_replicas. `bedrock_thread_pool_size` 를 올리면
   pod 당 슬롯·메모리(conn당 ~3MB)도 함께 잡으세요.
@@ -242,7 +266,8 @@ deploy:
   늘리면 안 됩니다 (렌더러가 항상 1 로 고정).
 - **DB 커넥션 예산**: `validate` 가 worst-case pool 수요
   (pool 10+overflow 20 × 프로세스 × max_count)가 Aurora `max_acu`의
-  ~225conn/ACU 대비 80% 를 넘으면 에러로 막습니다 — 스케일아웃이 DB 를
+  ~225conn/ACU 대비 80% 를 넘으면 에러로 막습니다 (225/ACU 는 근사치다 — 4 ACU 의
+  실제 `max_connections` 는 823–844 로 ≈206–211/ACU 라 작은 클러스터에서는 약간 낙관적) — 스케일아웃이 DB 를
   고갈시키는 경로를 선언 단계에서 차단. 정상 수요(pool_size)가 `min_acu`
   바닥을 넘으면 경고(단 min=max 동률의 provisioned 는 에러). 더 큰 탄력이
   필요하면 RDS Proxy 도입을 검토하세요 (eks prod 가 이미 사용).

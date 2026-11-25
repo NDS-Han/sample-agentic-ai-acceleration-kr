@@ -634,6 +634,7 @@ def render(cfg: GatewayConfig, out_dir: Path, repo_root: Path = REPO_ROOT) -> di
     gen = desired_values(cfg)
     from .common import _dmap
     env_asg: dict = {}
+    env_doc: dict = {}
     if env_vals:
         # 사람 소유 overlay — 문서가 스칼라/리스트면 .get 연쇄가 AttributeError
         # 로 죽는다. 비-dict 는 빈 overlay 로 취급(_migration_image 와 같은 계약).
@@ -763,6 +764,18 @@ def render(cfg: GatewayConfig, out_dir: Path, repo_root: Path = REPO_ROOT) -> di
                     file=sys.stderr)
         gen["gatewayProxy"].setdefault("autoscaling", {})[
             "executorInflightTarget"] = derived
+
+    # DB 커넥션 예산 (rv-swe P1-1, ecs 의 ecs_db_budget 대응) — helm 과 같은
+    # 순서(chart → env overlay → gen)로 병합한 실제 replica/풀 값으로 계산한다.
+    # eks 는 DB 인스턴스 크기를 모르므로 차단하지 않고 노트로 경고한다.
+    if cfg.deploy.sizing or cfg.deploy.capacity_tier:
+        from ..tiers import _deep_merge, eks_db_budget, eks_db_budget_warning
+        _layered = _deep_merge(_deep_merge(chart_vals, env_doc), gen)
+        _msg = eks_db_budget_warning(
+            eks_db_budget(cfg, _layered),
+            f"chart+{env_vals.name if env_vals else '(env overlay 없음)'}+gen 병합값")
+        if _msg:
+            extra_notes.append(f"⚠ {_msg}")
 
     values_path = out_dir / "values.yaml"
     values_path.write_text(

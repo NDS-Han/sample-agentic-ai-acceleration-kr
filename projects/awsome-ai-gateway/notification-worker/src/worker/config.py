@@ -57,10 +57,18 @@ class Settings(BaseSettings):
     #    (values-eks-fargate-prod.yaml:40 `notificationWorkerUser: "gateway"`).
     db_url: str = "postgresql+asyncpg://gateway:gateway_dev_password@postgres:5432/gateway"
     db_pool_size: int = 5
-    db_pool_overflow: int = 3
-    # 풀 고갈 대기 상한/커넥션 재생성 주기. 차트의 공통/서비스별 DB pool env 를 읽는다.
-    db_pool_timeout: int = 10
-    db_pool_recycle: int = 1500
+    # overflow 우선순위: 서비스별 DB_POOL_OVERFLOW(차트 <worker>.db.maxOverflow)
+    # → 공통 ConfigMap DB_MAX_OVERFLOW(database.external.maxOverflow) → 코드 기본
+    # 3. 예전에는 공통 DB_MAX_OVERFLOW 를 읽지 않아 차트 값이 조용히 무시됐다.
+    db_pool_overflow: int | None = None
+    db_max_overflow: int | None = None
+    # pool_timeout/pool_recycle 은 **명시 override 일 때만** 엔진에 넘긴다 — 미설정이면
+    # SQLAlchemy 기본(timeout 30s, recycle 없음)으로 이 배선 이전과 동일하다.
+    # 공통 ConfigMap 의 DB_POOL_TIMEOUT/DB_POOL_RECYCLE 은 모든 pod 에 들어가므로
+    # 그 이름을 읽으면 이미지 재빌드만으로 prod 워커가 10s/3600s 로 바뀐다 — 그래서
+    # 워커 전용 이름(차트 <worker>.db.poolTimeout/poolRecycle 이 렌더)만 읽는다.
+    worker_db_pool_timeout: int | None = None
+    worker_db_pool_recycle: int | None = None
     db_ssl_mode: str = "disable"
     # RDS Proxy 경유 시 0 으로 설정 (PostgreSQL pinning 회피). Aurora 직접 연결 시엔 기본값 유지.
     db_statement_cache_size: int = 100
@@ -119,6 +127,15 @@ class Settings(BaseSettings):
 
     # 이메일 템플릿 언어 (ko | en)
     notification_locale: str = "ko"
+
+    @property
+    def effective_pool_overflow(self) -> int:
+        """엔진 max_overflow — 서비스별 → 공통 → 코드 기본(3) 순."""
+        if self.db_pool_overflow is not None:
+            return self.db_pool_overflow
+        if self.db_max_overflow is not None:
+            return self.db_max_overflow
+        return 3
 
     @field_validator("reporting_timezone")
     @classmethod
