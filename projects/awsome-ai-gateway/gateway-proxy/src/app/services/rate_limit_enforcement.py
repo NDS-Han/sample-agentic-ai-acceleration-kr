@@ -379,6 +379,33 @@ async def _enforce_rate_limits(
 
     model_alias = model_config.alias or model_config.provider_model_id
 
+    # 공용 Redis 브레이커가 열려 있다(p1-hotpath-redis) — 이 프로세스의 요청 경로 Redis 호출이 방금
+    # 타임아웃/연결 오류를 냈다. REDIS_DEGRADED 와 같은 처리: 메모리 fallback 한도(미들웨어 통과
+    # 뒤 열렸으면 여기서 세운다)만 걸고 Redis 한도·예약은 건너뛴다. 예전에는 헬스체커가 강등할
+    # 때까지(수십 초) 요청마다 Lua 마다 소켓 타임아웃을 기다린 뒤 fail-open 했다 — 결과는 같고
+    # 기다림만 없다. rl_fail_mode=closed 면 아래 경로가 그대로 차단한다(eval 이 즉시 실패).
+    from app.middleware.rate_limit import (
+        check_fallback_limits,
+        fallback_429_parts,
+        redis_breaker_open,
+    )
+    from app.services.rate_limit_service import _fail_closed
+
+    if redis_breaker_open():
+        if not state.get("_rl_fallback_checked"):
+            rejected = check_fallback_limits(state, auth_context, model_alias, metrics)
+            if rejected is not None:
+                result, scope_name = rejected
+                body, headers = fallback_429_parts(result, scope_name)
+                return JSONResponse(
+                    status_code=429,
+                    content=json.loads(body),
+                    headers={k.decode(): v.decode() for k, v in headers
+                             if k != b"content-type"},
+                )
+        if not _fail_closed():
+            return None
+
     # DB fallback 가용성 확인 (NFR-2.4 degradation 반영)
     is_db_degraded = dm and dm.level in (
         DegradationLevel.DB_DEGRADED,

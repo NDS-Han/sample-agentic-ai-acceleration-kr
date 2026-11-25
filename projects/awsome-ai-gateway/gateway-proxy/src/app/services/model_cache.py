@@ -235,7 +235,9 @@ class ModelCatalogCache:
             return None, True
         try:
             async with asyncio.timeout(self.redis_timeout_sec):
-                return await fn(), False
+                out = await fn()
+            self.redis_breaker.record_success()
+            return out, False
         except (TimeoutError, RedisError, OSError) as e:
             self.redis_breaker.trip(f"{what}:{type(e).__name__}")
             return None, True
@@ -335,7 +337,7 @@ def get() -> ModelCatalogCache | None:
 
 
 def from_settings(settings, session_factory) -> ModelCatalogCache:
-    return ModelCatalogCache(
+    cache = ModelCatalogCache(
         session_factory=session_factory,
         refresh_sec=settings.model_cache_refresh_sec,
         refresh_unsubscribed_sec=settings.model_cache_refresh_unsubscribed_sec,
@@ -348,3 +350,8 @@ def from_settings(settings, session_factory) -> ModelCatalogCache:
         refresh_retry_sec=settings.model_cache_refresh_retry_sec,
         redis_breaker_cooldown_sec=settings.hot_db_breaker_cooldown_sec,
     )
+    # p1-hotpath-redis: 요청 경로 Redis 는 프로세스 공용 브레이커 하나를 쓴다.
+    from app.services.hot_path import REDIS_BREAKER
+
+    cache.redis_breaker = REDIS_BREAKER
+    return cache

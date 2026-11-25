@@ -79,8 +79,24 @@ class Settings(BaseSettings):
     # 열어 즉시 fallback 으로 보낸다. 기본 활성(소켓 타임아웃 대기 누적 방지). 끄려면
     # rl_breaker_enabled=false. 임계/복구는 아래 값으로.
     rl_breaker_enabled: bool = True
+    # ⚠️ p1-hotpath-redis 부터 미사용(호환용으로만 남김). rate-limit eval 은 이제 프로세스 공용
+    #    Redis 브레이커(hot_path.REDIS_BREAKER — 예산·모델 캐시·비용 이벤트와 같은 것)를 쓴다.
+    #    임계는 "한 번의 인프라 실패", 복구는 hot_redis_breaker_cooldown_sec.
     rl_breaker_fail_threshold: int = 5
     rl_breaker_recovery_timeout: float = 5.0
+
+    # ── Hot-path Redis (p1-hotpath-redis) ─────────────────────────────────────
+    # 요청 경로의 rate-limit Redis 호출(한도 설정 GET, RPM/TPM/비용 Lua) 하나의 상한.
+    # 클라이언트 socket_timeout(2 s) × (1 + redis_retries) 보다 훨씬 짧게 — Redis 행(hang)에서
+    # 요청이 명령마다 ~4 s 를 기다리지 않게 한다. 넘으면 그 호출은 실패(정책대로 fail-open/closed)
+    # 하고 공용 브레이커가 열린다. 0 이하면 상한 없음(socket_timeout 만).
+    hot_redis_timeout_sec: float = 0.5
+    # 공용 Redis 브레이커 — 요청 경로 Redis 호출이 타임아웃/연결 오류를 내면 이 프로세스는 이 시간
+    # 동안 요청 경로의 Redis 를 건너뛴다(예산 → DB/마지막 값, rate-limit → 메모리 fallback 한도,
+    # 비용 이벤트 → spool). 예산 열화 모드(wave 1c)가 쓰던 2 s 와 같은 값.
+    hot_redis_breaker_cooldown_sec: float = 2.0
+    # Redis 스크립트를 EVALSHA 로 보낸다(NOSCRIPT 면 EVAL 로 한 번 더). false 면 예전처럼 EVAL.
+    redis_evalsha: bool = True
 
     # rate-limit eval 이 (Redis 장애 등으로) 실패할 때의 정책(deepdive Q50).
     #  - "open"(기본·기존 동작): 통과시킴(가용성 우선, NFR-2.4 graceful degradation).
@@ -297,6 +313,12 @@ class Settings(BaseSettings):
     #    (a) fallback 발동 알림으로 운영자 인지, (b) minReplicas 를 평상시
     #    replica 수에 가깝게 유지.
     rl_fallback_replicas: int = 1
+    # fallback RPM 한도(클러스터 총합, 위 divisor 로 나뉜다). 스코프의 마지막으로 알던 한도
+    # (rate_limit_config_loader 의 프로세스 캐시, budget_stale_max_seconds 까지)가 있으면 그 값을,
+    # 없거나 무제한이면 이 값을 쓴다 — fallback 은 항상 유한하다. 예전 하드코딩 60/600/6000 과 같다.
+    rl_fallback_user_rpm: int = Field(default=60, ge=1)
+    rl_fallback_team_rpm: int = Field(default=600, ge=1)
+    rl_fallback_global_rpm: int = Field(default=6000, ge=1)
 
     # Logging
     log_level: str = "INFO"

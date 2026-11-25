@@ -87,15 +87,21 @@ class DowngradePolicyLoader:
         team_id: uuid.UUID,
     ) -> list[DowngradeRule]:
         cache_key = CACHE_KEY_FMT.format(team_id=team_id)
+        from app.services.hot_path import HotRedisUnavailable, run_redis
 
-        # 1) Redis HIT 시도
+        # 1) Redis HIT 시도 — 공용 Redis 브레이커를 따른다(p1-hotpath-redis): 열려 있으면 묻지 않고
+        #    DB/마지막 정책으로, 타임아웃·연결 오류는 브레이커를 연다. 호출 상한은 바깥
+        #    _bounded_lookup(degraded_lookup_timeout_sec)이 이미 건다.
         if redis is not None:
             try:
-                cached = await redis.get(cache_key)
+                cached = await run_redis(lambda: redis.get(cache_key), timeout=None,
+                                         what="downgrade")
                 if cached is not None:
                     rules = self._deserialize(cached)
                     self._last.put(str(team_id), rules)
                     return rules
+            except HotRedisUnavailable:
+                pass
             except Exception:
                 logger.warning("downgrade_redis_get_failed", team_id=str(team_id))
 
@@ -119,7 +125,10 @@ class DowngradePolicyLoader:
                         for r in rules
                     ]
                 ).encode()
-                await redis.setex(cache_key, CACHE_TTL_SECONDS, payload)
+                await run_redis(lambda: redis.setex(cache_key, CACHE_TTL_SECONDS, payload),
+                                timeout=None, what="downgrade_write")
+            except HotRedisUnavailable:
+                pass
             except Exception:
                 logger.warning("downgrade_redis_setex_failed", team_id=str(team_id))
 
