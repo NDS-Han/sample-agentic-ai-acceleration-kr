@@ -175,3 +175,32 @@ async def get_price(session: AsyncSession) -> tuple[Decimal, bool, Any]:
     row = await SystemSettingsRepository(session).get(PRICING_KEY)
     price = parse_price(row.value) if row is not None else None
     return (price if price is not None else DEFAULT_PRICE_PER_1K), price is None, row
+
+
+async def ws_settings(session: AsyncSession) -> tuple[Any, Any]:
+    """(추적 시작 설정값, 단가 설정값) — 하이브리드 롤업 합계로 WebSearchUsage 를 만들 때 쓴다.
+
+    ws_columns() 의 스칼라 서브쿼리와 같은 두 PK 조회를 한 번에 한다(usage_logs 를 보지 않는다).
+    """
+    rows = (await session.execute(
+        select(SystemSetting.key, SystemSetting.value)
+        .where(SystemSetting.key.in_([TRACKING_SINCE_KEY, PRICING_KEY]))
+    )).all()
+    vals = {k: v for k, v in rows}
+    return vals.get(TRACKING_SINCE_KEY), vals.get(PRICING_KEY)
+
+
+def ws_from_totals(queries: int, cost: Any, untracked: int, settings: tuple[Any, Any]
+                   ) -> WebSearchUsage:
+    """하이브리드 합계(수·비용·미추적 수) + ws_settings() → 응답 객체(ws_from_row 와 같은 규칙)."""
+    since, price_raw = settings
+    price = parse_price(price_raw)
+    return WebSearchUsage(
+        queries=int(queries or 0),
+        cost_usd=round(float(cost), 6) if cost is not None else None,
+        untracked_queries=int(untracked or 0),
+        tracking_since=_parse_since(since),
+        deployed=web_search_deployed(),
+        price_per_1k_queries=price if price is not None else DEFAULT_PRICE_PER_1K,
+    )
+

@@ -11,7 +11,7 @@
 """
 from __future__ import annotations
 
-from typing import Callable
+from collections.abc import Callable
 
 from opentelemetry import metrics
 
@@ -80,6 +80,31 @@ class WorkerMetrics:
             unit="1",
         )
 
+        # 롤업 잡(시간/야간/기동) — 실행 시간·단위(날짜/시간/월) 실패·성공 수·마지막 성공 시각.
+        # 마지막 성공 시각이 2시간 넘게 멈추면 admin-api 는 그 시간들을 raw 로 읽는다(느려짐).
+        self.rollup_run_duration = self._meter.create_histogram(
+            "cost_recorder_rollup_run_duration_seconds",
+            description="Duration of each rollup job run (labels: job, outcome)",
+            unit="s",
+        )
+        self.rollup_failures = self._meter.create_counter(
+            "cost_recorder_rollup_failures_total",
+            description="Rollup units (day/hour/month) that failed and were skipped",
+            unit="1",
+        )
+        self.rollup_units = self._meter.create_counter(
+            "cost_recorder_rollup_units_total",
+            description="Rollup units (day/hour) aggregated successfully",
+            unit="1",
+        )
+        self._rollup_success_callbacks: list[Callable] = []
+        self.rollup_last_success = self._meter.create_observable_gauge(
+            "cost_recorder_rollup_last_success_timestamp_seconds",
+            callbacks=self._rollup_success_callbacks,
+            description="Unix time of the last successful rollup job run (label: job)",
+            unit="s",
+        )
+
         # Observable gauge — 콜백은 StreamConsumer 가 등록한다(주기 조회 결과를 들고 있음).
         self._stream_lag_callbacks: list[Callable] = []
         self.stream_lag = self._meter.create_observable_gauge(
@@ -103,3 +128,6 @@ class WorkerMetrics:
 
     def register_stream_pending_callback(self, callback: Callable) -> None:
         self._stream_pending_callbacks.append(callback)
+
+    def register_rollup_success_callback(self, callback: Callable) -> None:
+        self._rollup_success_callbacks.append(callback)

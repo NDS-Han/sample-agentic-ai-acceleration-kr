@@ -25,6 +25,7 @@ import { fetchAvailablePeriods } from '@/lib/actions/dashboard';
 import { fetchModelCostAnalytics } from '@/lib/actions/analytics-models';
 import { customRangeIssue, isMonth, resolveMonth } from '@/lib/utils/period';
 import { pageTitle } from '@/lib/pageMetadata';
+import { DataFreshness, type FreshnessMeta } from '@/components/common/DataFreshness';
 
 // Next 15: searchParams 는 Promise — 페이지에서 await 한 뒤 resolve 된 값을 쓴다.
 interface AnalyticsSearchParams {
@@ -132,6 +133,17 @@ async function ContextSection({
 }
 
 /**
+ * 집계 기준 시각 + 지연 날짜 칩 — 개요(/admin/analytics) 응답 메타. 표시 컴포넌트와 같은
+ * buildAnalyticsQuery 라 요청 메모이제이션으로 추가 호출이 없다.
+ */
+async function FreshnessSection({ filter, latestMonth }: { filter: AnalyticsFilterForm; latestMonth: string }) {
+  const data = await fetchAnalyticsOnce<FreshnessMeta>(
+    JSON.stringify(buildAnalyticsQuery(filter, latestMonth)),
+  ).catch(() => null);
+  return <DataFreshness meta={data} className="px-1" />;
+}
+
+/**
  * 모델별 상세 비용 섹션 — 과거엔 /analytics/models 별도 페이지였다. 개요 카드·
  * 차트와 같은 화면에 붙었으므로 같은 필터(월/custom 구간·scope)를 그대로 전달한다
  * (group_by 는 이 섹션의 고정 차원이라 적용하지 않는다). 백엔드 /admin/analytics/models
@@ -213,6 +225,12 @@ export default async function AnalyticsPage(props: AnalyticsPageProps) {
           <ExportButton filter={filter} latestMonth={effectiveMonth} disabled={!!rangeIssue} />
         </div>
       </div>
+
+      {!rangeIssue && (
+        <Suspense key={`fresh-${sectionKey}-${filter.group_by}`} fallback={null}>
+          <FreshnessSection filter={filter} latestMonth={effectiveMonth} />
+        </Suspense>
+      )}
 
       {/* custom 구간은 이관(seed) 사용량이 빠진다 — 월 버킷 개념이라 임의 일자에
           사상 불가. 차트가 조용히 달라 보이는 것보다 이유를 표시하는 편이 낫다. */}

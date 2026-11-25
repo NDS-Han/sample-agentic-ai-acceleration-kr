@@ -196,15 +196,17 @@ def test_aggregation_sql_has_only_declared_bind_params():
 
     from worker import daily_aggregator as da
 
+    # 0061: 기동 점검은 lookback 경계 min(requested_at) + 신뢰 불가 날짜 질의로 바뀌었다
+    # (전체 이력 DISTINCT 스캔 _MISSING_DATES_SQL 제거). 전체 목록은 test_daily_aggregator.
     expected = {
         "AGG": {"day", "start", "end"},
-        "EARLIEST": {"tz"},
-        "MISSING": {"tz", "lookback_start", "lookback_start_date", "today_start"},
+        "EARLIEST": set(),
+        "MISSING": {"from_day", "to_day", "today", "tz", "grain"},
     }
     for name, sql in [
         ("AGG", da._AGG_SQL),
         ("EARLIEST", da._EARLIEST_DAY_SQL),
-        ("MISSING", da._MISSING_DATES_SQL),
+        ("MISSING", da._UNTRUSTED_DAYS_SQL),
     ]:
         assert set(text(sql)._bindparams.keys()) == expected[name]
 

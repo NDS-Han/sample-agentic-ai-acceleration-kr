@@ -165,6 +165,22 @@ class Settings(BaseSettings):
     DB_CONNECT_TIMEOUT: float = 5.0
     DB_COMMAND_TIMEOUT: float = 60.0
 
+    # ── Analytics read pool (Dashboard·Analytics·웹 검색 사용량·사용자×모델) ──
+    # 기본 풀과 **분리된** 작은 풀 — 관리자 분석 화면이 아무리 몰려도 /v1/auth/exchange 등
+    # 기본 풀 사용자는 이 풀을 기다리지 않는다(새 인프라 없이 코드·설정만으로 격리).
+    # pool_timeout 이 짧은 이유: 풀이 차면 오래 줄 서는 대신 빨리 503 을 돌려주고, 같은 키의
+    # 동시 요청은 single-flight 로 한 질의를 기다린다(core/read_cache.py).
+    ANALYTICS_DB_POOL_SIZE: int = 3
+    ANALYTICS_DB_MAX_OVERFLOW: int = 2
+    ANALYTICS_DB_POOL_TIMEOUT: float = 10.0
+    # 문장 상한 — 트랜잭션 안의 `SET LOCAL statement_timeout`(서버 측 취소). RDS Proxy 는
+    # 명시 트랜잭션 안의 SET LOCAL 로는 세션을 pin 하지 않는다(AWS 문서 "Avoiding pinning",
+    # PostgreSQL 항목). asyncpg command_timeout 은 그보다 5초 긴 클라이언트 측 백스톱.
+    ANALYTICS_STATEMENT_TIMEOUT_MS: int = 30_000
+    # 하이브리드 읽기 결과 캐시(Redis) TTL — 오늘이 포함된 범위 / 다 지난 범위.
+    ANALYTICS_CACHE_TTL_SEC: int = 30
+    ANALYTICS_CACHE_TTL_PAST_SEC: int = 300
+
     # ── Redis ──
     REDIS_URL: str = "redis://localhost:6379/0"
     # None = auto-detect (startup probe). True = ElastiCache cluster mode, False = standalone
@@ -385,6 +401,10 @@ class Settings(BaseSettings):
         return v
 
     # ── Scheduler ──
+    # ROI 집계 잡(usage.roi_aggregations) — 읽는 곳이 없다(Analytics ROI 카드는 하이브리드
+    # 롤업에서 직접 계산). 15분마다 월 스캔 3회 + 팀당 2회를 쓰기만 하므로 기본 OFF.
+    # 코드와 테이블은 남겨 두고, 켜면 종전대로 ROI_AGGREGATION_CRON 에 돈다.
+    ROI_AGGREGATION_ENABLED: bool = False
     ROI_AGGREGATION_CRON: str = "*/15 * * * *"
     KEY_EXPIRY_CRON: str = "0 * * * *"
     # 되돌릴 수 없는 물리 DELETE 라 기본 OFF — 운영 검토 후 명시적으로 켠다.

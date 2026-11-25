@@ -8,7 +8,9 @@ import structlog
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.routing import APIRoute, request_response
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 
@@ -92,6 +94,73 @@ def create_engine():
 
 engine = create_engine()
 AsyncSessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+
+# ── 분석 읽기 풀 ─────────────────────────────────────────────────────────────
+
+
+def create_analytics_engine():
+    """분석 읽기 전용 작은 풀 — 기본 풀(인증·쓰기 경로)과 격리한다(config ANALYTICS_*)."""
+    settings = get_settings()
+    return create_async_engine(
+        settings.DATABASE_URL,
+        pool_size=settings.ANALYTICS_DB_POOL_SIZE,
+        max_overflow=settings.ANALYTICS_DB_MAX_OVERFLOW,
+        pool_timeout=settings.ANALYTICS_DB_POOL_TIMEOUT,
+        pool_recycle=settings.DB_POOL_RECYCLE,
+        echo=settings.DB_ECHO,
+        connect_args={
+            "statement_cache_size": settings.DB_STATEMENT_CACHE_SIZE,
+            "timeout": settings.DB_CONNECT_TIMEOUT,
+            # 서버 측 SET LOCAL statement_timeout 이 먼저 끊는다 — 이건 무응답 백스톱.
+            "command_timeout": settings.ANALYTICS_STATEMENT_TIMEOUT_MS / 1000 + 5,
+        },
+    )
+
+
+def statement_timeout_sql() -> str:
+    """트랜잭션 범위 문장 상한. 값은 int 설정이라 리터럴로 넣어도 인젝션 ��지가 없다.
+
+    ⚠️ 왜 SET LOCAL 인가(RDS Proxy pinning): 세션 SET 은 프록시가 그 클라이언트 연결을 DB
+    연결에 pin 해 다중화를 잃는다. 명시 트랜잭션(BEGIN…COMMIT) 안의 SET LOCAL 은 pin 하지
+    않는다(AWS RDS Proxy 문서 "Avoiding pinning", PostgreSQL 조건). SQLAlchemy 는 첫 문장 전에
+    BEGIN 을 보내고 after_begin 훅에서 이 문장을 실행하므로 항상 명시 트랜잭션 안이다.
+    set_config(…, true) 는 같은 효과지만 문서상 pin 을 일으키므로 쓰지 않는다. 롤 단위 설정은
+    새 DB 롤 + 프록시 시크릿(terraform)이 필요해 이번 범위 밖이다.
+    """
+    ms = int(get_settings().ANALYTICS_STATEMENT_TIMEOUT_MS)
+    return f"SET LOCAL statement_timeout = {ms}"
+
+
+class _AnalyticsSyncSession(Session):
+    """분석 세션의 sync 쪽 클래스 — 트랜잭션이 시작될 때마다 statement_timeout 을 건다."""
+
+
+@event.listens_for(_AnalyticsSyncSession, "after_begin")
+def _analytics_after_begin(session, transaction, connection) -> None:  # noqa: ARG001
+    # 트랜잭션 시작 직후(첫 문장 전) 같은 트랜잭션 안에서 실행된다 — 지연 실행이라 DB 를
+    # 쓰지 않는 요청(검증 실패 422 등)은 커넥션을 잡지 않는다. commit 뒤 새 트랜잭션에도 다시 건다.
+    connection.exec_driver_sql(statement_timeout_sql())
+
+
+analytics_engine = create_analytics_engine()
+AnalyticsSessionLocal = async_sessionmaker(
+    analytics_engine, class_=AsyncSession, sync_session_class=_AnalyticsSyncSession,
+    expire_on_commit=False,
+)
+
+
+async def get_analytics_session() -> AsyncGenerator[AsyncSession, None]:
+    """분석 읽기 세션 — 분석 풀 + 트랜잭션 범위 statement_timeout. 쓰지 않으므로 롤백으로 닫는다.
+
+    request.state 에 매달지 않는다 — CommittingRoute 는 기본 세션만 커밋하고, 이 세션은 쓰기가
+    없으므로 커밋할 것이 없다.
+    """
+    async with AnalyticsSessionLocal() as session:
+        try:
+            yield session
+        finally:
+            await session.rollback()
 
 
 async def get_db_session(request: Request) -> AsyncGenerator[AsyncSession, None]:

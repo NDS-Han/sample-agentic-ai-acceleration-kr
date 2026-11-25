@@ -242,27 +242,44 @@ _UPSERT_BUDGET_USAGE = text(
 )
 
 
-#: 과거 날짜에 늦게 도착한 로그 → 그 날짜의 롤업을 dirty 로 표시(daily_aggregator 모듈 주석).
-#: ⚠️ 이 UPDATE 는 같은 날짜를 재집계 중인 트랜잭션의 레지스트리 행 잠금을 기다린다 —
-#:    그래야 재집계 스냅샷이 못 본 행이 재집계 커밋 **뒤에** dirty 를 다시 켠다. 날짜
-#:    정렬은 여러 flush 트랜잭션이 같은 행들을 같은 순서로 잠그게 해 교착을 막는다.
-_MARK_LATE_DAYS_DIRTY = text(
+#: 이미 끝난(또는 곧 끝날) 시간·날짜의 로그 → 롤업 dirty 표시(daily_aggregator 모듈 주석).
+#: INSERT 전용·유니크 없음 — 같은 날짜를 재집계 중인 트랜잭션이 있어도 **아무 잠금도 기다리지
+#: 않는다**(예전 레지스트리 UPDATE 는 재집계 전체 시간 동안 flush 를 붙잡았다). 재집계는
+#: REPEATABLE READ 스냅샷이 본 표시만 지우므로, 이 표시가 그 스냅샷 뒤에 커밋되면 남는다.
+#: hour_start NULL = 날짜 표시, NOT NULL = 시간 표시.
+_INSERT_DIRTY_MARKS = text(
     """
-    INSERT INTO usage.daily_aggregate_days (date, dirty)
-    SELECT d, true FROM unnest(CAST(:days AS date[])) AS d ORDER BY d
-    ON CONFLICT (date) DO UPDATE SET dirty = true
+    INSERT INTO usage.rollup_dirty_marks (date, hour_start)
+    SELECT d, h FROM unnest(CAST(:days AS date[]), CAST(:hours AS timestamptz[])) AS t(d, h)
     """
 )
 
 
-def _late_days(entries: list[CostStreamEntry], tz_name: str) -> list[date]:
-    """리포팅 tz 기준 오늘 이전 날짜에 속한 entry 들의 날짜(정렬·중복 제거).
+def _late_marks(
+    entries: list[CostStreamEntry], tz_name: str, *, now: datetime | None = None,
+    margin_sec: float = 120.0,
+) -> list[tuple[date, datetime | None]]:
+    """표시할 (날짜, 시간 버킷 시작|None) 목록(정렬·중복 제거).
 
-    정상 경로(당일 로그)는 빈 리스트라 SQL 왕복이 없다."""
+    시간 버킷 끝이 ``now + margin`` 이전이면 시간 표시, 날짜 끝이 그 이전이면 날짜 표시도 낸다.
+    margin 은 flush 트랜잭션이 늦게 커밋돼 시간 잡(:05) 스냅샷 뒤에 보이는 경우를 덮는다.
+    정상 경로(현재 시간의 로그)는 빈 리스트라 SQL 왕복이 없다.
+    """
+    from datetime import UTC, timedelta
+
+    from worker.daily_aggregator import _day_window, bucket_of
+
     tz = ZoneInfo(tz_name)
-    today = datetime.now(tz).date()
-    days = {datetime.fromisoformat(e.requested_at).astimezone(tz).date() for e in entries}
-    return sorted(d for d in days if d < today)
+    cutoff = (now or datetime.now(UTC)) + timedelta(seconds=margin_sec)
+    marks: set[tuple[date, datetime | None]] = set()
+    for e in entries:
+        d, hs, he = bucket_of(tz, datetime.fromisoformat(e.requested_at))
+        if he <= cutoff:
+            marks.add((d, hs))
+            if _day_window(tz, d)[1] <= cutoff:
+                marks.add((d, None))
+    floor = datetime.min.replace(tzinfo=UTC)
+    return sorted(marks, key=lambda m: (m[0], m[1] is not None, m[1] or floor))
 
 
 _ALREADY_RECORDED_SQL = text(
@@ -624,15 +641,22 @@ class BatchFlusher:
     async def _mark_late_days_dirty(
         self, session: AsyncSession, entries: list[CostStreamEntry]
     ) -> None:
-        """실제로 삽입된 행 중 과거 날짜분이 있으면 그 날짜 롤업을 dirty 로 표시한다.
+        """실제로 삽입된 행 중 지난 시간·날짜분이 있으면 롤업 dirty 표시를 남긴다.
 
         usage_logs INSERT 와 **같은 트랜잭션**이어야 한다 — 따로 커밋하면 표시와 행 사이에
         재집계가 끼어들어 표시가 지워진 뒤 행만 남는 창이 생긴다.
         """
-        days = _late_days(entries, get_settings().reporting_timezone)
-        if days:
-            await session.execute(_MARK_LATE_DAYS_DIRTY, {"days": days})
-            logger.info("late_usage_marked_dirty", days=[str(d) for d in days])
+        settings = get_settings()
+        marks = _late_marks(entries, settings.reporting_timezone,
+                            margin_sec=float(getattr(settings, "rollup_dirty_margin_sec", 120)))
+        if marks:
+            await session.execute(
+                _INSERT_DIRTY_MARKS,
+                {"days": [m[0] for m in marks], "hours": [m[1] for m in marks]},
+            )
+            logger.info("late_usage_marked_dirty",
+                        days=sorted({str(m[0]) for m in marks if m[1] is None}),
+                        hours=len([m for m in marks if m[1] is not None]))
 
     async def _upsert_budget_usages(
         self, session: AsyncSession, entries: list[CostStreamEntry]

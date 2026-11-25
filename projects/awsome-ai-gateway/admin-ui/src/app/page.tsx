@@ -39,6 +39,7 @@ import { WebSearchSection } from '@/components/dashboard/WebSearchSection';
 import { teamDisplayName } from '@/lib/utils/trendSeries';
 import { isSyntheticEmail, userLabel } from '@/lib/userLabel';
 import { pageTitle } from '@/lib/pageMetadata';
+import { DataFreshness } from '@/components/common/DataFreshness';
 
 
 
@@ -73,6 +74,8 @@ async function DashboardKPIs({ period, client }: { period: string; client: strin
     <div className="space-y-6">
       {/* KPI 단일 엔드포인트 실패 시 '—' 카드와 함께 재시도 수단을 제공한다. */}
       {!kpi && <ErrorState compact />}
+      {/* 집계 기준 시각 + 지연 날짜 칩 — 하이브리드 롤업 읽기 메타(KPI 응답). */}
+      {kpi && <DataFreshness meta={kpi} className="-mt-2 px-1" />}
       {/* ── 비용 & 예산 ── */}
       <section className="space-y-3">
         <h2 className="px-1 text-xs font-bold uppercase tracking-[0.12em] text-muted-foreground">

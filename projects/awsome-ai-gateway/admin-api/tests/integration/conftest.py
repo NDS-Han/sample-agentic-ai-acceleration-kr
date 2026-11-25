@@ -179,6 +179,30 @@ async def _mock_get_db_session(request: Request):
     yield session
 
 
+class _EmptyAggRow:
+    """하이브리드 집계 한 행의 '빈' 값 — JSON 집계 열은 '[]', 메타는 없음, 나머지 0."""
+
+    _JSON = {"by_model", "by_team", "by_user", "trends", "by_team_day", "models", "cells"}
+
+    def __getattr__(self, name):
+        if name in self._JSON:
+            return "[]"
+        if name == "delayed":
+            return []
+        if name in ("as_of", "ws_cost"):
+            return None
+        return 0
+
+
+async def _mock_get_analytics_session():
+    session = _session()
+    result = _mock_db_result()
+    result.one.return_value = _EmptyAggRow()
+    session.execute = AsyncMock(return_value=result)
+    session.rollback = AsyncMock()
+    yield session
+
+
 @pytest.fixture
 def test_app() -> FastAPI:
     from app.core.db import get_db_session
@@ -186,6 +210,10 @@ def test_app() -> FastAPI:
     app = _build_test_app()
     # Mocked DB: routers must never touch a real Postgres in router-level tests.
     app.dependency_overrides[get_db_session] = _mock_get_db_session
+    # 분석 읽기 세션(분석 풀)도 mock — 라우터 테스트는 실 Postgres 에 닿지 않는다.
+    from app.core.db import get_analytics_session
+
+    app.dependency_overrides[get_analytics_session] = _mock_get_analytics_session
 
     # Mock dependencies
     mock_redis = AsyncMock()

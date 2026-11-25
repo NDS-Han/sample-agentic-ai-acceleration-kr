@@ -179,6 +179,20 @@ export function fmtDate(iso: string, timeZone?: string): string {
  * 연도까지 있는 분 단위 시각 — 'YYYY-MM-DD HH:mm'. 발급일·등록일·마지막 요청처럼
  * 몇 달 전일 수 있는 시점용(fmtDateTime 은 연도 없이 초까지라 로그 표 전용).
  */
+/** 'HH:MM'(24시간) — 한 시점의 시·분만(예: 집계 기준 시각). */
+export function fmtHourMinute(iso: string, timeZone?: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone,
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(d);
+  const m = Object.fromEntries(parts.map((p) => [p.type, p.value]));
+  return `${m.hour}:${m.minute}`;
+}
+
 export function fmtDateMinute(iso: string, timeZone?: string): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;

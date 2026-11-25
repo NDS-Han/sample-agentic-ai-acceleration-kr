@@ -83,6 +83,13 @@
       "dateOnly": "Dates (YYYY-MM-DD) in {zone}",
       "period": "Month boundaries in {zone}",
       "hint": "Calendar buckets (daily/monthly charts, budget periods) and date-only values (YYYY-MM-DD, e.g. key expiry) follow the deployment reporting time zone (REPORTING_TIMEZONE). Values with a time of day are shown in your browser time zone with its name."
+    },
+    "freshness": {
+      "asOf": "As of {time} (today live)",
+      "live": "Live data",
+      "hint": "Completed days and hours come from the usage rollups, refreshed hourly; the current hour is read live. The time is when the newest rollup used here was built, in your browser time zone.",
+      "delayed": "{count, plural, one {# day delayed} other {# days delayed}}",
+      "delayedHint": "The rollup for these days is behind or failed, so they were read directly from the raw usage log (exact, slower): {days}"
     }
   },
   "auth": {

@@ -73,9 +73,11 @@ def test_budget_denominator_excludes_team_member_user_configs():
     AST 로 WHERE 조건을 확인한다. 문자열 grep 이면 주석에 적힌 설명만 보고 통과할 수 있다.
     """
     tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
+    # wave 2: 예산 분자·분모 산출은 _budget_parts 로 분리했다(kpi 가 호출).
+    assert "_budget_parts(" in inspect.getsource(dash.dashboard_kpi)
     fn = next(
         n for n in tree.body
-        if isinstance(n, ast.AsyncFunctionDef) and n.name == "dashboard_kpi"
+        if isinstance(n, ast.AsyncFunctionDef) and n.name == "_budget_parts"
     )
     body = ast.unparse(fn)
     # 활성 config 만
@@ -94,7 +96,7 @@ def test_budget_numerator_reads_enforcement_counter():
     이므로, 사용액도 enforcement 가 실제로 부과하는 카운터여야 사용률이 실제와 같다.
     usage_logs SUCCESS 합계는 실패 호출 비용과 시드 이관분을 빼먹어, 하드블록 상태인
     조직에 "잔액 있음"을 표시하는 불일치가 있었다(R13-M5)."""
-    body = inspect.getsource(dash.dashboard_kpi)
+    body = inspect.getsource(dash._budget_parts)
     assert "BudgetUsage" in body, (
         "분자가 enforcement 계수(budget_usages)를 읽지 않는다 — 표시 사용액과 "
         "실제 부과액이 어긋난다"
@@ -138,9 +140,10 @@ def test_key_and_model_symbols_come_from_the_modules_that_exist():
 
 
 def test_period_default_goes_through_the_shared_kst_helper():
-    """지역 _default_period() 를 다시 만들지 말 것 — 6개 핸들러가 한 헬퍼를 공유한다."""
+    """지역 _default_period() 를 다시 만들지 말 것 — 핸들러들이 한 헬퍼(_month → current_kst_period)를 공유한다."""
     body = inspect.getsource(dash.dashboard_kpi)
-    assert "current_kst_period()" in body, "공유 KST 헬퍼를 쓰지 않는다"
+    assert "_month(period)" in body, "공유 기간 헬퍼를 쓰지 않는다"
+    assert "current_kst_period()" in inspect.getsource(dash._month), "공유 KST 헬퍼를 쓰지 않는다"
     src = SOURCE.read_text(encoding="utf-8")
     assert "def _default_period" not in src, (
         "지역 기간 기본값 함수가 생겼다 — 프로세스 로컬타임에 의존하게 되어 KST 통일이 깨진다"
@@ -154,7 +157,8 @@ def test_period_default_goes_through_the_shared_kst_helper():
 
 def test_kpi_uses_the_shared_cache_helpers_with_all_params():
     body = inspect.getsource(dash.dashboard_kpi)
-    assert "_cache_key(" in body and "_cache_get(" in body and "_cache_set(" in body, (
+    # wave 2: 캐시 + single-flight(core/read_cache) 를 _cached 하나로 쓴다.
+    assert "_cache_key(" in body and "_cached(" in body, (
         "캐시를 쓰지 않는다 — 이 엔드포인트가 병목 해소의 핵심이다"
     )
     assert "period=period" in body and "client=client" in body, (
