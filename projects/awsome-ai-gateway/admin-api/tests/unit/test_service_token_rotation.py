@@ -31,6 +31,7 @@ def _old_token(*, days_left: float, revoked: bool = False, expired: bool = False
     tok.created_by = uuid.uuid4()
     tok.expires_at = now + timedelta(seconds=-1) if expired else now + timedelta(days=days_left)
     tok.revoked_at = (now - timedelta(hours=1)) if revoked else None
+    tok.rotated_from = None  # 계보 루트 — rotate 빈도 상한의 조상 탐색이 바로 끝난다
     return tok
 
 

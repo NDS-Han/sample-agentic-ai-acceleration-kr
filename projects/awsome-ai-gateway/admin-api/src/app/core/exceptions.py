@@ -48,6 +48,14 @@ class DateRangeTooLongError(ValidationError):
         self.code = "date_range_too_long"
 
 
+class RateLimitedError(AppError):
+    """호출 빈도 상한 초과 — **429** + ``Retry-After``(초, 있으면)."""
+
+    def __init__(self, message: str, code: str = "rate_limited", retry_after: int | None = None):
+        super().__init__(message=message, code=code)
+        self.retry_after = retry_after
+
+
 class BudgetExceededError(AppError):
     def __init__(self, message: str = "Budget limit exceeded"):
         super().__init__(message=message, code="budget_exceeded")

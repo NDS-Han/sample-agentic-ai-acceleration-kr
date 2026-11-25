@@ -7,9 +7,14 @@ from fastapi import APIRouter, Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.audit import audit_logger
-from app.core.auth import CurrentUser, require_admin, require_human_admin
+from app.core.auth import (
+    CurrentUser,
+    require_admin,
+    require_human_admin,
+    require_service_token_self,
+)
 from app.core.db import get_db_session
-from app.core.exceptions import ForbiddenError, ValidationError
+from app.core.exceptions import ForbiddenError
 from app.schemas.service_tokens import (
     ServiceTokenCreateRequest,
     ServiceTokenCreateResponse,
@@ -64,12 +69,14 @@ async def list_service_tokens(
 @router.post("/rotate", response_model=ServiceTokenCreateResponse)
 async def rotate_service_token(
     request: Request,
-    admin: CurrentUser = Depends(require_human_admin),
+    admin: CurrentUser = Depends(require_service_token_self),
     session: AsyncSession = Depends(get_db_session),
 ):
     """self-rotate — service token 호출자만. 자기 자신을 교체, 구 토큰 24h grace."""
-    if not admin.is_service_token or admin.service_token_id is None:
-        raise ValidationError("Rotate is only callable by a service token authenticating itself")
+    # ⚠️ 게이트는 require_service_token_self 다 — require_human_admin 으로 바꾸면
+    #    아무도 호출할 수 없다(R32 회귀; test_service_token_rotate_gate 가 잡는다).
+    #    대상은 항상 호출 토큰 자신이며 요청 본문/경로에서 id 를 받지 않는다 —
+    #    한 svc 토큰이 다른 토큰을 rotate 하는 경로가 없다.
     svc = request.app.state.service_token_service
     result = await svc.rotate(
         session, token_id=admin.service_token_id, created_by=admin.user_id
