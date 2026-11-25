@@ -99,6 +99,22 @@ class WorkerMetrics:
             description="pricing_missing rows repriced (labels: outcome)",
             unit="1",
         )
+        # 요청 시작 원장(wave 3b, B2). outcome: swept(추정 행 기록) | raced(실제 행이 먼저 있었다) |
+        # replaced(늦은 실제 완료가 추정 행을 교체) | undone(행 없이 끝난 요청의 추정 행 삭제) |
+        # settle_failed(Redis 예약 정산 실패). swept 가 꾸준히 0 이 아니면 파드가 정상 종료하지
+        # 못한다.
+        self.request_sweeps = self._meter.create_counter(
+            "cost_recorder_request_sweeps_total",
+            description="Request-start sweeper outcomes (labels: outcome)",
+            unit="1",
+        )
+        # 게이트웨이 DB 폴백(usage.cost_pending_events)에서 소화한 이벤트(B3). outcome: processed |
+        # undecodable.
+        self.pending_events = self._meter.create_counter(
+            "cost_recorder_pending_events_total",
+            description="Cost events drained from the DB fallback table (labels: outcome)",
+            unit="1",
+        )
         # 비용 대조(B8) — 마지막 실행의 검사별 불일치 수 + 실행 결과.
         self.reconciliation_runs = self._meter.create_counter(
             "cost_recorder_reconciliation_runs_total",

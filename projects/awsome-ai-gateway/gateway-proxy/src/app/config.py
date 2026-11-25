@@ -209,6 +209,26 @@ class Settings(BaseSettings):
     usage_buffer_max: int = 10_000
     background_task_max_retries: int = 3
 
+    # ── 비용 이벤트 내구성(wave 3b) ──
+    #: admission 'start' 이벤트(B2) — 워커 sweeper 가 완료 없이 죽은 요청에 추정 행을 쓴다.
+    #: ⚠️ 워커(wave 3b 이상)를 먼저 배포한 뒤 켠다 — 구 워커는 start/close 를 dead-letter 로 보낸다.
+    cost_start_events_enabled: bool = True
+    #: 프로세스 생존 신호 ``cost:live:<instance>`` 갱신 주기/TTL(초). sweeper 는 신호가 끊긴
+    #: 프로세스의
+    #: 시작만 쓸어 담는다 — TTL 은 주기의 3배 이상(Redis 일시 지연에 흔들리지 않게).
+    cost_heartbeat_interval_sec: float = Field(default=10.0, gt=0)
+    cost_heartbeat_ttl_sec: int = Field(default=45, ge=5)
+    #: XADD 실패 시 spool → ``usage.cost_pending_events`` DB 폴백(B3). 끄면 예전처럼 메모리 spool
+    #: 만.
+    cost_event_db_fallback_enabled: bool = True
+    #: DB 폴백 한 배치 쓰기 상한(초) — 넘기면 항목은 spool 에 남고 다음 틱에 다시.
+    cost_event_db_timeout_sec: float = Field(default=3.0, gt=0)
+    #: 종료 시 스트림 드레인 태스크(B1 disconnect 드레인 → finalize)를 기다리는 추가 여유(초).
+    #: 실제 대기 = stream_disconnect_drain_timeout + 이 값(lifespan 예산 안에서).
+    shutdown_stream_drain_margin_sec: float = Field(default=5.0, ge=0)
+    #: lifespan 종료 단계 전체 예산(초) — 차트 terminationGracePeriodSeconds 산식의 "40 lifespan".
+    shutdown_lifespan_budget_sec: float = Field(default=40.0, gt=0)
+
     # Redis-down in-memory rate-limit fallback (middleware/rate_limit.py).
     # 이 fallback 의 USER RPM 카운터는 **프로세스(uvicorn worker)마다 독립**이라,
     # 함대 전체엔 `replicas × uvicorn_workers` 개의 독립 카운터가 존재한다. 사용자

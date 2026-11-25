@@ -433,7 +433,17 @@ def _tree(rel: str) -> ast.Module:
 def test_both_flush_paths_filter_replays():
     """⚠️ 배치 경로만 막으면 IntegrityError 한 번으로 폴백 경로가 계속 이중청구한다."""
     tree = _tree("batch_flusher.py")
-    for fname in ("flush", "_flush_per_row"):
+    # wave 3b: 세 경로(배치·per-row·dead-letter)가 단일 기록 경로 _write_ends 를 쓰고,
+    # 재처리 필터는 그 안에 있다.
+    write_ends = next(
+        (n for n in ast.walk(tree)
+         if isinstance(n, ast.AsyncFunctionDef) and n.name == "_write_ends"), None)
+    assert write_ends is not None
+    assert "_filter_replays" in {
+        n.func.id for n in ast.walk(write_ends)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+    }, "_write_ends 가 재처리 필터를 부르지 않는다 — 이중청구"
+    for fname in ("flush", "_flush_per_row", "flush_dead_letter"):
         fn = next(
             (
                 n
@@ -443,14 +453,16 @@ def test_both_flush_paths_filter_replays():
             None,
         )
         assert fn is not None, f"{fname} 를 찾지 못했다"
-        calls = {
-            n.func.id
+        attrs = {
+            n.func.attr
             for n in ast.walk(fn)
-            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
         }
-        assert "_filter_replays" in calls, (
-            f"{fname} 가 재처리 필터를 부르지 않는다 — 그 경로는 계속 이중청구한다"
+        assert "_write_ends" in attrs, (
+            f"{fname} 가 재처리 필터 경로(_write_ends)를 쓰지 않는다 — 그 경로는 계속 이중청구한다"
         )
+        assert "_upsert_budget_usages" not in attrs, (
+            f"{fname} 가 _write_ends 밖에서 예산을 가산한다")
 
 
 def test_the_replay_filter_runs_before_the_additive_upsert():
@@ -459,7 +471,7 @@ def test_the_replay_filter_runs_before_the_additive_upsert():
     fn = next(
         n
         for n in ast.walk(tree)
-        if isinstance(n, ast.AsyncFunctionDef) and n.name == "flush"
+        if isinstance(n, ast.AsyncFunctionDef) and n.name == "_write_ends"
     )
 
     def lines(name, attr=False):

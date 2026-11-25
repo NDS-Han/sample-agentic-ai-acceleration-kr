@@ -97,7 +97,7 @@ Helm 이 배포하는 워크로드는 **6 long-running Deployment + 1 migration 
 | `rl:cost:{user\|team}:{id}:cpm:{ts}` / `:cph:{ts}` | cost-per-minute/hour 윈도우 |
 | `budget:config:{user\|team}:{id}`, `budget:{user\|team}:{id}:{period}`, `budget:user:{uid}:{client}:{period}` | budget config + live USD 카운터(scope별 + **per-app(client)**) |
 | `key:vk:{key_hash}` (VK→user_id 매핑), `key:cache:vk:{key_hash}` (AuthContext 캐시, TTL 300s) | 미스 시 무효키 → PermissionError. 무효화 시 두 키 함께 delete |
-| `cost:stream` | **Redis Stream**(XADD 에 MAXLEN 없음 — wave 3 B4: 근사 트림이 미소비 entry 를 잘라 청구 기록을 잃었다), cost/usage 핸드오프, consumer group. 정리는 워커가 ACK 후 `XTRIM MINID min(미처리 최솟값, last-delivered-id)` 로만 — 미소비 청구 기록은 트림되지 않는다. 영구 오류 행은 `usage.cost_dead_letters` 에 원본으로 남는다 |
+| `cost:stream` | **Redis Stream**(XADD 에 MAXLEN 없음 — wave 3 B4: 근사 트림이 미소비 entry 를 잘라 청구 기록을 잃었다), cost/usage 핸드오프, consumer group. 정리는 워커가 ACK 후 `XTRIM MINID min(미처리 최솟값, last-delivered-id)` 로만 — 미소비 청구 기록은 트림되지 않는다. 영구 오류 행은 `usage.cost_dead_letters` 에 원본으로 남는다. wave 3b: 완료(end, `kind` 없음) 외에 admission `kind="start"`, 행 없는 종료 `kind="close"` 이벤트도 싣는다 — 워커가 `usage.request_starts` 에 적고, finalize 없이 죽은 요청(게이트웨이 생존 신호 `cost:live:<instance>` 끊김)은 sweeper 가 추정 행(`estimated_usage=true`)을 한 번 쓴다. XADD 실패 이벤트는 spool → `usage.cost_pending_events`(DB 폴백)로 가고 워커가 같은 경로로 소화한다 |
 | `model:{alias}`, `model:{provider_model_id}`, `model:list` | model-catalog 캐시(TTL 300s) |
 | `routing_profile:{client}` | routing-profile 캐시(TTL 300s). 롤백 시 이 키 플러시 필요 |
 | `usage:daily:user:{uid}:{date}:cost/tokens/models` | live daily 카운터 |
@@ -380,7 +380,7 @@ INLINE (gateway-proxy, CostRecorder.finalize, ~1–2ms, fail-soft, DB I/O 없음
   zero-usage guard(release TPM) → calculate_cost(input+output+cache_write[5m|1h]+cache_read)
   → budget_deduct Lua (user + team, returns threshold_triggered)
   → settle_cost(CPM/CPH USER+TEAM) → settle_tpm
-  → XADD cost:stream {CostStreamEntry(... client ...)}     (실패 시 CostStreamSpool 스풀링)
+  → XADD cost:stream {CostStreamEntry(... client ...)}     (실패 시 CostStreamSpool → usage.cost_pending_events)
 
 OFFLOADED (cost-recorder-worker):
   StreamConsumer XREADGROUP (backlog id=0 → live id=>, batch, XACK at-least-once)

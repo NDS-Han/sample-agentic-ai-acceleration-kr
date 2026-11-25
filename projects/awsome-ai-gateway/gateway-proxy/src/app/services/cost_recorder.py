@@ -20,6 +20,10 @@ logger = structlog.get_logger(__name__)
 
 COST_PRECISION = Decimal("0.000001")
 
+#: 팀/부서를 모르는 인증(VK 등)에 싣는 센티널 — 워커가 팀에서 부서를 해석한다(B5).
+DEFAULT_TEAM_ID = "00000000-0000-4000-a000-000000000003"
+DEFAULT_DEPT_ID = "00000000-0000-4000-a000-000000000002"
+
 # Redis Stream key for cost-recorder-worker offload. Worker XREADGROUP에서 소비.
 COST_STREAM_KEY = "cost:stream"
 # ⚠️ XADD 에 MAXLEN 을 두지 않는다(wave 3 B4). 예전의 `MAXLEN ~500_000` 백스톱은
@@ -956,8 +960,8 @@ class CostRecorder:
         전파하지 않는다. 단 P0-②: dead-letter spool 이 연결돼 있으면 payload를
         버퍼에 넣어 Redis 복구 시 재발행(re-XADD) → 기록 영구 유실 방지.
         """
-        _DEFAULT_TEAM_ID = "00000000-0000-4000-a000-000000000003"
-        _DEFAULT_DEPT_ID = "00000000-0000-4000-a000-000000000002"
+        _DEFAULT_TEAM_ID = DEFAULT_TEAM_ID
+        _DEFAULT_DEPT_ID = DEFAULT_DEPT_ID
 
         provider_str = (
             model_config.provider.value
@@ -1040,6 +1044,20 @@ class CostRecorder:
             degraded["context_tier"] = None
             entry = CostStreamEntry.make(**degraded)
             payload_json = entry.model_dump_json()
+        # 이 요청은 비용 행(end)을 남긴다 — 요청 종료 시 close 를 보내지 않는다(wave 3b).
+        from app.services import cost_ledger
+
+        cost_ledger.mark_ended(request_id)
+        await self.publish_event(redis, payload_json, request_id=request_id)
+
+    async def publish_event(self, redis, payload_json: str, *, request_id: str = "") -> bool:
+        """cost:stream 에 한 이벤트(end/start/close)를 XADD 한다. 실패하면 spool(→ DB 폴백)로.
+
+        반환 = XADD 성공 여부. 예외를 전파하지 않는다 — 응답은 이미 나갔거나 나가는 중이다.
+        Redis 열화(redis=None)면 XADD 없이 곧바로 spool 이다. spool 은 메모리 버퍼이고,
+        ``CostStreamSpool.run_store_writer`` 가 수 ms 안에 ``usage.cost_pending_events`` 로 옮긴다
+        (wave 3b B3 — 예전에는 Redis 복구 전까지 메모리에만 있어 파드 종료와 함께 사라졌다).
+        """
         published = False
         if redis is not None:
             try:
@@ -1047,14 +1065,11 @@ class CostRecorder:
                 await redis.xadd(COST_STREAM_KEY, {"payload": payload_json})
                 published = True
             except Exception:
-                logger.exception(
-                    "cost_stream_xadd_failed",
-                    user_id=auth_context.user_id,
-                    request_id=request_id,
-                )
+                logger.exception("cost_stream_xadd_failed", request_id=request_id)
         if not published and self._spool is not None:
-            # P0-②: don't lose the record — spool for re-publish on Redis recovery.
+            # P0-②: don't lose the record — spool → DB fallback / re-publish on Redis recovery.
             try:
                 self._spool.enqueue(payload_json)
             except Exception:
                 logger.exception("cost_stream_spool_enqueue_failed", request_id=request_id)
+        return published

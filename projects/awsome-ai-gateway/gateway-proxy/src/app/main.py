@@ -101,6 +101,31 @@ def build_body_logger(settings):
     )
 
 
+async def _flush_cost_spool(spool, redis, store, *, redis_timeout: float, remaining) -> None:
+    """종료 시 cost spool 비우기 — Redis 재발행(상한) 다음 DB 폴백 표(상한). 둘 다 취소안전
+    (pop-and-hold: 끝내지 못한 항목은 spool 에 남는다). 남은 양은 호출자가 경고로 남긴다."""
+    if not spool.size:
+        return
+    try:
+        drained = await asyncio.wait_for(spool.drain(redis), timeout=max(0.5, redis_timeout))
+        if drained:
+            logger.info("cost_stream_spool_drained_on_shutdown", count=drained)
+    except TimeoutError:
+        logger.warning("cost_stream_spool_shutdown_drain_timed_out", remaining=spool.size)
+    except Exception:
+        logger.warning("cost_stream_spool_shutdown_drain_failed")
+    if store is None or not spool.size:
+        return
+    try:
+        async with asyncio.timeout(remaining()):
+            while spool.size:
+                if not await spool.flush_to_store(store):
+                    break
+        logger.info("cost_stream_spool_written_to_db_on_shutdown", remaining=spool.size)
+    except TimeoutError:
+        logger.warning("cost_stream_spool_shutdown_db_timed_out", remaining=spool.size)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
@@ -300,6 +325,32 @@ async def lifespan(app: FastAPI):
         metrics=gateway_metrics, spool=cost_stream_spool, suspects=budget_suspects
     )
 
+    # 13a. 비용 이벤트 내구성(wave 3b).
+    #  B3 — spool 을 DB 폴백 표(usage.cost_pending_events)로 계속 비우는 writer. XADD 실패 이벤트가
+    #       메모리에 머무는 시간이 ms 단위가 된다(워커가 그 표를 스트림과 같은 경로로 소화).
+    #  B2 — 요청 수명 원장(admission start / 행 없는 종료 close) + 프로세스 생존 신호.
+    from app.resilience.cost_event_store import CostEventStore
+    from app.services import cost_ledger
+
+    cost_event_store = None
+    cost_store_writer = None
+    if settings.cost_event_db_fallback_enabled:
+        cost_event_store = CostEventStore(
+            session_factory, timeout=settings.cost_event_db_timeout_sec, metrics=gateway_metrics
+        )
+        cost_store_writer = asyncio.create_task(
+            cost_stream_spool.run_store_writer(cost_event_store), name="cost-spool-db-writer"
+        )
+    cost_ledger.configure(
+        recorder=cost_recorder, redis=redis, degradation_manager=degradation_manager,
+        enabled=settings.cost_start_events_enabled, metrics=gateway_metrics,
+    )
+    cost_heartbeat = cost_ledger.Heartbeat(
+        redis, interval=settings.cost_heartbeat_interval_sec, ttl=settings.cost_heartbeat_ttl_sec
+    )
+    if settings.cost_start_events_enabled:
+        cost_heartbeat.start()
+
     # 13b. Tokenizer (KI-08: 스트리밍 disconnect 시 누적 텍스트로 output 토큰 역산)
     tokenizer_service = TokenizerService(bedrock_client=bedrock_client)
 
@@ -483,40 +534,55 @@ async def lifespan(app: FastAPI):
 
     # Shutdown
     logger.info("gateway_proxy_shutting_down")
-    await health_checker.stop()
-    # P0-②: last-chance drain of the cost-stream spool — **body log 보다 먼저**
-    # 한다(R16). 과금 데이터가 감사 로그보다 먼저 안전하게 나가야 하고, 과거엔
-    # body_logger.stop() 의 무제한 drain 이 먼저 돌아 grace period 를 잡아먹어
-    # 스풀 drain 에 도달하지 못할 수 있었다.
-    await retry_worker.stop()
-    # 공용 데드라인 — 세 drain 의 개별 상한 합(15+10+15=40s)이
-    # terminationGracePeriod(60s, preStop 15s)의 SIGKILL 마진을 거의 다 쓴다.
-    # 앞 단계가 예산을 다 먹으면 뒷 단계가 아예 못 도는 순서 의존이 생기므로
-    # 남은 시간을 나눠 쓴다(R16 V-10).
     import time as _time
 
-    _shutdown_deadline = _time.monotonic() + 40.0
+    # 공용 데드라인 — 단계별 상한이 남은 시간을 나눠 쓴다(R16 V-10). 차트 산식의 "40 lifespan".
+    _shutdown_deadline = _time.monotonic() + settings.shutdown_lifespan_budget_sec
 
     def _remaining() -> float:
         return max(0.5, _shutdown_deadline - _time.monotonic())
 
-    # ⚠️ 상한 필수 — flapping Redis 에서 XADD 가 각 ~4s 블록하면 10k 스풀은
-    #    terminationGracePeriod 를 넘어 SIGKILL 되어 오히려 전부 유실된다.
-    #    drain() 은 취소안전(미완료 항목 복원)이므로 타임아웃은 안전하고,
-    #    남은 양은 lost_on_shutdown 경고로 가시화한다.
+    # ── 순서(wave 3b): ① 스트림 드레인 태스크 → ② spool → ③ 나머지 ──
+    # uvicorn 은 graceful 타임아웃이 지나면 남은 스트림을 취소한 뒤 lifespan 종료로 온다. 그 취소가
+    # B1 disconnect 드레인(상류를 끝까지 읽고 finalize)을 띄운다. 예전에는 spool drain 이 **먼저**
+    # 돌고 드레인 대기(~10 s)가 그 뒤였다 — 드레인이 늦게 끝낸 finalize 의 XADD 실패분은 이미 비운
+    # spool 에 들어가 다시는 비워지지 않았다. 이제 드레인을 먼저 기다리고(상한 ≥ 드레인 타임아웃),
+    # 그 다음 spool 을 Redis → DB 폴백 순으로 비운다.
+    # ⚠️ 헬스체커는 드레인 동안 살려 둔다 — Redis 열화 판정(_redis_effective)과 복구 시
+    #    spool 재발행이 드레인 중에도 맞게 돈다.
+    from app.services.budget_service import BudgetService
+    from app.services.streaming import drain_pending_tasks
+
+    _stream_wait = min(
+        float(settings.stream_disconnect_drain_timeout) + settings.shutdown_stream_drain_margin_sec,
+        max(0.5, settings.shutdown_lifespan_budget_sec - 5.0),
+    )
+    drained = await drain_pending_tasks(timeout=min(_stream_wait, _remaining()))
+    if drained:
+        logger.info("stream_drain_tasks_awaited_on_shutdown", count=drained)
+    # 취소 경로에서 발사된 예약 환불 태스크 — 남은 예약은 마커 TTL(최대 4h) 동안 resvsum 을
+    # 부풀린다.
     try:
-        drained = await asyncio.wait_for(
-            cost_stream_spool.drain(redis), timeout=min(15.0, _remaining())
-        )
-        if drained:
-            logger.info("cost_stream_spool_drained_on_shutdown", count=drained)
-    except TimeoutError:
-        logger.warning(
-            "cost_stream_spool_shutdown_drain_timed_out",
-            remaining=cost_stream_spool.size,
-        )
+        await BudgetService.drain_background_tasks(timeout=min(5.0, _remaining()))
     except Exception:
-        logger.warning("cost_stream_spool_shutdown_drain_failed")
+        logger.warning("budget_refund_tasks_shutdown_drain_failed")
+    # 드레인이 끝난 요청의 close(행 없는 종료) 발행.
+    await cost_ledger.drain_tasks(timeout=min(5.0, _remaining()))
+
+    await health_checker.stop()
+    await retry_worker.stop()
+
+    # ② spool — 과금 데이터가 감사 로그(body log)보다 먼저 나간다(R16). Redis 재발행 → 실패/잔여는
+    # DB 폴백 표. 둘 다 상한(flapping Redis 에서 XADD 가 각 ~4 s 블록하면 grace 를 넘겨 SIGKILL).
+    if cost_store_writer is not None:
+        cost_store_writer.cancel()
+        try:
+            await cost_store_writer
+        except (asyncio.CancelledError, Exception):
+            pass
+    await _flush_cost_spool(cost_stream_spool, redis, cost_event_store,
+                            redis_timeout=min(10.0, _remaining() / 2),
+                            remaining=_remaining)
 
     # 예산 suspect 의 :lost 센티넬도 같은 규칙으로 한 번 더 심어 본다 —
     # 인메모리 큐라 파드 종료와 함께 사라지므로 남은 양은 경고로 가시화한다.
@@ -539,30 +605,16 @@ async def lifespan(app: FastAPI):
                 "budget_suspects_shutdown_drain_failed",
                 remaining=budget_suspects.size,
             )
+    # 아직 끝나지 않은 드레인이 있으면(상한 초과) 마지막으로 한 번 더 — 그 finalize 의 이벤트가
+    # spool 에 들어왔을 수 있다. 그래도 남은 요청은 admission start 가 워커에 있으므로 sweeper 가
+    # 추정 행을 쓴다(생존 신호를 지우면 TTL 을 기다리지 않는다).
+    await _flush_cost_spool(cost_stream_spool, redis, cost_event_store,
+                            redis_timeout=min(3.0, _remaining() / 2), remaining=_remaining)
     if cost_stream_spool.size:
         logger.warning(
             "cost_stream_spool_lost_on_shutdown", remaining=cost_stream_spool.size
         )
-    # 취소 경로에서 발사된 예약 환불 태스크가 Redis 가 닫히기 전에 settle 을
-    # 마치도록 기다린다 — 날아간 환불은 예약이 마커 TTL(최대 4h) 동안 고아로
-    # 남아 resvsum 을 부풀린다. 스트림 drain 과 같은 규칙으로 짧게만 기다린다.
-    from app.services.budget_service import BudgetService
-
-    try:
-        await BudgetService.drain_background_tasks(
-            timeout=min(5.0, _remaining())
-        )
-    except Exception:
-        logger.warning("budget_refund_tasks_shutdown_drain_failed")
-    # 클라이언트 disconnect 로 떠 있는 스트림 드레인 태스크가 Redis/httpx 가
-    # 닫히기 전에 finalize(과금)를 마치도록 기다린다. 드레인 자체는
-    # stream_disconnect_drain_timeout 으로 상한이 있으므로 추가 grace 는
-    # 짧게 잡아 SIGKILL 마진을 남긴다.
-    from app.services.streaming import drain_pending_tasks
-
-    drained = await drain_pending_tasks(timeout=min(10.0, _remaining()))
-    if drained:
-        logger.info("stream_drain_tasks_awaited_on_shutdown", count=drained)
+    await cost_heartbeat.stop(clear=True)
     # 큐에 남은 body-log 레코드를 flush 한다 — 종료 시 버리면 감사 기록에 구멍이
     # 생긴다. 다만 stop() 의 내부 drain 루프는 상한이 없으므로 wait_for 로 묶는다
     # (R16: 10k 레코드 × Firehose 지연 시 grace period 초과 → 스풀 drain/정리가
@@ -577,6 +629,7 @@ async def lifespan(app: FastAPI):
     await httpx_client.aclose()
     await mantle_http.aclose()
     await redis.aclose()
+    cost_ledger.reset()
     try:
         await auth_invalidation.stop()
     except Exception:

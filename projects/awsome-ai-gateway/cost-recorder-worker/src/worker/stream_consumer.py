@@ -22,7 +22,7 @@ from redis.exceptions import ResponseError
 
 from worker.batch_flusher import BatchFlusher
 from worker.config import Settings
-from worker.schemas.cost_stream import CostStreamEntry
+from worker.schemas.cost_stream import CostStreamEntry, decode_event
 
 logger = structlog.get_logger(__name__)
 
@@ -32,6 +32,8 @@ logger = structlog.get_logger(__name__)
 #: 이를 넘는 entry 는 경고+메트릭으로 배포 검증에 신호를 남긴다. 의미 변경이
 #: 필요한 업그레이드는 워커 선배포가 전제다 — ARCHITECTURE.md 의 스트림 계약 참고.
 _SUPPORTED_SCHEMA_VERSION = 3
+#: 요청 수명 이벤트(start/close, wave 3b) 스키마 버전.
+_SUPPORTED_LIFECYCLE_VERSION = 4
 
 
 def _parse_xautoclaim(res: Any) -> tuple[str, list, list]:
@@ -608,7 +610,9 @@ class StreamConsumer:
                         payload.decode("utf-8") if isinstance(payload, bytes) else payload
                     )
                     data = json.loads(raw)
-                    entry = CostStreamEntry(**data)
+                    # 'kind' 없음 = 완료(end, CostStreamEntry). start/close = 요청 수명 이벤트(wave
+                    # 3b).
+                    entry = decode_event(data)
                     # 영구 오류 시 dead-letter 표에 원본 그대로 남기기 위해(B5).
                     entry._raw = raw
                     entry._stream_id = raw_id
@@ -627,7 +631,9 @@ class StreamConsumer:
                         raw_text = None
                     self._undecodable.append((raw_id, raw_text, str(exc)[:2000]))
                 else:
-                    if entry.schema_version > _SUPPORTED_SCHEMA_VERSION:
+                    supported = (_SUPPORTED_SCHEMA_VERSION if isinstance(entry, CostStreamEntry)
+                                 else _SUPPORTED_LIFECYCLE_VERSION)
+                    if entry.schema_version > supported:
                         # 게이트웨이가 워커보다 새 스키마 — additive(필드 추가)면
                         # 파싱은 안전하지만, 의미 변경이면 조용히 오염된다.
                         # loud signal 을 남겨 배포 검증이 잡을 수 있게 한다.
@@ -635,7 +641,7 @@ class StreamConsumer:
                             "cost_stream_future_schema",
                             msg_id=raw_id,
                             schema_version=entry.schema_version,
-                            supported=_SUPPORTED_SCHEMA_VERSION,
+                            supported=supported,
                         )
                         if self._metrics:
                             self._metrics.future_schema_entries.add(1)

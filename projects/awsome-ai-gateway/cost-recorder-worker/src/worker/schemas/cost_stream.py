@@ -136,3 +136,82 @@ class CostStreamEntry(BaseModel):
     # 게이트웨이 발행 스키마와 맞춘다(gateway cost_stream.py 는 3).
     # 소비자측 기본값이 낮으면 디코딩된 구버전 엔트리가 3 인 것처럼 보인다.
     schema_version: int = Field(default=3)
+
+
+# ── 요청 수명 이벤트(wave 3b, B2) — gateway-proxy services/cost_ledger.py 가 같은 cost:stream 에
+# 싣는다 ──
+#: 'kind' 가 없는 페이로드는 완료(end) = CostStreamEntry 다(구 게이트웨이 포함).
+
+
+class RequestStartEvent(BaseModel):
+    """admission 통과 시점의 요청 — 완료가 오지 않으면 sweeper 가 이것으로 추정 행을 쓴다."""
+
+    kind: str = "start"
+    request_id: str
+    instance_id: str = ""
+    user_id: str
+    team_id: str
+    teamless: bool = False
+    dept_id: str
+    model_alias: str
+    provider: str
+    client: str | None = None
+    key_prefix: str | None = None
+    sso_subject: str | None = None
+    session_id: str | None = None
+    is_streaming: bool = False
+    estimated_input_tokens: int = 0
+    estimated_cost_usd: Decimal = Decimal("0")
+    pricing_missing: bool = False
+    requested_at: str
+    period: str
+    date: str
+    #: 게이트웨이 월예산 예약 디스크립터(budget_service.reserve_budget 반환) — sweeper 가 정산한다.
+    budget_reservation: list[dict] = Field(default_factory=list)
+    schema_version: int = Field(default=4)
+
+    _raw: str | None = PrivateAttr(default=None)
+    _stream_id: str | None = PrivateAttr(default=None)
+
+    @field_validator("estimated_input_tokens", mode="before")
+    @classmethod
+    def _bounded(cls, v):
+        try:
+            iv = int(v)
+        except (TypeError, ValueError):
+            return v
+        return min(max(iv, 0), 10**12)
+
+    @field_validator("estimated_cost_usd", mode="before")
+    @classmethod
+    def _finite(cls, v):
+        try:
+            d = Decimal(str(v))
+        except Exception:
+            return v
+        if not d.is_finite() or not math.isfinite(float(d)) or d < 0:
+            return Decimal("0")
+        return d
+
+
+class RequestCloseEvent(BaseModel):
+    """행 없이 끝난 요청(0 토큰 성공·상류 4xx 등) — 열린 시작을 닫는다(추정 행을 만들지 않게)."""
+
+    kind: str = "close"
+    request_id: str
+    instance_id: str = ""
+    closed_at: str | None = None
+    schema_version: int = Field(default=4)
+
+    _raw: str | None = PrivateAttr(default=None)
+    _stream_id: str | None = PrivateAttr(default=None)
+
+
+def decode_event(data: dict):
+    """스트림/DB 폴백 페이로드(dict) → CostStreamEntry | RequestStartEvent | RequestCloseEvent."""
+    kind = data.get("kind") if isinstance(data, dict) else None
+    if kind == "start":
+        return RequestStartEvent(**data)
+    if kind == "close":
+        return RequestCloseEvent(**data)
+    return CostStreamEntry(**data)
