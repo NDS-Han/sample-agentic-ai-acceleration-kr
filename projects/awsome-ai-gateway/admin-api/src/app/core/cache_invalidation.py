@@ -46,6 +46,69 @@ async def publish_gateway_auth_invalidation(
                        users=len(users))
 
 
+#: gateway-proxy subscribes here and evicts its in-process model/catalog cache (wave 1d).
+GATEWAY_MODEL_INVALIDATION_CHANNEL = "gateway:model:invalidate"
+
+
+def _model_invalidation_payload(keys: list[str] | None = None,
+                                pattern: str | None = None) -> dict | None:
+    """Map the Redis keys admin-api DELs to the gateway's local model-cache scopes.
+
+    ``model:{alias}`` / ``model:pmid:{pmid}`` / ``model:nx:{ref}`` / ``model:nx:*:{ref}``
+    → ref; ``model:list`` → the list; ``routing_profile:{client}[:stale]`` → client.
+    Other keys (auth, budget, …) → None (no message).
+    """
+    refs: set[str] = set()
+    clients: set[str] = set()
+    model_list = False
+    for k in [*(keys or []), *([pattern] if pattern else [])]:
+        if not isinstance(k, str):
+            continue
+        if k == "model:list":
+            model_list = True
+        elif k.startswith("model:nx:"):
+            ref = k[len("model:nx:"):]
+            if ref.startswith("*:"):
+                ref = ref[2:]
+            refs.add(ref)
+        elif k.startswith("model:pmid:"):
+            refs.add(k[len("model:pmid:"):])
+        elif k.startswith("model:"):
+            refs.add(k[len("model:"):])
+        elif k.startswith("routing_profile:"):
+            c = k[len("routing_profile:"):]
+            if c.endswith(":stale"):
+                c = c[: -len(":stale")]
+            if c and "*" not in c:
+                clients.add(c)
+    refs = {r for r in refs if r and "*" not in r}
+    if not refs and not clients and not model_list:
+        return None
+    return {"model_refs": sorted(refs), "model_list": model_list,
+            "routing_clients": sorted(clients)}
+
+
+async def publish_gateway_model_invalidation(
+    redis, keys: list[str] | None = None, *, pattern: str | None = None
+) -> None:
+    """Tell gateway pods to drop local model/catalog entries for these keys. Best-effort.
+
+    Sent after the Redis DEL, from the same place (post-commit). If the publish fails, the
+    gateway's background refresh (``model_cache_refresh_sec``) bounds the staleness.
+    """
+    payload = _model_invalidation_payload(keys, pattern)
+    if payload is None:
+        return
+    try:
+        import json as _json
+
+        await redis.publish(GATEWAY_MODEL_INVALIDATION_CHANNEL, _json.dumps(payload))
+    except Exception:
+        logger.warning("gateway_model_invalidation_publish_failed",
+                       refs=len(payload["model_refs"]),
+                       clients=len(payload["routing_clients"]))
+
+
 class CacheInvalidationManager:
     """Best-effort Redis DEL with failure logging and manual retry support."""
 
@@ -72,6 +135,7 @@ class CacheInvalidationManager:
                     await self._record_failure(session, key)
 
         await publish_gateway_auth_invalidation(self._redis, keys)
+        await publish_gateway_model_invalidation(self._redis, keys)
 
     async def invalidate_pattern(
         self,
@@ -89,12 +153,13 @@ class CacheInvalidationManager:
         try:
             deleted = await self._scan_delete(pattern)
             logger.debug("cache.invalidated_pattern", pattern=pattern, deleted=deleted)
-            return deleted
         except Exception:
             logger.warning("cache.invalidation_pattern_failed", pattern=pattern, exc_info=True)
             if session is not None:
                 await self._record_failure(session, f"pattern:{pattern}")
-            return 0
+            deleted = 0
+        await publish_gateway_model_invalidation(self._redis, pattern=pattern)
+        return deleted
 
     async def _scan_delete(self, pattern: str) -> int:
         """SCAN+DEL — 예외를 삼키지 않아 retry 경로에서도 쓸 수 있다."""
@@ -182,6 +247,7 @@ class CacheInvalidationManager:
             return
         if key.startswith("pattern:"):
             await self._scan_delete(key[len("pattern:"):])
+            await publish_gateway_model_invalidation(self._redis, pattern=key[len("pattern:"):])
             return
         if key.startswith("swap:"):
             spec = key[len("swap:"):]
@@ -199,6 +265,7 @@ class CacheInvalidationManager:
             await pipe.execute()
             return
         await self._redis.delete(key)
+        await publish_gateway_model_invalidation(self._redis, [key])
 
     async def live_vk_hashes(self, team_id: uuid.UUID) -> list[str]:
         """``team:vk_hashes:{tid}`` 역인덱스에서 **살아있는** VK 해시만 반환한다.

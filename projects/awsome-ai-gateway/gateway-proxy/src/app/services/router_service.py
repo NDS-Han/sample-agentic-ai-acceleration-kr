@@ -327,6 +327,78 @@ async def _fetch_latest_pricing(db: AsyncSession, alias: str) -> Optional[ModelP
     return result.scalar_one_or_none()
 
 
+async def _db_find_alias(
+    db: AsyncSession, model_ref: str, provider_values: list[str]
+) -> tuple[ModelAlias | None, bool]:
+    """alias 정확 매칭 → 없으면 pmid(ACTIVE 우선, alias asc). (row, pmid 경유 여부)."""
+    # alias 정확 매칭 우선, 없으면 provider_model_id fallback (동일 provider_model_id가
+    # 여러 alias에 매핑될 수 있으므로 limit(1) 사용).
+    result = await db.execute(
+        select(ModelAlias).where(
+            and_(
+                ModelAlias.provider.in_(provider_values),
+                ModelAlias.alias == model_ref,
+            )
+        ).limit(1)
+    )
+    alias_row = result.scalar_one_or_none()
+
+    # pmid 경유 해소 여부 — 아래 pmid 캐시 쓰기의 조건이다.
+    _via_pmid = False
+    if alias_row is None:
+        # pmid 참조 — 같은 pmid 를 쓰는 alias 가 여러 개일 수 있다(예: base 와
+        # `[1m]` 변형, geo alias). ORDER BY 없는 LIMIT 1 은 행 순서에 따라
+        # 비결정적이라, 한 alias 만 INACTIVE 로 꺼도 pmid 요청이 무작위로 404
+        # 나가거나 어떤 alias 의 단가·ACL 이 적용될지 정해지지 않았다(E2E S3-M1).
+        # 규칙: ACTIVE 우선, 그 다음 alias 오름차순(canonical base alias 가 먼저).
+        _via_pmid = True
+        result = await db.execute(
+            select(ModelAlias).where(
+                and_(
+                    ModelAlias.provider.in_(provider_values),
+                    ModelAlias.provider_model_id == model_ref,
+                )
+            )
+            .order_by((ModelAlias.status == "ACTIVE").desc(), ModelAlias.alias)
+            .limit(1)
+        )
+        alias_row = result.scalar_one_or_none()
+    return alias_row, _via_pmid
+
+
+async def _db_alias_provider(db: AsyncSession, alias: str) -> ProviderType | None:
+    # alias 만 보면 pmid 참조는 해석이 캐시 상태에 따라 달라진다(E2E S3-L9) —
+    # pmid 도 같은 규칙(ACTIVE 우선, alias asc)으로 찾는다.
+    row = (
+        await db.execute(
+            select(ModelAlias.provider)
+            .where(
+                or_(
+                    ModelAlias.alias == alias,
+                    ModelAlias.provider_model_id == alias,
+                )
+            )
+            .order_by(
+                (ModelAlias.alias == alias).desc(),
+                (ModelAlias.status == "ACTIVE").desc(),
+                ModelAlias.alias,
+            )
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    return ProviderType(row) if row else None
+
+
+async def _db_active_models(db: AsyncSession) -> list[ModelConfigSchema]:
+    result = await db.execute(select(ModelAlias).where(ModelAlias.status == "ACTIVE"))
+    rows = result.scalars().all()
+    schemas: list[ModelConfigSchema] = []
+    for row in rows:
+        pricing_row = await _fetch_latest_pricing(db, row.alias)
+        schemas.append(_orm_to_schema(row, pricing_row))
+    return schemas
+
+
 class RouterService:
     # ⚠️ **클래스** 속성이다. 라우터 모듈 3곳이 각자 `RouterService()` 를 만들기 때문에
     #    인스턴스 주입으로는 한 곳만 계측된다. main.py 의 lifespan 에서
@@ -362,6 +434,11 @@ class RouterService:
             ModelInactiveError: alias 는 있으나 status=INACTIVE (운영자 kill switch).
             LookupError: 미등록 또는 provider 화이트리스트 불일치.
         """
+        from app.services import model_cache as _mc
+
+        if _mc.MODEL_CACHE is not None:
+            return await self._resolve_cached(_mc.MODEL_CACHE, redis, db, model_ref, providers)
+
         provider_values = [p.value for p in providers]
         # 음수 캐시 키는 provider 집합으로 네임스페이스한다 — 한 평면(BEDROCK)에서
         # 미스로 찍은 nx 가, 그 이름이 등록된 다른 평면(Codex OpenAI)의 해석까지
@@ -399,38 +476,7 @@ class RouterService:
         if db is None:
             raise LookupError(f"Model alias '{model_ref}' not found (DB unavailable)")
 
-        # alias 정확 매칭 우선, 없으면 provider_model_id fallback (동일 provider_model_id가
-        # 여러 alias에 매핑될 수 있으므로 limit(1) 사용).
-        result = await db.execute(
-            select(ModelAlias).where(
-                and_(
-                    ModelAlias.provider.in_(provider_values),
-                    ModelAlias.alias == model_ref,
-                )
-            ).limit(1)
-        )
-        alias_row = result.scalar_one_or_none()
-
-        # pmid 경유 해소 여부 — 아래 pmid 캐시 쓰기의 조건이다.
-        _via_pmid = False
-        if alias_row is None:
-            # pmid 참조 — 같은 pmid 를 쓰는 alias 가 여러 개일 수 있다(예: base 와
-            # `[1m]` 변형, geo alias). ORDER BY 없는 LIMIT 1 은 행 순서에 따라
-            # 비결정적이라, 한 alias 만 INACTIVE 로 꺼도 pmid 요청이 무작위로 404
-            # 나가거나 어떤 alias 의 단가·ACL 이 적용될지 정해지지 않았다(E2E S3-M1).
-            # 규칙: ACTIVE 우선, 그 다음 alias 오름차순(canonical base alias 가 먼저).
-            _via_pmid = True
-            result = await db.execute(
-                select(ModelAlias).where(
-                    and_(
-                        ModelAlias.provider.in_(provider_values),
-                        ModelAlias.provider_model_id == model_ref,
-                    )
-                )
-                .order_by((ModelAlias.status == "ACTIVE").desc(), ModelAlias.alias)
-                .limit(1)
-            )
-            alias_row = result.scalar_one_or_none()
+        alias_row, _via_pmid = await _db_find_alias(db, model_ref, provider_values)
         if alias_row is None:
             if redis is not None:
                 try:
@@ -519,6 +565,10 @@ class RouterService:
         Checks Redis model cache first (avoids a DB round-trip on hot paths),
         then falls back to a direct DB query.
         """
+        from app.services import model_cache as _mc
+
+        if _mc.MODEL_CACHE is not None:
+            return await self._alias_provider_cached(_mc.MODEL_CACHE, redis, db, alias)
         if redis is not None:
             for cache_key in (f"model:{alias}", f"model:pmid:{alias}"):
                 cached = await redis.get(cache_key)
@@ -529,28 +579,7 @@ class RouterService:
                         pass
         if db is None:
             return None
-        from sqlalchemy import or_ as sa_or
-        from sqlalchemy import select as sa_select
-        # alias 만 보면 pmid 참조는 해석이 캐시 상태에 따라 달라진다(E2E S3-L9) —
-        # pmid 도 같은 규칙(ACTIVE 우선, alias asc)으로 찾는다.
-        row = (
-            await db.execute(
-                sa_select(ModelAlias.provider)
-                .where(
-                    sa_or(
-                        ModelAlias.alias == alias,
-                        ModelAlias.provider_model_id == alias,
-                    )
-                )
-                .order_by(
-                    (ModelAlias.alias == alias).desc(),
-                    (ModelAlias.status == "ACTIVE").desc(),
-                    ModelAlias.alias,
-                )
-                .limit(1)
-            )
-        ).scalar_one_or_none()
-        return ProviderType(row) if row else None
+        return await _db_alias_provider(db, alias)
 
     async def resolve_openai_model(
         self,
@@ -618,6 +647,11 @@ class RouterService:
         """GET /v1/models: 활성 모델 목록 (Redis 캐시 5분)."""
         cache_key = "model:list"
 
+        from app.services import model_cache as _mc
+
+        if _mc.MODEL_CACHE is not None:
+            return await self._list_cached(_mc.MODEL_CACHE, redis, db)
+
         if redis is not None:
             cached = await redis.get(cache_key)
             if cached:
@@ -637,12 +671,7 @@ class RouterService:
         if db is None:
             return []
 
-        result = await db.execute(select(ModelAlias).where(ModelAlias.status == "ACTIVE"))
-        rows = result.scalars().all()
-        schemas: list[ModelConfigSchema] = []
-        for row in rows:
-            pricing_row = await _fetch_latest_pricing(db, row.alias)
-            schemas.append(_orm_to_schema(row, pricing_row))
+        schemas = await _db_active_models(db)
 
         if redis is not None:
             await redis.setex(
@@ -651,3 +680,169 @@ class RouterService:
                 json.dumps([s.model_dump(mode="json") for s in schemas]),
             )
         return schemas
+
+    # ── wave 1d: process-local catalog cache (services/model_cache.py) ─────────
+    # 의미는 위 레거시 경로와 같다(같은 Redis 키·같은 DB 쿼리·같은 예외). 다른 점:
+    # 로컬 히트면 Redis/DB 를 보지 않고, 미스일 때 Redis/DB 읽기에 데드라인이 있으며,
+    # 둘 다 실패하면 마지막으로 알던 값 또는 ModelBackendUnavailableError(503)다.
+
+    async def _resolve_cached(
+        self,
+        cache,
+        redis,
+        db: AsyncSession | None,
+        model_ref: str,
+        providers: tuple[ProviderType, ...],
+    ) -> ModelConfigSchema:
+        from app.services.model_cache import (
+            INACTIVE,
+            NX,
+            OK,
+            Entry,
+            ModelBackendUnavailableError,
+        )
+
+        provider_values = [p.value for p in providers]
+        pkey = "+".join(sorted(provider_values))
+        nx_key = f"model:nx:{pkey}:{model_ref}"
+
+        def _from_schema(schema: ModelConfigSchema) -> Entry:
+            refs = frozenset({model_ref, schema.alias or "", schema.provider_model_id} - {""})
+            if schema.status == ModelStatus.INACTIVE:
+                return Entry(INACTIVE, schema.alias or model_ref, refs)
+            if schema.provider not in providers:
+                return Entry(NX, None, refs)
+            return Entry(OK, schema, refs)
+
+        async def _redis_load() -> Entry | None:
+            if await redis.get(nx_key) or await redis.get(f"model:nx:{model_ref}"):
+                return Entry(NX, None, frozenset({model_ref}))
+            cached = await redis.get(f"model:{model_ref}")
+            if not cached:
+                cached = await redis.get(f"model:pmid:{model_ref}")
+            if not cached:
+                return None
+            schema = _parse_cached_model(cached, model_ref)
+            if schema is None:
+                return None  # poison entry → DB rebuild overwrites it
+            record_cache_hit(RouterService.metrics, kind="model")
+            return _from_schema(schema)
+
+        async def _db_load(s):
+            alias_row, via_pmid = await _db_find_alias(s, model_ref, provider_values)
+            if alias_row is None:
+                return Entry(NX, None, frozenset({model_ref})), [("setex", nx_key, 15, "1")]
+            refs = frozenset({model_ref, alias_row.alias, alias_row.provider_model_id})
+            if alias_row.status != "ACTIVE":
+                return Entry(INACTIVE, alias_row.alias, refs), []
+            pricing_row = await _fetch_latest_pricing(s, alias_row.alias)
+            schema = _orm_to_schema(alias_row, pricing_row)
+            payload = schema.model_dump_json()
+            writes = [("setex", f"model:{schema.alias}", MODEL_CACHE_TTL, payload)]
+            if via_pmid:
+                writes.append(
+                    ("setex", f"model:pmid:{schema.provider_model_id}", MODEL_CACHE_TTL, payload)
+                )
+            return Entry(OK, schema, refs), writes
+
+        async def _fallback(redis_failed: bool, db_failed: bool) -> Entry:
+            if redis_failed or db_failed:
+                raise ModelBackendUnavailableError(
+                    f"Model '{model_ref}': catalog backend unavailable"
+                )
+            raise LookupError(f"Model alias '{model_ref}' not found (DB unavailable)")
+
+        entry = await cache.get(
+            ("model", pkey, model_ref),
+            db=db,
+            db_load=_db_load,
+            redis=redis,
+            redis_load=_redis_load if redis is not None else None,
+            fallback=_fallback,
+        )
+        if entry.kind == INACTIVE:
+            raise ModelInactiveError(f"Model '{entry.value}' is inactive")
+        if entry.kind == NX:
+            raise LookupError(f"Model alias '{model_ref}' not found")
+        return entry.value
+
+    async def _alias_provider_cached(self, cache, redis, db, alias: str):
+        from app.services.model_cache import NX, OK, Entry, ModelBackendUnavailableError
+
+        refs = frozenset({alias})
+
+        async def _redis_load() -> Entry | None:
+            for cache_key in (f"model:{alias}", f"model:pmid:{alias}"):
+                cached = await redis.get(cache_key)
+                if cached:
+                    try:
+                        return Entry(OK, ProviderType(json.loads(cached).get("provider")), refs)
+                    except Exception:
+                        pass
+            return None
+
+        async def _db_load(s):
+            prov = await _db_alias_provider(s, alias)
+            return (Entry(OK, prov, refs) if prov is not None else Entry(NX, None, refs)), []
+
+        async def _fallback(redis_failed: bool, db_failed: bool) -> Entry:
+            # 실패를 None(=Bedrock 으로 진행)으로 삼키면 Mantle alias 가 조용히 다른 평면으로
+            # 간다 — 레거시도 Redis/DB 오류는 전파했다(→ 503).
+            if redis_failed or db_failed:
+                raise ModelBackendUnavailableError(f"alias '{alias}': catalog backend unavailable")
+            return Entry(NX, None, refs)
+
+        entry = await cache.get(
+            ("prov", alias),
+            db=db,
+            db_load=_db_load,
+            redis=redis,
+            redis_load=_redis_load if redis is not None else None,
+            fallback=_fallback,
+        )
+        return entry.value if entry.kind == OK else None
+
+    async def _list_cached(self, cache, redis, db) -> list[ModelConfigSchema]:
+        from app.services.model_cache import LIST_KEY, OK, Entry
+
+        def _entry(schemas: list[ModelConfigSchema]) -> Entry:
+            refs = frozenset(
+                r for m in schemas for r in (m.alias, m.provider_model_id) if r
+            )
+            return Entry(OK, tuple(schemas), refs)
+
+        async def _redis_load() -> Entry | None:
+            cached = await redis.get("model:list")
+            if not cached:
+                return None
+            schemas = _parse_cached_model_list(cached)
+            if schemas is None:
+                try:
+                    await redis.delete("model:list")
+                except Exception:  # noqa: BLE001 — cache eviction must never fail a read
+                    logger.warning("model_list_cache_delete_failed", cache_key="model:list")
+                return None
+            record_cache_hit(RouterService.metrics, kind="model_list")
+            return _entry(schemas)
+
+        async def _db_load(s):
+            schemas = await _db_active_models(s)
+            payload = json.dumps([m.model_dump(mode="json") for m in schemas])
+            return _entry(schemas), [("setex", "model:list", MODEL_LIST_CACHE_TTL, payload)]
+
+        async def _fallback(redis_failed: bool, db_failed: bool) -> Entry:
+            from app.services.model_cache import ModelBackendUnavailableError
+
+            if redis_failed or db_failed:
+                raise ModelBackendUnavailableError("model list: catalog backend unavailable")
+            return Entry(OK, ())  # legacy contract: db=None + cache miss → []
+
+        entry = await cache.get(
+            LIST_KEY,
+            db=db,
+            db_load=_db_load,
+            redis=redis,
+            redis_load=_redis_load if redis is not None else None,
+            fallback=_fallback,
+        )
+        return list(entry.value or ())

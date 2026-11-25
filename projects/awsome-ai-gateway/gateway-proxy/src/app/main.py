@@ -442,6 +442,23 @@ async def lifespan(app: FastAPI):
     auth_invalidation.start()
     app.state.hot_db_engine = hot_db_engine
     app.state.auth_invalidation = auth_invalidation
+
+    # ── Wave 1d: router model/catalog cache + invalidation from admin-api ──
+    from app.services import model_cache as _model_cache
+
+    model_invalidation = None
+    if settings.model_cache_enabled:
+        _mcache = _model_cache.from_settings(settings, session_factory)
+        _mcache.set_metric(gateway_metrics.model_cache_total)
+        _model_cache.configure(_mcache)
+        model_invalidation = _hot_path.AuthInvalidationListener(
+            settings.redis_url, settings.model_invalidation_channel, _mcache.invalidate
+        )
+        _mcache.subscribed = lambda: model_invalidation.connected
+        model_invalidation.start()
+    else:
+        _model_cache.configure(None)
+    app.state.model_invalidation = model_invalidation
     app.state.shutting_down = False
     app.state.degradation_notifier = degradation_notifier
     app.state.cost_stream_spool = cost_stream_spool
@@ -576,6 +593,12 @@ async def lifespan(app: FastAPI):
     except Exception:
         pass
     _auth_service.configure_auth_local_caches(None)
+    if model_invalidation is not None:
+        try:
+            await model_invalidation.stop()
+        except Exception:
+            pass
+    _model_cache.configure(None)
     await hot_db_engine.dispose()
     await db_engine.dispose()
     await shutdown_otel()

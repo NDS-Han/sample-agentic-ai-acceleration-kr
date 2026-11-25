@@ -159,6 +159,27 @@ class Settings(BaseSettings):
     budget_policy_refresh_retry_sec: float = 10.0
     budget_local_cache_max_entries: int = 20000
 
+    # ── Router model/catalog cache (wave 1d) ───────────────────────────────────
+    # Model config / alias→provider / model list / routing profile lookups are cached per
+    # process. false = legacy (Redis GET + DB on every request).
+    model_cache_enabled: bool = True
+    # Entries older than this are still served and re-read in the background (main pool).
+    model_cache_refresh_sec: float = 60.0
+    # Same, while the invalidation subscription is down (admin edits can't reach us).
+    model_cache_refresh_unsubscribed_sec: float = 10.0
+    # How old a last known entry may be when DB and Redis can't answer.
+    model_cache_max_stale_sec: float = 3600.0
+    # Negative results (unknown model / no routing profile), like the Redis model:nx 15 s.
+    model_cache_negative_ttl_sec: float = 15.0
+    model_cache_max_entries: int = 5000
+    # Redis read on a local miss gives up after this long; a failure skips Redis for
+    # hot_db_breaker_cooldown_sec. DB reads on a miss use hot_db_timeout_sec.
+    model_cache_redis_timeout_sec: float = 0.3
+    model_cache_refresh_timeout_sec: float = 2.0
+    model_cache_refresh_retry_sec: float = 10.0
+    # admin-api publishes {"model_refs": [...], "model_list": bool, "routing_clients": [...]}.
+    model_invalidation_channel: str = "gateway:model:invalidate"
+
     # Timeouts
     lua_timeout_ms: int = 1000
     stream_timeout: int = 300

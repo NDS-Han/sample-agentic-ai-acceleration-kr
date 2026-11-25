@@ -96,6 +96,15 @@ class GatewayMetrics:
             unit="1",
         )
 
+        # 라우터 모델/카탈로그 로컬 캐시(wave 1d). result: fresh | stale | redis | db | no_db |
+        # unavailable | refresh_ok | refresh_failed | invalidated. unavailable 이 0 이 아니면
+        # 처음 보는 모델 조회가 Redis/DB 장애로 503 이 되는 중이다.
+        self.model_cache_total: Counter = meter.create_counter(
+            "gateway_model_cache_total",
+            description="Router model/catalog lookups by local cache outcome",
+            unit="1",
+        )
+
         # Downgrade (FR-3.6)
         self.downgrade_applied_total: Counter = meter.create_counter(
             "gateway_downgrade_applied_total",
