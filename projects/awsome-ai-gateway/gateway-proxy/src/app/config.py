@@ -180,6 +180,33 @@ class Settings(BaseSettings):
     # admin-api publishes {"model_refs": [...], "model_list": bool, "routing_clients": [...]}.
     model_invalidation_channel: str = "gateway:model:invalidate"
 
+    # ── Startup warm-up (wave 1e) ──────────────────────────────────────────────
+    # Before readiness reports ready: open Redis + DB pool connections, load the model/alias/
+    # routing cache, the budget policy cache and the auth cache for recently used VKs. If that
+    # does not finish within startup_warmup_timeout_sec (DB/Redis down or slow) the process
+    # becomes ready anyway ("degraded" in /health/ready) and keeps warming in the background.
+    startup_warmup_enabled: bool = True
+    startup_warmup_timeout_sec: float = 20.0
+    # Deadline of one warm-up step (one batch of queries); failed steps are retried.
+    startup_warmup_step_timeout_sec: float = 10.0
+    # Background retry back-off cap after the foreground window.
+    startup_warmup_retry_max_sec: float = 30.0
+    # Main-pool connections opened per worker; -1 = db_pool_size, 0 = none. The hot-path
+    # (auth) pool is always opened in full (hot_db_pool_size).
+    startup_warmup_db_conns: int = -1
+    startup_warmup_redis_conns: int = 4
+    # Recently used VKs pre-loaded into the auth cache (newest first, capped).
+    startup_warmup_auth_window_sec: float = 86400.0
+    startup_warmup_auth_max_keys: int = 5000
+    startup_warmup_model_max_aliases: int = 500
+    # Recently used VK hashes (sha256, never the raw key) — Redis sorted set written by the
+    # gateway on successful VK auth, at most once per key per record interval per process.
+    auth_recent_vk_enabled: bool = True
+    auth_recent_vk_key: str = "gateway:auth:recent_vk"
+    auth_recent_vk_record_interval_sec: float = 300.0
+    auth_recent_vk_flush_interval_sec: float = 10.0
+    auth_recent_vk_max_keys: int = 20000
+
     # Timeouts
     lua_timeout_ms: int = 1000
     stream_timeout: int = 300

@@ -596,6 +596,24 @@ gatewayProxy:
   #   DEGRADED_LOOKUP_TIMEOUT_SEC: "0.5"     # downgrade / web-search policy lookups
   #   WEB_SEARCH_REBUILD_TIMEOUT_SEC: "20"   # background web-search counter rebuild
   #   WEB_SEARCH_REBUILD_LOCK_TTL_SEC: "60"
+  #
+  # Startup warm-up (wave 1e — fill pools/caches before this worker accepts traffic) — code defaults:
+  #   STARTUP_WARMUP_ENABLED: "true"
+  #   STARTUP_WARMUP_TIMEOUT_SEC: "20"         # then ready anyway ("degraded" in /health/ready) and
+  #                                            #   keep warming in the background (DB/Redis down)
+  #   STARTUP_WARMUP_STEP_TIMEOUT_SEC: "10"    # one warm-up step (batch of queries); retried
+  #   STARTUP_WARMUP_RETRY_MAX_SEC: "30"       # background retry back-off cap
+  #   STARTUP_WARMUP_DB_CONNS: "-1"            # main-pool conns opened per worker (-1 = DB_POOL_SIZE);
+  #                                            #   the hot-path pool is always opened in full
+  #   STARTUP_WARMUP_REDIS_CONNS: "4"
+  #   STARTUP_WARMUP_AUTH_WINDOW_SEC: "86400"  # pre-load VKs used in the last 24 h ...
+  #   STARTUP_WARMUP_AUTH_MAX_KEYS: "5000"     #   ... newest first, at most this many
+  #   STARTUP_WARMUP_MODEL_MAX_ALIASES: "500"
+  #   AUTH_RECENT_VK_ENABLED: "true"           # gateway records sha256 hashes (never raw keys) of
+  #   AUTH_RECENT_VK_KEY: "gateway:auth:recent_vk"   # used VKs in this Redis sorted set,
+  #   AUTH_RECENT_VK_RECORD_INTERVAL_SEC: "300"      #   once per key per interval per worker,
+  #   AUTH_RECENT_VK_FLUSH_INTERVAL_SEC: "10"        #   one ZADD per flush, trimmed to 24 h /
+  #   AUTH_RECENT_VK_MAX_KEYS: "20000"               #   this many members
   env:
     LOG_LEVEL: "INFO"
     # uvicorn 워커 수 — gateway-proxy Dockerfile CMD 가 ${WORKERS:-4} 로 읽는다(1.0.98+).

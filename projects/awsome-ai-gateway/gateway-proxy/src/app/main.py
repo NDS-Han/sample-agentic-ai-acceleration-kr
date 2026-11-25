@@ -543,11 +543,44 @@ async def lifespan(app: FastAPI):
     app.state.fallback_resolver = fallback_resolver
     app.state.alias_provider_map = _alias_provider_map
 
+    # ── Wave 1e: recently used VK hashes + startup warm-up before readiness ──
+    # uvicorn 은 lifespan startup 이 끝나야 이 워커에서 accept 를 시작한다 — 데우는 동안 이 워커는
+    # 트래픽을 받지 않는다. 상한(startup_warmup_timeout_sec)을 넘기면 열화 상태로 ready 가 되고
+    # 같은 태스크가 백그라운드로 계속 데운다(DB 장애가 파드를 ALB 밖에 묶어 두지 않는다).
+    from app.services import recent_vk as _recent_vk
+    from app.services import startup_warmup as _startup_warmup
+
+    recent_vk_recorder = None
+    if settings.auth_recent_vk_enabled:
+        recent_vk_recorder = _recent_vk.RecentVkRecorder(
+            redis,
+            key=settings.auth_recent_vk_key,
+            record_interval_sec=settings.auth_recent_vk_record_interval_sec,
+            flush_interval_sec=settings.auth_recent_vk_flush_interval_sec,
+            window_sec=settings.startup_warmup_auth_window_sec,
+            max_keys=settings.auth_recent_vk_max_keys,
+        )
+        recent_vk_recorder.start()
+    _recent_vk.configure(recent_vk_recorder)
+    startup_warmup = _startup_warmup.build(
+        settings,
+        redis=redis,
+        db_engine=db_engine,
+        hot_db_engine=hot_db_engine,
+        session_factory=session_factory,
+        routing_loader=app.state.routing_profile_loader,
+    )
+    app.state.startup_warmup = startup_warmup
+    await startup_warmup.run()
+
     logger.info("gateway_proxy_started")
     app.state.started = True
     yield
     # readiness flips to 503 from here on (process-local signal).
     app.state.shutting_down = True
+    # 백그라운드 warm-up(열화 기동 후 재시도 중일 수 있다)은 종료 작업과 풀을 다투지 않게
+    # 먼저 멈춘다.
+    await startup_warmup.stop()
 
     # Shutdown
     logger.info("gateway_proxy_shutting_down")
@@ -643,6 +676,12 @@ async def lifespan(app: FastAPI):
             "body_log_shutdown_drain_timed_out",
             remaining=body_logger.queue_size,
         )
+    if recent_vk_recorder is not None:
+        try:
+            await asyncio.wait_for(recent_vk_recorder.stop(), timeout=min(2.0, _remaining()))
+        except (TimeoutError, Exception):
+            pass
+    _recent_vk.configure(None)
     await httpx_client.aclose()
     await mantle_http.aclose()
     await redis.aclose()
