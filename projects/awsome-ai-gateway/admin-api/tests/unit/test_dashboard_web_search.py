@@ -28,9 +28,23 @@ def _result(one=None, rows=()):
 
 
 def _session(total, by_client, daily):
+    """하이브리드 롤업 읽기(services/usage_reads) 질의를 SQL 모양으로 골라 답한다."""
+    from tests.rollup_double import EmptyAggRow
+
+    async def _execute(stmt, params=None):
+        sql = str(stmt)
+        if "AS total_requests" in sql:
+            return _result(one=total)
+        if "HAVING COALESCE(sum(wq), 0) > 0" in sql:
+            return _result(rows=by_client)
+        if "WHERE wq > 0 GROUP BY day" in sql:
+            return _result(rows=daily)
+        if "AS delayed" in sql:
+            return _result(one=EmptyAggRow())
+        return _result(rows=[])  # system_settings(추적 시작·단가)
+
     s = AsyncMock()
-    s.execute = AsyncMock(side_effect=[_result(one=total), _result(rows=by_client),
-                                       _result(rows=daily)])
+    s.execute = AsyncMock(side_effect=_execute)
     return s
 
 
@@ -46,7 +60,9 @@ async def _call(total, by_client=(), daily=(), *, today=date(2026, 11, 24), depl
 
 def _total(queries, cost, requests, untracked=0):
     return SimpleNamespace(ws_queries=queries, ws_cost=cost, ws_untracked=untracked,
-                           ws_since=None, successful_requests=requests)
+                           total_requests=requests, error_requests=0, total_cost=0,
+                           active_users=0, input_tokens=0, output_tokens=0,
+                           cache_creation_tokens=0, cache_read_tokens=0)
 
 
 @pytest.mark.asyncio

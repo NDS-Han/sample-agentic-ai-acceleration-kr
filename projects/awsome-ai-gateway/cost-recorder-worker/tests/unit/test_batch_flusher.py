@@ -24,7 +24,7 @@ def _no_late_day_marking(monkeypatch):
     """이 파일의 entry 는 고정 과거 날짜(2026-04-21)라 늦은 로그 dirty 표시 SQL 이 한 번 더
     나간다 — SQL 호출 수를 세는 기존 테스트의 관심사가 아니므로 여기선 끈다.
     dirty 표시 자체는 test_late_days_dirty.py 가 검증한다."""
-    monkeypatch.setattr("worker.batch_flusher._late_days", lambda entries, tz: [])
+    monkeypatch.setattr("worker.batch_flusher._late_marks", lambda entries, tz, **kw: [])
 
 
 def _insert_returning_exec(stmt, params=None):

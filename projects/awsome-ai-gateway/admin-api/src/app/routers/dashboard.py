@@ -8,31 +8,26 @@ import uuid
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from sqlalchemy import and_, distinct, exists, func, or_, select
+from sqlalchemy import and_, exists, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core import read_cache
 from app.core.auth import CurrentUser, require_admin
-from app.core.db import get_db_session
-from app.core.usage_filters import (
-    client_coalesce_expr,
-    client_filter,
-    cost_period_filter,
-    current_kst_period,
-    kst_month_expr,
-    reporting_tz_sql,
-)
-from app.models.auth import Department, KeyStatus, Team, User, VirtualKey
+from app.core.db import get_analytics_session
+from app.core.usage_filters import current_kst_period, reporting_timezone
+from app.models.auth import KeyStatus, User, VirtualKey
 from app.models.budget import BudgetConfig, BudgetScope, BudgetUsage
 from app.models.model import ModelAlias, ModelStatus
-from app.models.usage import UsageLog, UsageStatus
+from app.services import usage_reads as reads
+from app.services import usage_rollup as ur
 from app.services.web_search_cost import (
     WebSearchUsage,
     elapsed_days,
     get_price,
     reporting_today,
     web_search_deployed,
-    ws_columns,
-    ws_from_row,
+    ws_from_totals,
+    ws_settings,
 )
 
 logger = logging.getLogger(__name__)
@@ -89,72 +84,59 @@ async def _cache_set(
         logger.debug("dashboard cache set failed key=%s err=%s", key, exc)
 
 
+async def _cached(request: Request, key: str, rng: ur.DayRange, compute):
+    """Redis 캐시 + single-flight(core/read_cache) — 같은 키의 동시 요청은 질의 한 번을 공유한다.
+
+    TTL: 오늘이 포함된 기간은 _DASHBOARD_CACHE_TTL(30s), 다 지난 기간은 더 길게.
+    """
+    return await read_cache.cached(
+        getattr(request.app.state, "redis", None), key, compute,
+        ttl=read_cache.ttl_for(rng.end, ur.reporting_today()),
+    )
+
+
+def _month(period: str | None) -> tuple[str, ur.DayRange]:
+    period = period or current_kst_period()
+    return period, ur.month_range(period)  # 형식 오류 400
+
+
 @router.get("/summary")
 async def dashboard_summary(
     request: Request,
     period: str = Query(default=None, description="YYYY-MM (KST). 미지정 시 현재 월"),
     client: str = Query(default=None, description="claude-code|cowork|codex|other|all"),
     _admin: CurrentUser = Depends(require_admin),
-    session: AsyncSession = Depends(get_db_session),
+    session: AsyncSession = Depends(get_analytics_session),
 ):
-    if not period:
-        period = current_kst_period()
+    period, rng = _month(period)
 
     # ⚠️ 캐시가 안전한 근거: 이 라우터의 모든 핸들러가 `require_admin` 이므로 응답이
     #    **행위자에 따라 달라지지 않는다**. 그래서 키에 actor 를 넣지 않아도 된다.
     #    (대조: /admin/analytics 는 require_admin_or_team_leader 라 같은 파라미터가
-    #     ADMIN 에겐 전사·TEAM_LEADER 에겐 팀 범위를 뜻한다 — 거기서 actor 없는 키를
-    #     쓰면 TEAM_LEADER 가 전사 데이터를 받는다. 그 캐시는 role 을 키에 넣는다.)
+    #     ADMIN 에겐 전사·TEAM_LEADER 에겐 팀 범위를 뜻한다 — 그 캐시는 해석된 팀 집합을
+    #     키에 넣는다.)
     cache_key = _cache_key("summary", period=period, client=client)
-    if (cached := await _cache_get(request, cache_key)) is not None:
-        return cached
 
-    # 선택적 앱(client) 필터 — 'all'/None 이면 전체. WHERE 는 SUCCESS 필터가
-    # 빠진 구간이고 성공/에러 구분은 집계 FILTER 절이 한다 — 한 번의 스캔에
-    # 성공 집계와 에러 카운트를 같이 얻는다. 정책 차단(429·예산 차단·인증
-    # 실패)은 usage_logs 에 행이 없어 자연 배제 — ERROR/TIMEOUT 은 장애만.
-    where_clauses = [cost_period_filter(period, success_only=False)]
-    if (cf := client_filter(client)) is not None:
-        where_clauses.append(cf)
+    async def compute():
+        # 성공/에러 구분은 집계 FILTER — 한 번의 하이브리드 읽기에 성공 집계와 에러 수를
+        # 같이 얻는다. 정책 차단(429·예산 차단·인증 실패)은 usage_logs 에 행이 없어 자연 배제.
+        scope = ur.RollupScope.of(rng, client=client)
+        t = await reads.totals(session, scope)
+        meta = await ur.fetch_meta(session, scope)
+        active_users = t.active_users
+        cost_per_user = (t.total_cost / active_users) if active_users > 0 else Decimal(0)
+        return {
+            "period": period,
+            "total_requests": t.total_requests,
+            "error_requests": t.error_requests,
+            "total_tokens": t.total_tokens,
+            "total_cost_usd": round(float(t.total_cost), 4),
+            "active_users": active_users,
+            "cost_per_user_usd": round(float(cost_per_user), 4),
+            **meta.as_dict(),
+        }
 
-    _success = UsageLog.status == UsageStatus.SUCCESS
-    stmt = select(
-        func.count().filter(_success).label("total_requests"),
-        func.count()
-        .filter(UsageLog.status.in_([UsageStatus.ERROR, UsageStatus.TIMEOUT]))
-        .label("error_requests"),
-        func.coalesce(
-            func.sum(
-                UsageLog.input_tokens
-                + UsageLog.output_tokens
-                + UsageLog.cache_creation_tokens
-                + UsageLog.cache_read_tokens
-            ).filter(_success),
-            0,
-        ).label("total_tokens"),
-        func.coalesce(func.sum(UsageLog.cost_usd).filter(_success), 0).label("total_cost_usd"),
-        func.count(distinct(UsageLog.user_id)).filter(_success).label("active_users"),
-    ).where(*where_clauses)
-    row = (await session.execute(stmt)).one()
-
-    total_requests = row.total_requests or 0
-    error_requests = row.error_requests or 0
-    total_tokens = int(row.total_tokens or 0)
-    total_cost = Decimal(row.total_cost_usd or 0)
-    active_users = row.active_users or 0
-    cost_per_user = (total_cost / active_users) if active_users > 0 else Decimal(0)
-
-    payload = {
-        "period": period,
-        "total_requests": total_requests,
-        "error_requests": error_requests,
-        "total_tokens": total_tokens,
-        "total_cost_usd": round(float(total_cost), 4),
-        "active_users": active_users,
-        "cost_per_user_usd": round(float(cost_per_user), 4),
-    }
-    await _cache_set(request, cache_key, payload)
-    return payload
+    return await _cached(request, cache_key, rng, compute)
 
 
 @router.get("/model-share")
@@ -164,354 +146,214 @@ async def model_share(
     team_id: str = Query(default="all", description="UUID 또는 'all'"),
     client: str = Query(default=None, description="claude-code|cowork|codex|other|all"),
     _admin: CurrentUser = Depends(require_admin),
-    session: AsyncSession = Depends(get_db_session),
+    session: AsyncSession = Depends(get_analytics_session),
 ):
-    if not period:
-        period = current_kst_period()
-
-    # 응답을 바꾸는 파라미터 **전부**를 키에 넣는다 — 하나라도 빠지면 다른 질의의
-    # 결과가 반환된다(team_id 를 빼면 A팀 화면에 B팀 점유율이 뜨는 식).
-    cache_key = _cache_key("model-share", period=period, team_id=team_id, client=client)
-    if (cached := await _cache_get(request, cache_key)) is not None:
-        return cached
-
-    where_clauses = [
-        # §59 비용 집계 표준: SUCCESS 만 + KST 월 경계.
-        cost_period_filter(period),
-    ]
-    if (cf := client_filter(client)) is not None:
-        where_clauses.append(cf)
+    period, rng = _month(period)
 
     team_filter: str = "all"
+    teams = None
     if team_id and team_id != "all":
         try:
             team_uuid = uuid.UUID(team_id)
         except ValueError:
             raise HTTPException(status_code=400, detail="invalid_team_id")
-        where_clauses.append(UsageLog.team_id == team_uuid)
+        teams = [team_uuid]
         team_filter = str(team_uuid)
 
-    # display_name 을 위해 model_aliases 와 LEFT OUTER JOIN (없으면 NULL → UI 가 alias fallback).
-    stmt = (
-        select(
-            UsageLog.model_alias,
-            func.coalesce(func.sum(UsageLog.cost_usd), 0).label("cost_usd"),
-            func.max(ModelAlias.display_name).label("display_name"),
-        )
-        .select_from(UsageLog)
-        .outerjoin(ModelAlias, ModelAlias.alias == UsageLog.model_alias)
-        .where(*where_clauses)
-        .group_by(UsageLog.model_alias)
-        .order_by(func.sum(UsageLog.cost_usd).desc())
-    )
-    rows = (await session.execute(stmt)).all()
+    # 응답을 바꾸는 파라미터 **전부**를 키에 넣는다 — 하나라도 빠지면 다른 질의의
+    # 결과가 반환된다(team_id 를 빼면 A팀 화면에 B팀 점유율이 뜨는 식).
+    cache_key = _cache_key("model-share", period=period, team_id=team_filter, client=client)
 
-    total = sum(float(r.cost_usd or 0) for r in rows)
-    models = []
-    for r in rows:
-        cost = float(r.cost_usd or 0)
-        share = (cost / total * 100) if total > 0 else 0.0
-        models.append({
-            "model_alias": r.model_alias,
-            "display_name": r.display_name,
-            "cost_usd": round(cost, 6),
-            "share_pct": round(share, 2),
-        })
+    async def compute():
+        # §59 비용 집계 표준: SUCCESS 만 + 리포팅 tz 월 경계.
+        scope = ur.RollupScope.of(rng, teams=teams, client=client, success_only=True)
+        rows = await reads.model_share(session, scope)
+        meta = await ur.fetch_meta(session, scope)
+        total = sum(float(r.cost_usd or 0) for r in rows)
+        models = []
+        for r in rows:
+            cost = float(r.cost_usd or 0)
+            share = (cost / total * 100) if total > 0 else 0.0
+            models.append({
+                "model_alias": r.model_alias,
+                "display_name": r.display_name,
+                "cost_usd": round(cost, 6),
+                "share_pct": round(share, 2),
+            })
+        return {
+            "period": period,
+            "team_id": team_filter,
+            # 6자리 — 소액 호출($0.00001 규모)이 4자리 반올림에서 0 이 되면
+            # 프론트의 `total_cost_usd === 0` 공백 판정에 "사용 기록 없음"으로 뜬다.
+            "total_cost_usd": round(total, 6),
+            "models": models,
+            **meta.as_dict(),
+        }
 
-    payload = {
-        "period": period,
-        "team_id": team_filter,
-        # 6자리 — 소액 호출($0.00001 규모)이 4자리 반올림에서 0 이 되면
-        # 프론트의 `total_cost_usd === 0` 공백 판정에 "사용 기록 없음"으로 뜬다.
-        "total_cost_usd": round(total, 6),
-        "models": models,
-    }
-    await _cache_set(request, cache_key, payload)
-    return payload
+    return await _cached(request, cache_key, rng, compute)
 
 
 @router.get("/client-share")
 async def client_share(
+    request: Request,
     period: str = Query(default=None, description="YYYY-MM (KST). 미지정 시 현재 월"),
     _admin: CurrentUser = Depends(require_admin),
-    session: AsyncSession = Depends(get_db_session),
+    session: AsyncSession = Depends(get_analytics_session),
 ):
     """앱별(client) 비용 점유율 — claude-code / cowork / codex / other(legacy NULL 포함).
 
-    client_coalesce_expr() 로 NULL(레거시 미식별) 행을 'other' 로 접어 GROUP BY.
-    §59 비용 집계 표준(SUCCESS + KST 월 경계) 동일 적용. admin-ui ClientShareResponse 형태.
+    롤업 client 는 이미 COALESCE(client,'other') 로 접혀 있다(raw 분기도 같은 식).
+    §59 비용 집계 표준(SUCCESS + 리포팅 tz 월 경계) 동일 적용. admin-ui ClientShareResponse 형태.
     """
-    if not period:
-        period = current_kst_period()
+    period, rng = _month(period)
+    cache_key = _cache_key("client-share", period=period)
 
-    client_col = client_coalesce_expr().label("client")
-    _success = UsageLog.status == UsageStatus.SUCCESS
-    stmt = (
-        select(
-            client_col,
-            # 모델 비용·호출 수는 종전대로 SUCCESS 만(§59). WHERE 에서 SUCCESS 를 빼고
-            # FILTER 로 옮긴 것은 웹 검색 때문이다 — 검색은 모델 호출이 실패해도 이미
-            # 실행·과금됐으므로 ERROR/TIMEOUT 행의 검색까지 센다(services/web_search_cost).
-            func.coalesce(func.sum(UsageLog.cost_usd).filter(_success), 0).label("cost_usd"),
-            func.count().filter(_success).label("call_count"),
-            *ws_columns(),
+    async def compute():
+        # 모델 비용·호출 수는 SUCCESS 만(§59). 웹 검색은 모델 호출이 실패해도 이미 실행·과금됐으므로
+        # ERROR/TIMEOUT 행의 검색까지 센다(services/web_search_cost) — 그래서 status 로 거르지 않는다.
+        scope = ur.RollupScope.of(rng)
+        rows = [
+            r for r in await reads.client_share(session, scope)
+            # 실패 호출만 있던 앱은 종전처럼 숨긴다 — 단 그 실패 호출이 검색을 썼으면 비용이
+            # 있으므로 남긴다.
+            if (r.call_count or 0) > 0 or (r.ws_queries or 0) > 0
+        ]
+        settings = await ws_settings(session)
+        meta = await ur.fetch_meta(session, scope)
+
+        total = sum(float(r.cost_usd or 0) for r in rows)
+        clients = []
+        for r in rows:
+            cost = float(r.cost_usd or 0)
+            share = (cost / total * 100) if total > 0 else 0.0
+            ws = ws_from_totals(r.ws_queries, r.ws_cost, r.ws_untracked, settings)
+            clients.append({
+                "client": r.client,
+                # 6자리 — 소액 호출이 4자리 반올림에서 0 으로 사라진다(model-share 와 동일).
+                # 모델 비용만 — 점유율(share_pct)도 모델 비용 기준이다.
+                "cost_usd": round(cost, 6),
+                "share_pct": round(share, 2),
+                "call_count": int(r.call_count or 0),
+                "web_search_count": ws.queries,
+                # 모니터링 전용 웹 검색 비용(모델 비용·예산과 별개). None = 미추적.
+                "web_search_cost_usd": ws.cost_usd,
+                "web_search_untracked_count": ws.untracked_queries,
+            })
+
+        base = ws_from_totals(0, None, 0, settings)
+        ws_total = WebSearchUsage(
+            queries=sum(c["web_search_count"] for c in clients),
+            cost_usd=(
+                round(sum(c["web_search_cost_usd"] for c in clients
+                          if c["web_search_cost_usd"] is not None), 6)
+                if any(c["web_search_cost_usd"] is not None for c in clients) else None
+            ),
+            untracked_queries=sum(c["web_search_untracked_count"] for c in clients),
+            tracking_since=base.tracking_since if rows else None,
+            deployed=web_search_deployed(),
+            **({"price_per_1k_queries": base.price_per_1k_queries} if rows else {}),
         )
-        .where(cost_period_filter(period, success_only=False))
-        .group_by(client_col)
-        .order_by(func.sum(UsageLog.cost_usd).filter(_success).desc())
-    )
-    rows = [
-        r for r in (await session.execute(stmt)).all()
-        # 실패 호출만 있던 앱은 종전처럼 숨긴다 — 단 그 실패 호출이 검색을 썼으면 비용이
-        # 있으므로 남긴다.
-        if (r.call_count or 0) > 0 or (r.ws_queries or 0) > 0
-    ]
+        return {
+            "period": period,
+            "total_cost_usd": round(total, 6),
+            "clients": clients,
+            "web_search": ws_total.model_dump(mode="json"),
+            **meta.as_dict(),
+        }
 
-    total = sum(float(r.cost_usd or 0) for r in rows)
-    clients = []
-    for r in rows:
-        cost = float(r.cost_usd or 0)
-        share = (cost / total * 100) if total > 0 else 0.0
-        ws = ws_from_row(r)
-        clients.append({
-            "client": r.client,
-            # 6자리 — 소액 호출이 4자리 반올림에서 0 으로 사라진다(model-share 와 동일).
-            # 모델 비용만 — 점유율(share_pct)도 모델 비용 기준이다.
-            "cost_usd": round(cost, 6),
-            "share_pct": round(share, 2),
-            "call_count": int(r.call_count or 0),
-            "web_search_count": ws.queries,
-            # 모니터링 전용 웹 검색 비용(모델 비용·예산과 별개). None = 미추적.
-            "web_search_cost_usd": ws.cost_usd,
-            "web_search_untracked_count": ws.untracked_queries,
-        })
-
-    ws_total = WebSearchUsage(
-        queries=sum(c["web_search_count"] for c in clients),
-        cost_usd=(
-            round(sum(c["web_search_cost_usd"] for c in clients
-                      if c["web_search_cost_usd"] is not None), 6)
-            if any(c["web_search_cost_usd"] is not None for c in clients) else None
-        ),
-        untracked_queries=sum(c["web_search_untracked_count"] for c in clients),
-        tracking_since=ws_from_row(rows[0]).tracking_since if rows else None,
-        deployed=web_search_deployed(),
-        **({"price_per_1k_queries": ws_from_row(rows[0]).price_per_1k_queries} if rows else {}),
-    )
-    return {
-        "period": period,
-        "total_cost_usd": round(total, 6),
-        "clients": clients,
-        "web_search": ws_total.model_dump(mode="json"),
-    }
+    return await _cached(request, cache_key, rng, compute)
 
 
 @router.get("/top-users")
 async def top_users(
+    request: Request,
     period: str = Query(default=None, description="YYYY-MM (KST). 미지정 시 현재 월"),
     limit: int = Query(default=5, ge=1, le=50),
     client: str = Query(default=None, description="claude-code|cowork|codex|other|all"),
     _admin: CurrentUser = Depends(require_admin),
-    session: AsyncSession = Depends(get_db_session),
+    session: AsyncSession = Depends(get_analytics_session),
 ):
-    """실제 비용 기준 상위 사용자(§60.8) — usage_logs 를 SUCCESS+KST 로 집계해 cost 내림차순.
+    """실제 비용 기준 상위 사용자(§60.8) — SUCCESS+리포팅 tz 월 집계를 cost 내림차순.
 
     ⚠️ 기존 대시보드 'Top 사용자 by 비용' 위젯은 budgets/summary(예산설정된 사용자만)를
     써서 예산 없는 헤비유저를 누락했다(라벨='비용'인데 실제론 예산설정자 중 사용액).
-    이 엔드포인트는 챗(text2SQL)과 동일하게 usage_logs 전체에서 진짜 top spender 를 낸다.
+    이 엔드포인트는 챗(text2SQL)과 동일하게 사용량 전체에서 진짜 top spender 를 낸다.
     PII 금지: sso_subject 미노출(display_name·email 만).
     """
-    if not period:
-        period = current_kst_period()
+    period, rng = _month(period)
+    cache_key = _cache_key("top-users", period=period, client=client, limit=limit)
 
-    stmt = (
-        select(
-            User.id.label("user_id"),
-            User.display_name.label("name"),
-            User.email.label("email"),
-            User.team_id.label("team_id"),
-            Team.name.label("team_name"),
-            Department.name.label("department_name"),
-            func.coalesce(func.sum(UsageLog.cost_usd), 0).label("cost_usd"),
-            func.count().label("call_count"),
-        )
-        .join(User, User.id == UsageLog.user_id)
-        # team/dept 는 달려 있지 않을 수 있어 OUTER — 무소속 사용자도 나와야 한다.
-        .outerjoin(Team, Team.id == User.team_id)
-        .outerjoin(Department, Department.id == Team.dept_id)
-        .where(
-            cost_period_filter(period),  # §59 SUCCESS + KST (대시보드 단일 진실원)
-            *([cf] if (cf := client_filter(client)) is not None else []),
-        )
-        .group_by(
-            User.id, User.display_name, User.email,
-            User.team_id, Team.name, Department.name,
-        )
-        # top-N 동률 시 비결정적 — id 보조 정렬 (R25-N6)
-        .order_by(func.sum(UsageLog.cost_usd).desc(), User.id)
-        .limit(limit)
-    )
-    rows = (await session.execute(stmt)).all()
+    async def compute():
+        scope = ur.RollupScope.of(rng, client=client, success_only=True)
+        rows = await reads.top_users(session, scope, limit)
+        meta = await ur.fetch_meta(session, scope)
+        return {
+            "period": period,
+            "users": [
+                {
+                    # 표시명은 UI 가 team_name + department_name 을 canonical 규칙
+                    # (부서_팀)으로 조합한다 — 동명 팀이 부서별로 존재할 수 있다.
+                    "user_id": str(r.user_id),
+                    "name": r.name,
+                    "email": r.email,
+                    "team_id": str(r.team_id) if r.team_id else None,
+                    "team_name": r.team_name,
+                    "department_name": r.department_name,
+                    "cost_usd": round(float(r.cost_usd or 0), 4),
+                    "call_count": int(r.call_count or 0),
+                }
+                for r in rows
+            ],
+            **meta.as_dict(),
+        }
 
-    return {
-        "period": period,
-        "users": [
-            {
-                # 표시명은 UI 가 team_name + department_name 을 canonical 규칙
-                # (부서_팀)으로 조합한다 — 동명 팀이 부서별로 존재할 수 있다.
-                "user_id": str(r.user_id),
-                "name": r.name,
-                "email": r.email,
-                "team_id": str(r.team_id) if r.team_id else None,
-                "team_name": r.team_name,
-                "department_name": r.department_name,
-                "cost_usd": round(float(r.cost_usd or 0), 4),
-                "call_count": int(r.call_count or 0),
-            }
-            for r in rows
-        ],
-    }
+    return await _cached(request, cache_key, rng, compute)
 
 
 @router.get("/top-teams")
 async def top_teams(
+    request: Request,
     period: str = Query(default=None, description="YYYY-MM (KST). 미지정 시 현재 월"),
     limit: int = Query(default=5, ge=1, le=50),
     client: str = Query(default=None, description="claude-code|cowork|codex|other|all"),
     _admin: CurrentUser = Depends(require_admin),
-    session: AsyncSession = Depends(get_db_session),
+    session: AsyncSession = Depends(get_analytics_session),
 ):
-    """실제 비용 기준 상위 팀(§60.9) — usage_logs 를 SUCCESS+KST 로 집계해 cost 내림차순.
+    """실제 비용 기준 상위 팀(§60.9) — SUCCESS+리포팅 tz 월 집계를 cost 내림차순.
 
-    기존 대시보드 'Top 팀 by 비용'은 budgets/summary(예산설정 팀만)를 써서 예산 없는
-    팀을 누락했다(§60.8 의 top-users 와 동형 버그 — 팀은 미수정이었음). top-users 와
-    동일하게 usage_logs 전체에서 집계한다. **팀 귀속은 usage_logs.team_id 직접**
-    (users.team_id 경유 금지 — 팀 이동 사용자의 과거 비용 오귀속 방지).
+    **팀 귀속은 요청 시점 team_id**(롤업 입도에 그대로 있다 — users.team_id 경유 금지:
+    팀 이동 사용자의 과거 비용 오귀속 방지).
     """
-    if not period:
-        period = current_kst_period()
+    period, rng = _month(period)
+    cache_key = _cache_key("top-teams", period=period, client=client, limit=limit)
 
-    stmt = (
-        select(
-            Team.id.label("team_id"),
-            Team.name.label("name"),
-            Department.name.label("department_name"),
-            func.coalesce(func.sum(UsageLog.cost_usd), 0).label("cost_usd"),
-            func.count().label("call_count"),
-        )
-        .join(Team, Team.id == UsageLog.team_id)
-        # dept 는 팀에 안 달려 있을 수 있어 OUTER — 부서 없는 팀도 나와야 한다.
-        .outerjoin(Department, Department.id == Team.dept_id)
-        .where(
-            cost_period_filter(period),  # §59 SUCCESS + KST (대시보드 단일 진실원)
-            *([cf] if (cf := client_filter(client)) is not None else []),
-        )
-        .group_by(Team.id, Team.name, Department.name)
-        .order_by(func.sum(UsageLog.cost_usd).desc(), Team.id)
-        .limit(limit)
-    )
-    rows = (await session.execute(stmt)).all()
+    async def compute():
+        scope = ur.RollupScope.of(rng, client=client, success_only=True)
+        rows = await reads.top_teams(session, scope, limit)
+        meta = await ur.fetch_meta(session, scope)
+        return {
+            "period": period,
+            "teams": [
+                {
+                    # 같은 이름의 팀이 부서별로 중복 존재할 수 있어(예: NDS/SSIR 산하
+                    # 동명 Developers) 표시명은 UI 가 department_name 과 조합해 만든다.
+                    "team_id": str(r.team_id),
+                    "name": r.name,
+                    "department_name": r.department_name,
+                    "cost_usd": round(float(r.cost_usd or 0), 4),
+                    "call_count": int(r.call_count or 0),
+                }
+                for r in rows
+            ],
+            **meta.as_dict(),
+        }
 
-    return {
-        "period": period,
-        "teams": [
-            {
-                # 같은 이름의 팀이 부서별로 중복 존재할 수 있어(예: NDS/SSIR 산하
-                # 동명 Developers) 표시명은 UI 가 department_name 과 조합해 만든다.
-                "team_id": str(r.team_id),
-                "name": r.name,
-                "department_name": r.department_name,
-                "cost_usd": round(float(r.cost_usd or 0), 4),
-                "call_count": int(r.call_count or 0),
-            }
-            for r in rows
-        ],
-    }
+    return await _cached(request, cache_key, rng, compute)
 
 
-@router.get("/kpi")
-async def dashboard_kpi(
-    request: Request,
-    period: str = Query(default=None, description="YYYY-MM (KST). 미지정 시 현재 월"),
-    client: str = Query(default=None, description="claude-code|cowork|codex|other|all"),
-    _admin: CurrentUser = Depends(require_admin),
-    session: AsyncSession = Depends(get_db_session),
-):
-    """대시보드 상단 KPI 카드 일괄 — 화면 1개당 API 1개.
-
-    ## 왜 필요한가
-
-    예전 화면은 카드를 채우려고 4개 API 를 동시에 불렀고, 그중
-    `GET /admin/budgets/summary` 가 병목이었다. 그 핸들러는 활성 예산 config 를 훑으며
-    **config 하나당 Redis GET + usage_logs SUM 을 순차로** 수행한다
-    (`budget_service.get_budget_summary` → `_resolve_used`). 사용자가 수백~수천 명 규모면
-    라운드트립이 그만큼 쌓여 대시보드 첫 로드가 수십 초까지 늘어난다.
-    KPI 카드에 필요한 건 **합계 두 개**(사용액·한도)뿐이라, 그걸 SQL 집계 한 번으로 낸다.
-
-    ## 예산 사용률을 이렇게 계산하는 이유
-
-    분모(한도)는 **TEAM 예산 + 팀이 없는 USER 예산**만 더한다. 팀에 속한 USER 예산을
-    함께 더하면 같은 지출 한도를 팀 축과 개인 축에서 **이중계상**한다(팀 예산이 이미 그
-    멤버들을 포함한다). 이건 기존 화면이 프론트에서 하던 계산과 정확히 같은 의미다
-    (admin-ui/src/app/page.tsx 의 teamItems + teamlessUsers) — 값이 움직이지 않는다.
-
-    분자(사용액)는 `budget.budget_usages` 에서 읽는다 — 집행(enforcement)과 같은
-    계수다. cost-recorder-worker 가 status 구분 없이 누적하는 monotonic
-    accumulator 라 ERROR/TIMEOUT 비용과 시드 이관분이 들어 있지만, 그게 집행이
-    보는 숫자다 — usage_logs SUCCESS 합계를 쓰면 사용자가 "used $13" 을 보는
-    동안 enforcement 는 $963 에 하드블록하는 불일치가 생겼다(R13-M5 이후 설계).
-    대신 스코프는 분모와 맞춘다: 활성 총한도 config 가 있는 스코프의 사용액만
-    합산한다 — 한도 없는 스코프까지 합치면 사용률이 100% 를 넘는다(R25-S1).
-
-    ## 실패 시 의미
-
-    카드별로 `null` 을 돌려준다. 프론트는 null 을 '—' 로 렌더해야 한다 — 0 으로 접으면
-    "활성 키 0개" 처럼 **거짓 사실**을 표시하게 된다(page.tsx 의 기존 관례).
-    """
-    if not period:
-        period = current_kst_period()
-
-    cache_key = _cache_key("kpi", period=period, client=client)
-    if (cached := await _cache_get(request, cache_key)) is not None:
-        return cached
-
-    # ── 1) 비용/요청/사용자: /summary 와 동일한 집계 — SUCCESS 필터가 빠진
-    #    구간 WHERE + 집계 FILTER 절로 성공/에러를 한 스캔에 센다.
-    where_clauses = [cost_period_filter(period, success_only=False)]
-    if (cf := client_filter(client)) is not None:
-        where_clauses.append(cf)
-
-    _success = UsageLog.status == UsageStatus.SUCCESS
-    usage_row = (
-        await session.execute(
-            select(
-                func.count().filter(_success).label("total_requests"),
-                func.count()
-                .filter(UsageLog.status.in_([UsageStatus.ERROR, UsageStatus.TIMEOUT]))
-                .label("error_requests"),
-                func.coalesce(func.sum(UsageLog.cost_usd).filter(_success), 0).label("total_cost"),
-                func.count(distinct(UsageLog.user_id)).filter(_success).label("active_users"),
-                # /summary 와 **같은 식**을 쓴다 — 두 엔드포인트가 같은 화면에 쓰이므로
-                # 토큰 정의가 갈리면 같은 기간에 다른 숫자가 보인다.
-                func.coalesce(
-                    func.sum(
-                        UsageLog.input_tokens
-                        + UsageLog.output_tokens
-                        + UsageLog.cache_creation_tokens
-                        + UsageLog.cache_read_tokens
-                    ).filter(_success),
-                    0,
-                ).label("total_tokens"),
-                # 웹 검색 — 모델 비용(total_cost)·예산과 별개의 모니터링 지표. status 무관.
-                *ws_columns(),
-            ).where(*where_clauses)
-        )
-    ).one()
-
-    total_cost = Decimal(str(usage_row.total_cost or 0))
-    active_users = usage_row.active_users or 0
-
-    # ── 2) 예산 한도(분모): TEAM + 팀 없는 USER 의 활성 config 합계.
+async def _budget_parts(session: AsyncSession, period: str) -> tuple[Decimal, Decimal]:
+    """(budget_used, total_limit) — 예산 사용률 분자·분모. 작은 테이블만 읽는다."""
+    # ── 예산 한도(분모): TEAM + 팀 없는 USER 의 활성 config 합계.
     #    LEFT JOIN 후 team_id IS NULL 조건으로 "팀 없는 USER" 를 고른다. USER config 의
     #    scope_id 가 auth.users 에 없는 고아 행이면 조인이 NULL 이 되어 포함되는데,
     #    그건 팀 소속을 확인할 수 없는 예산이므로 합산 대상으로 두는 편이 안전하다
@@ -544,7 +386,7 @@ async def dashboard_kpi(
     ).one()
     total_limit = Decimal(str(limit_row.total_limit or 0))
 
-    # ── 3) 예산 사용액(분자): **budget_usages** — 집행과 같은 계수.
+    # ── 예산 사용액(분자): **budget_usages** — 집행과 같은 계수.
     #    usage_logs SUCCESS 합계는 실패 호출 비용과 시드 이관분을 빼먹어,
     #    사용자가 "used $13" 을 보는 동안 enforcement 는 $963 에 하드블록하는
     #    불일치가 생겼다. 분모(한도)와 같은 스코프(TEAM + 팀없는 USER, 총합 행만)로
@@ -593,47 +435,91 @@ async def dashboard_kpi(
             )
         )
     ).one()
-    budget_used = Decimal(str(budget_used_row.used or 0))
-    utilization = (
-        float(budget_used / total_limit * 100) if total_limit > 0 else None
-    )
+    return Decimal(str(budget_used_row.used or 0)), total_limit
 
-    # ── 4) 활성 키 / 활성 모델
-    active_keys = (
-        await session.execute(
-            select(func.count()).select_from(VirtualKey).where(
-                VirtualKey.status == KeyStatus.ACTIVE
-            )
-        )
-    ).scalar()
-    active_models = (
-        await session.execute(
-            select(func.count()).select_from(ModelAlias).where(
-                ModelAlias.status == ModelStatus.ACTIVE
-            )
-        )
-    ).scalar()
 
-    payload = {
-        "period": period,
-        "total_requests": usage_row.total_requests or 0,
-        "error_requests": usage_row.error_requests or 0,
-        "total_tokens": int(usage_row.total_tokens or 0),
-        "total_cost_usd": round(float(total_cost), 4),
-        "active_users": active_users,
-        "cost_per_user_usd": round(float(total_cost / active_users), 4) if active_users else 0.0,
-        "budget_used_usd": round(float(budget_used), 4),
-        "budget_limit_usd": round(float(total_limit), 4),
-        # 한도가 0 이면 비율이 정의되지 않는다 — 0% 로 접으면 "예산을 안 썼다" 는
-        # 거짓 사실이 된다. null 로 두고 프론트가 '—' 로 렌더한다.
-        "budget_utilization_pct": round(utilization, 2) if utilization is not None else None,
-        "active_keys": active_keys or 0,
-        "active_models": active_models or 0,
-        # 모니터링 전용 — total_cost_usd·budget_* 에 포함되지 않는다(예산 제외).
-        "web_search": ws_from_row(usage_row).model_dump(mode="json"),
-    }
-    await _cache_set(request, cache_key, payload)
-    return payload
+@router.get("/kpi")
+async def dashboard_kpi(
+    request: Request,
+    period: str = Query(default=None, description="YYYY-MM (KST). 미지정 시 현재 월"),
+    client: str = Query(default=None, description="claude-code|cowork|codex|other|all"),
+    _admin: CurrentUser = Depends(require_admin),
+    session: AsyncSession = Depends(get_analytics_session),
+):
+    """대시보드 상단 KPI 카드 일괄 — 화면 1개당 API 1개.
+
+    ## 왜 필요한가
+
+    예전 화면은 카드를 채우려고 4개 API 를 동시에 불렀고, 그중
+    `GET /admin/budgets/summary` 가 병목이었다(config 하나당 Redis GET + usage SUM 순차).
+    KPI 카드에 필요한 건 **합계 두 개**(사용액·한도)뿐이라, 그걸 SQL 집계 한 번으로 낸다.
+
+    ## 예산 사용률을 이렇게 계산하는 이유
+
+    분모(한도)는 **TEAM 예산 + 팀이 없는 USER 예산**만 더한다. 팀에 속한 USER 예산을
+    함께 더하면 같은 지출 한도를 팀 축과 개인 축에서 **이중계상**한다(팀 예산이 이미 그
+    멤버들을 포함한다). 분자(사용액)는 `budget.budget_usages`(집행과 같은 계수)에서 읽고
+    스코프를 분모와 맞춘다(R25-S1). 사용량 카드(요청·비용·토큰·활성 사용자·웹 검색)는
+    하이브리드 롤업 읽기다(services/usage_rollup).
+
+    ## 실패 시 의미
+
+    카드별로 `null` 을 돌려준다. 프론트는 null 을 '—' 로 렌더해야 한다 — 0 으로 접으면
+    "활성 키 0개" 처럼 **거짓 사실**을 표시하게 된다(page.tsx 의 기존 관례).
+    """
+    period, rng = _month(period)
+    cache_key = _cache_key("kpi", period=period, client=client)
+
+    async def compute():
+        # ── 1) 비용/요청/사용자/토큰/웹 검색: /summary 와 같은 하이브리드 합계.
+        scope = ur.RollupScope.of(rng, client=client)
+        t = await reads.totals(session, scope)
+        meta = await ur.fetch_meta(session, scope)
+        settings = await ws_settings(session)
+        # ── 2)·3) 예산 한도·사용액
+        budget_used, total_limit = await _budget_parts(session, period)
+        utilization = (
+            float(budget_used / total_limit * 100) if total_limit > 0 else None
+        )
+        # ── 4) 활성 키 / 활성 모델
+        active_keys = (
+            await session.execute(
+                select(func.count()).select_from(VirtualKey).where(
+                    VirtualKey.status == KeyStatus.ACTIVE
+                )
+            )
+        ).scalar()
+        active_models = (
+            await session.execute(
+                select(func.count()).select_from(ModelAlias).where(
+                    ModelAlias.status == ModelStatus.ACTIVE
+                )
+            )
+        ).scalar()
+        active_users = t.active_users
+        return {
+            "period": period,
+            "total_requests": t.total_requests,
+            "error_requests": t.error_requests,
+            "total_tokens": t.total_tokens,
+            "total_cost_usd": round(float(t.total_cost), 4),
+            "active_users": active_users,
+            "cost_per_user_usd": (
+                round(float(t.total_cost / active_users), 4) if active_users else 0.0),
+            "budget_used_usd": round(float(budget_used), 4),
+            "budget_limit_usd": round(float(total_limit), 4),
+            # 한도가 0 이면 비율이 정의되지 않는다 — 0% 로 접으면 "예산을 안 썼다" 는
+            # 거짓 사실이 된다. null 로 두고 프론트가 '—' 로 렌더한다.
+            "budget_utilization_pct": round(utilization, 2) if utilization is not None else None,
+            "active_keys": active_keys or 0,
+            "active_models": active_models or 0,
+            # 모니터링 전용 — total_cost_usd·budget_* 에 포함되지 않는다(예산 제외).
+            "web_search": ws_from_totals(t.ws_queries, t.ws_cost, t.ws_untracked,
+                                         settings).model_dump(mode="json"),
+            **meta.as_dict(),
+        }
+
+    return await _cached(request, cache_key, rng, compute)
 
 
 @router.get("/web-search")
@@ -642,7 +528,7 @@ async def dashboard_web_search(
     period: str = Query(default=None, description="YYYY-MM (리포팅 TZ). 미지정 시 현재 월"),
     client: str = Query(default=None, description="claude-code|cowork|codex|other|all"),
     _admin: CurrentUser = Depends(require_admin),
-    session: AsyncSession = Depends(get_db_session),
+    session: AsyncSession = Depends(get_analytics_session),
 ):
     """대시보드 'WEB SEARCH · AGENTCORE' 섹션 — 앱별 검색 수, 일별 검색 수, 비용, 일평균,
     요청당 검색 수. **모니터링 전용**(예산·한도와 무관).
@@ -653,104 +539,90 @@ async def dashboard_web_search(
     - ``avg_queries_per_day`` = 검색 수 / 경과일(리포팅 TZ; 당월은 오늘까지, 지난 달은 그 달 일수).
     - ``daily`` 는 검색이 있었던 날만 — 빈 날·미래 날 채우기는 UI(비용 추이와 같은 규칙).
     """
-    if not period:
-        period = current_kst_period()
+    period, rng = _month(period)
     cache_key = _cache_key("web-search", period=period, client=client)
-    if (cached := await _cache_get(request, cache_key)) is not None:
-        return cached
 
-    where = [cost_period_filter(period, success_only=False)]
-    if (cf := client_filter(client)) is not None:
-        where.append(cf)
-    _success = UsageLog.status == UsageStatus.SUCCESS
+    async def compute():
+        scope = ur.RollupScope.of(rng, client=client)
+        day_scope = ur.RollupScope.of(rng, client=client, by_day=True)
+        t = await reads.totals(session, scope)
+        settings = await ws_settings(session)
+        ws = ws_from_totals(t.ws_queries, t.ws_cost, t.ws_untracked, settings)
+        by_client_rows = await reads.ws_by_client(session, scope)
+        daily_rows = await reads.ws_daily(session, day_scope)
+        meta = ur.merge_meta(await ur.fetch_meta(session, scope),
+                             await ur.fetch_meta(session, day_scope))
 
-    total_row = (
-        await session.execute(
-            select(*ws_columns(), func.count().filter(_success).label("successful_requests"))
-            .where(*where)
-        )
-    ).one()
-    ws = ws_from_row(total_row)
+        price, _is_default, _row = await get_price(session)
+        days = elapsed_days(period, reporting_today())
+        successful = int(t.total_requests)
+        return {
+            "period": period,
+            "deployed": ws.deployed,
+            # 현재 단가(부제 "<N> queries × $<price> per 1,000" 용). 행별 비용은 기록 시점 단가.
+            "price_per_1k_queries": str(price),
+            "queries": ws.queries,
+            "cost_usd": ws.cost_usd,
+            "untracked_queries": ws.untracked_queries,
+            "successful_requests": successful,
+            "elapsed_days": days,
+            "avg_queries_per_day": round(ws.queries / days, 2) if days > 0 else None,
+            # 소수 2자리로 자르면 3/1,818 이 0.0 이 된다 — 표시 자릿수는 UI(fmtSmallRatio)가 정한다.
+            "queries_per_request": round(ws.queries / successful, 8) if successful > 0 else None,
+            "by_client": [
+                {
+                    "client": r.client,
+                    "queries": int(r.queries or 0),
+                    "cost_usd": round(float(r.cost), 6) if r.cost is not None else None,
+                }
+                for r in by_client_rows
+            ],
+            "daily": [{"date": str(r.day), "queries": int(r.q or 0)} for r in daily_rows],
+            **meta.as_dict(),
+        }
 
-    client_col = client_coalesce_expr().label("client")
-    by_client_rows = (
-        await session.execute(
-            select(
-                client_col,
-                func.coalesce(func.sum(UsageLog.web_search_count), 0).label("queries"),
-                func.sum(UsageLog.web_search_cost_usd).label("cost"),
-            )
-            .where(*where)
-            .group_by(client_col)
-            .having(func.coalesce(func.sum(UsageLog.web_search_count), 0) > 0)
-            .order_by(func.sum(UsageLog.web_search_count).desc(), client_col)
-        )
-    ).all()
+    return await _cached(request, cache_key, rng, compute)
 
-    day = func.date(func.timezone(reporting_tz_sql(), UsageLog.requested_at))
-    daily_rows = (
-        await session.execute(
-            select(day.label("day"), func.coalesce(func.sum(UsageLog.web_search_count), 0).label("q"))
-            .where(*where, UsageLog.web_search_count > 0)
-            .group_by(day)
-            .order_by(day)
-        )
-    ).all()
 
-    price, _is_default, _row = await get_price(session)
-    days = elapsed_days(period, reporting_today())
-    successful = int(total_row.successful_requests or 0)
-    payload = {
-        "period": period,
-        "deployed": ws.deployed,
-        # 현재 단가(부제 "<N> queries × $<price> per 1,000" 용). 행별 비용은 기록 시점 단가.
-        "price_per_1k_queries": str(price),
-        "queries": ws.queries,
-        "cost_usd": ws.cost_usd,
-        "untracked_queries": ws.untracked_queries,
-        "successful_requests": successful,
-        "elapsed_days": days,
-        "avg_queries_per_day": round(ws.queries / days, 2) if days > 0 else None,
-        # 소수 2자리로 자르면 3/1,818 이 0.0 이 된다 — 표시 자릿수는 UI(fmtSmallRatio)가 정한다.
-        "queries_per_request": round(ws.queries / successful, 8) if successful > 0 else None,
-        "by_client": [
-            {
-                "client": r.client,
-                "queries": int(r.queries or 0),
-                "cost_usd": round(float(r.cost), 6) if r.cost is not None else None,
-            }
-            for r in by_client_rows
-        ],
-        "daily": [{"date": str(r.day), "queries": int(r.q or 0)} for r in daily_rows],
-    }
-    await _cache_set(request, cache_key, payload)
-    return payload
+#: 월 목록 — usage_logs 의 가장 이른/늦은 요청 시각. 둘 다 requested_at 인덱스의 끝점 조회라
+#: 테이블 크기와 무관하다(예전 DISTINCT to_char(...) 전체 스캔은 30M 행에서 18.6s / cold 22.7s).
+_PERIOD_BOUNDS_SQL = text(
+    "SELECT (SELECT min(requested_at) FROM usage.usage_logs) AS lo, "
+    "(SELECT max(requested_at) FROM usage.usage_logs) AS hi"
+)
 
 
 @router.get("/periods")
 async def dashboard_periods(
     request: Request,
     _admin: CurrentUser = Depends(require_admin),
-    session: AsyncSession = Depends(get_db_session),
+    session: AsyncSession = Depends(get_analytics_session),
 ):
-    """사용량 데이터가 실제로 존재하는 월(YYYY-MM) 목록 — 최신순.
+    """사용량 데이터가 있는 월(YYYY-MM) 목록 — 최신순.
 
     admin-ui 의 기간 선택기가 이걸로 옵션을 채우고, 기본값을
-    "데이터 있는 가장 최근 월"(periods[0])로 잡아 현재 달력월이 비어도
-    빈 화면을 피한다. status 필터 안 함 — 에러만 있는 월도 노출.
+    "데이터 있는 가장 최근 월"(periods[0])로 잡아 현재 달력월이 비어도 빈 화면을 피한다.
+    status 필터 안 함 — 에러만 있는 월도 노출.
+
+    min(requested_at)~max(requested_at) 사이의 리포팅 tz 월 전부다. 그 사이에 사용량이 한 건도
+    없는 달이 끼면(운영 중단) 그 달도 목록에 나온다 — 고르면 빈 화면일 뿐 숫자는 틀리지 않는다.
     """
     cache_key = _cache_key("periods")
     if (cached := await _cache_get(request, cache_key)) is not None:
         return cached
 
-    # 월 binning 을 명시적 KST 로(§59) — requested_at 은 timestamptz 라 to_char 가
-    # 세션 타임존을 타므로, timezone('Asia/Seoul', ...) 로 고정해 /summary·budget·
-    # chat 과 동일 기준(KST) 보장. status 필터 안 함 — 에러만 있는 월도 옵션에 노출.
-    period_expr = kst_month_expr()
-    stmt = select(distinct(period_expr).label("period")).order_by(period_expr.desc())
-    rows = (await session.execute(stmt)).scalars().all()
-    payload = {"periods": [p for p in rows if p]}
-    # DISTINCT over 전체 usage_logs 는 테이블이 커질수록 매 요청마다 무거워진다.
-    # 월 목록은 느리게 변하는 차원이라 10분 캐시가 정합성 비용 대비 맞다(R25-N10).
+    from zoneinfo import ZoneInfo
+
+    row = (await session.execute(_PERIOD_BOUNDS_SQL)).one()
+    periods: list[str] = []
+    if row.lo is not None and row.hi is not None:
+        tz = ZoneInfo(reporting_timezone())
+        lo, hi = row.lo.astimezone(tz), row.hi.astimezone(tz)
+        y, m = hi.year, hi.month
+        while (y, m) >= (lo.year, lo.month):
+            periods.append(f"{y}-{m:02d}")
+            y, m = (y - 1, 12) if m == 1 else (y, m - 1)
+    payload = {"periods": periods}
+    # 월 목록은 느리게 변하는 차원이라 10분 캐시(R25-N10). 끝점 조회라 캐시가 없어도 ms 다.
     await _cache_set(request, cache_key, payload, ttl=600)
     return payload

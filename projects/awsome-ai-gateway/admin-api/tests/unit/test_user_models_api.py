@@ -149,6 +149,9 @@ def _user(role):
 
 @pytest.fixture
 def calls(monkeypatch):
+    from app.core import read_cache
+
+    read_cache.local_lru.clear()
     seen: list[tuple] = []
 
     async def _fetch(session, rng, scope_ids, client):
@@ -162,7 +165,11 @@ def calls(monkeypatch):
 
     monkeypatch.setattr(umu, "fetch_scope_payload", _fetch)
     monkeypatch.setattr("app.services.analytics_service._resolve_scope", _scope)
-    return seen
+    # "오늘" 고정 — 2026-11 은 진행 중인 달(짧은 TTL), 2026-10 은 지난 달(긴 TTL).
+    monkeypatch.setattr("app.services.usage_rollup.reporting_today",
+                        lambda tz=None: __import__("datetime").date(2026, 11, 24))
+    yield seen
+    read_cache.local_lru.clear()
 
 
 async def _get(redis, user, **kw):
@@ -172,7 +179,9 @@ async def _get(redis, user, **kw):
     return await an.get_user_models(_request(redis), user=user, session=None, **params)
 
 
-async def test_admin_global_is_cached_60s_and_sort_page_q_are_served_from_cache(calls):
+async def test_admin_global_is_cached_and_sort_page_q_are_served_from_cache(calls):
+    from app.core.config import get_settings
+
     redis = _Redis()
     admin = _user(UserRole.ADMIN)
     await _get(redis, admin)
@@ -180,9 +189,29 @@ async def test_admin_global_is_cached_60s_and_sort_page_q_are_served_from_cache(
     assert len(calls) == 1, "정렬·페이지·검색이 DB 를 다시 읽었다"
     assert r["total_users"] == 1
     (key,) = redis.store
-    assert redis.ttls[key] == 60
-    assert "all" in key and "2026-11-01~2026-11-30" in key and key.endswith(":all")
+    assert redis.ttls[key] == get_settings().ANALYTICS_CACHE_TTL_SEC  # 오늘 포함 → 짧게
+    assert "global" in key and "2026-11-01~2026-11-30" in key and key.endswith(":all")
     json.loads(redis.store[key])  # 직렬화 가능
+    await _get(redis, admin, period="2026-10")
+    past = next(k for k in redis.store if "2026-10-01" in k)
+    assert redis.ttls[past] == get_settings().ANALYTICS_CACHE_TTL_PAST_SEC  # 지난 달 → 길게
+
+
+async def test_page_requests_reuse_the_parsed_payload_without_redis_round_trip(calls):
+    """3 MB 페이로드를 페이지마다 다시 파싱하지 않는다 — 프로세스 로컬 LRU 가 적중한다."""
+    redis = _Redis()
+    admin = _user(UserRole.ADMIN)
+    await _get(redis, admin)
+    gets = []
+    orig = redis.get
+
+    async def _spy(k):
+        gets.append(k)
+        return await orig(k)
+
+    redis.get = _spy
+    await _get(redis, admin, page=2, page_size=1)
+    assert gets == [] and len(calls) == 1
 
 
 async def test_cache_key_separates_range_client_and_custom(calls):
@@ -195,15 +224,19 @@ async def test_cache_key_separates_range_client_and_custom(calls):
     assert len(calls) == 4 and len(redis.store) == 4
 
 
-async def test_team_leader_and_team_scope_are_never_cached(calls):
+async def test_cache_key_carries_the_resolved_team_set(calls):
+    """리더는 전사 캐시를 읽지 않는다 — 키의 범위 조각이 해석된 팀 집합이다.
+    같은 팀 집합(ADMIN 의 team:T 와 T 의 리더)은 공유해도 된다(같은 데이터를 볼 권한)."""
     redis = _Redis()
     admin = _user(UserRole.ADMIN)
     await _get(redis, admin)                                # 전사 캐시가 채워진 상태에서
     leader = _user(UserRole.TEAM_LEADER)
-    await _get(redis, leader)                               # 리더는 캐시를 읽지 않는다
+    await _get(redis, leader)                               # 리더는 전사 엔트리를 읽지 않는다
     assert calls[-1][2] == [leader.team_id]
-    await _get(redis, admin, scope=f"team:{uuid.uuid4()}")  # ADMIN 의 팀 범위도 비캐시
-    assert len(calls) == 3 and len(redis.store) == 1
+    await _get(redis, admin, scope=f"team:{uuid.uuid4()}")  # 다른 팀 — 또 다른 키
+    assert len(calls) == 3 and len(redis.store) == 3
+    await _get(redis, admin, scope=f"team:{leader.team_id}")  # 리더와 같은 팀 집합 — 적중
+    assert len(calls) == 3
 
 
 async def test_router_rejects_one_sided_range_and_bad_sort(calls):

@@ -660,7 +660,11 @@ CREATE TABLE IF NOT EXISTS usage.daily_aggregates (
     client                 VARCHAR(32),
     status                 usage.usage_status,
     call_count             BIGINT        NOT NULL DEFAULT 0,
-    latency_ms_sum         BIGINT        NOT NULL DEFAULT 0
+    latency_ms_sum         BIGINT        NOT NULL DEFAULT 0,
+    -- 0061: 웹 검색(상태 무관) — 수 / 비용(NULL=추적 행 없음) / 비용 NULL 행의 검색 수
+    web_search_count       BIGINT        NOT NULL DEFAULT 0,
+    web_search_cost_usd    NUMERIC(16,6),
+    web_search_untracked   BIGINT        NOT NULL DEFAULT 0
 );
 
 -- 0060 컬럼 수렴 — CREATE TABLE IF NOT EXISTS 는 기존 설치본에서 no-op 이라 init SQL 이
@@ -705,7 +709,10 @@ CREATE TABLE IF NOT EXISTS usage.daily_aggregate_days (
     tz             VARCHAR(64),
     grain_version  SMALLINT    NOT NULL DEFAULT 0,
     dirty          BOOLEAN     NOT NULL DEFAULT false,
-    aggregated_at  TIMESTAMPTZ
+    aggregated_at  TIMESTAMPTZ,
+    -- 0061: 마지막 재집계 실패(skip-forward). 성공하면 NULL 로 지운다.
+    failed_at      TIMESTAMPTZ,
+    last_error     TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_daily_aggregate_days_dirty
     ON usage.daily_aggregate_days (date) WHERE dirty;
@@ -728,7 +735,10 @@ CREATE TABLE IF NOT EXISTS usage.monthly_aggregates (
     total_cost_usd         NUMERIC(16,6) NOT NULL DEFAULT 0,
     call_count             BIGINT        NOT NULL DEFAULT 0,
     request_count          BIGINT        NOT NULL DEFAULT 0,
-    latency_ms_sum         BIGINT        NOT NULL DEFAULT 0
+    latency_ms_sum         BIGINT        NOT NULL DEFAULT 0,
+    web_search_count       BIGINT        NOT NULL DEFAULT 0,
+    web_search_cost_usd    NUMERIC(16,6),
+    web_search_untracked   BIGINT        NOT NULL DEFAULT 0
 );
 CREATE UNIQUE INDEX IF NOT EXISTS uq_monthly_aggregates_grain ON usage.monthly_aggregates
     (period, user_id, team_id, dept_id, model_alias, client, status);
@@ -738,8 +748,91 @@ CREATE TABLE IF NOT EXISTS usage.monthly_aggregate_months (
     period           DATE        PRIMARY KEY,
     tz               VARCHAR(64) NOT NULL,
     covered_through  DATE        NOT NULL,
-    built_at         TIMESTAMPTZ NOT NULL
+    built_at         TIMESTAMPTZ NOT NULL,
+    -- 0061: 3 = 웹 검색 열이 채워진 월. admin-api 는 3 이상만 읽는다.
+    grain_version    SMALLINT    NOT NULL DEFAULT 2
 );
+
+-- 0061 수렴 — 웹 검색 열(롤업 2종) · 월 레지스트리 grain · 일 레지스트리 실패 기록.
+-- CREATE TABLE IF NOT EXISTS 가 기존 설치본에서 no-op 이라 열은 여기서 따로 놓는다(멱등).
+DO $$
+DECLARE
+    c record;
+BEGIN
+    FOR c IN
+        SELECT * FROM (VALUES
+            ('daily_aggregates',         'web_search_count',     'BIGINT NOT NULL DEFAULT 0'),
+            ('daily_aggregates',         'web_search_cost_usd',  'NUMERIC(16,6)'),
+            ('daily_aggregates',         'web_search_untracked', 'BIGINT NOT NULL DEFAULT 0'),
+            ('monthly_aggregates',       'web_search_count',     'BIGINT NOT NULL DEFAULT 0'),
+            ('monthly_aggregates',       'web_search_cost_usd',  'NUMERIC(16,6)'),
+            ('monthly_aggregates',       'web_search_untracked', 'BIGINT NOT NULL DEFAULT 0'),
+            ('monthly_aggregate_months', 'grain_version',        'SMALLINT NOT NULL DEFAULT 2'),
+            ('daily_aggregate_days',     'failed_at',            'TIMESTAMPTZ'),
+            ('daily_aggregate_days',     'last_error',           'TEXT')
+        ) AS v(tbl, name, def)
+    LOOP
+        BEGIN
+            IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                           WHERE table_schema = 'usage' AND table_name = c.tbl
+                             AND column_name = c.name) THEN
+                EXECUTE format('ALTER TABLE usage.%I ADD COLUMN %I %s', c.tbl, c.name, c.def);
+            END IF;
+        EXCEPTION WHEN duplicate_column THEN NULL;
+        END;
+    END LOOP;
+END $$;
+
+-- 0061 시간별 롤업 — 리포팅 tz 날짜 00:00 부터 1시간 버킷(hour_start, UTC 저장). 오늘(과 아직
+-- 일 집계가 없는 날)의 완료된 시간만 담고, 그 날짜의 일 집계가 끝나면 워커가 지운다.
+-- 입도는 daily_aggregates 와 같다. 파생 캐시라 FK 를 두지 않는다.
+CREATE TABLE IF NOT EXISTS usage.hourly_aggregates (
+    hour_start             TIMESTAMPTZ   NOT NULL,
+    date                   DATE          NOT NULL,
+    user_id                UUID          NOT NULL,
+    team_id                UUID          NOT NULL,
+    dept_id                UUID          NOT NULL,
+    model_alias            VARCHAR(128)  NOT NULL,
+    client                 VARCHAR(32)   NOT NULL,
+    status                 usage.usage_status NOT NULL,
+    input_tokens           BIGINT        NOT NULL DEFAULT 0,
+    output_tokens          BIGINT        NOT NULL DEFAULT 0,
+    cache_creation_tokens  BIGINT        NOT NULL DEFAULT 0,
+    cache_read_tokens      BIGINT        NOT NULL DEFAULT 0,
+    total_tokens           BIGINT        NOT NULL DEFAULT 0,
+    total_cost_usd         NUMERIC(16,6) NOT NULL DEFAULT 0,
+    call_count             BIGINT        NOT NULL DEFAULT 0,
+    request_count          BIGINT        NOT NULL DEFAULT 0,
+    latency_ms_sum         BIGINT        NOT NULL DEFAULT 0,
+    web_search_count       BIGINT        NOT NULL DEFAULT 0,
+    web_search_cost_usd    NUMERIC(16,6),
+    web_search_untracked   BIGINT        NOT NULL DEFAULT 0
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_hourly_aggregates_grain ON usage.hourly_aggregates
+    (hour_start, user_id, team_id, dept_id, model_alias, client, status);
+CREATE INDEX IF NOT EXISTS idx_hourly_aggregates_date ON usage.hourly_aggregates (date);
+CREATE TABLE IF NOT EXISTS usage.hourly_aggregate_hours (
+    hour_start     TIMESTAMPTZ PRIMARY KEY,
+    date           DATE        NOT NULL,
+    tz             VARCHAR(64) NOT NULL,
+    grain_version  SMALLINT    NOT NULL,
+    aggregated_at  TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_hourly_aggregate_hours_date
+    ON usage.hourly_aggregate_hours (date);
+
+-- 0061 늦은 로그 표시 — batch_flusher 가 지난 시간/날짜의 usage_logs 를 넣을 때 같은 트랜잭션에서
+-- INSERT 한다. 유니크가 없어 flush 가 어떤 잠금도 기다리지 않는다(레지스트리 UPDATE 대체).
+-- hour_start IS NULL = 날짜 표시, NOT NULL = 시간 표시. 집계 트랜잭션이 자기 스냅샷이 본 표시만 지운다.
+CREATE TABLE IF NOT EXISTS usage.rollup_dirty_marks (
+    id          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    date        DATE        NOT NULL,
+    hour_start  TIMESTAMPTZ,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_rollup_dirty_marks_date ON usage.rollup_dirty_marks (date);
+CREATE INDEX IF NOT EXISTS idx_rollup_dirty_marks_hour ON usage.rollup_dirty_marks (hour_start)
+    WHERE hour_start IS NOT NULL;
 
 -- 요청별 추론/도구 추적 (observability). gateway-proxy 가 응답 본문에서 trace_extractor
 -- 로 뽑은 PII-safe 요약(thinking 요약/tool_use/redacted 카운트)을 cost:stream 에 실어

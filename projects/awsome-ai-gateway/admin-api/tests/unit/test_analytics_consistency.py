@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import uuid
 from decimal import Decimal
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from sqlalchemy.dialects import postgresql
@@ -85,134 +85,88 @@ def _executed_sqls(mock_session) -> list[str]:
     ]
 
 
-def _empty_repo(cost_by_model: dict | None = None):
-    """get_analytics 가 호출하는 repo 메서드를 빈값으로 스텁한다."""
-    repo = MagicMock()
-    repo.sum_usage_by_model = AsyncMock(return_value=cost_by_model or {})
-    repo.count_requests_by_model = AsyncMock(return_value={})
-    repo.count_active_users = AsyncMock(return_value=0)
-    repo.request_counts = AsyncMock(return_value=(0, 0))
-    repo.token_bucket_totals = AsyncMock(return_value={
-        "input_tokens": 0, "output_tokens": 0,
-        "cache_read_tokens": 0, "cache_write_tokens": 0,
-    })
-    return repo
+def _hybrid_session(*, by_model=None, by_team=None, by_user=None):
+    """하이브리드 롤업 읽기(services/usage_reads)용 기록 세션 — 개요 질의에 JSON 행을 준다."""
+    import json
+
+    from tests.rollup_double import EmptyAggRow, empty_result, recording_session
+
+    def _respond(sql, params):
+        if "AS by_model" in sql:
+            return empty_result(EmptyAggRow(
+                by_model=json.dumps(by_model or []), by_team=json.dumps(by_team or []),
+                by_user=json.dumps(by_user or [])))
+        return None
+
+    return recording_session(_respond)
 
 
 # ── H1: by_team 에 dept_name ─────────────────────────────────────────────
 
 @pytest.mark.unit
-async def test_by_team_joins_department_for_canonical_name(mock_session, admin_user):
+def test_by_team_joins_department_for_canonical_name():
     """by_team 질의는 trends_by_team 과 같은 Department OUTER JOIN 을 해야
     프론트의 teamDisplayName({dept}_{team}) 재료가 내려온다."""
-    svc = AnalyticsService()
-    with patch(
-        "app.services.analytics_service.AnalyticsRepository", return_value=_empty_repo()
-    ):
-        await svc.get_analytics(mock_session, period="2026-09", actor=admin_user)
+    from app.services import usage_reads as reads
 
-    sqls = _executed_sqls(mock_session)
-    team_sqls = [s for s in sqls if "JOIN teams" in s or "JOIN auth.teams" in s or "teams" in s]
-    assert team_sqls, "by_team 질의가 실행되지 않음"
-    by_team_sql = next(s for s in team_sqls if "departments" in s)
-    assert "dept_name" in by_team_sql
+    by_team_part = reads._ANALYTICS_SELECT.split("AS by_model,", 1)[1].split("AS by_team", 1)[0]
+    assert "JOIN auth.teams" in by_team_part
     # 부서 미지정 팀의 행이 사라지면 안 된다 — INNER 가 아니라 OUTER JOIN.
-    assert "OUTER JOIN" in by_team_sql.upper()
+    assert "LEFT JOIN auth.departments" in by_team_part
+    assert "LEFT JOIN auth.departments" in reads._TRENDS_SELECT
 
 
 @pytest.mark.unit
-async def test_by_team_row_carries_dept_name(mock_session, admin_user):
+async def test_by_team_row_carries_dept_name(admin_user):
     """질의 결과 행의 dept_name 이 TeamBreakdown 까지 전달된다."""
-    row = MagicMock()
-    row.team_id = TEAM_A
-    row.team_name = "Developers"
-    row.dept_name = "NDS"
-    row.cost = Decimal("12.5")
-    row.users = 3
-
-    result = MagicMock()
-    result.all.return_value = []
-    result.__iter__.return_value = iter([row])
-    mock_session.execute.return_value = result
-
-    svc = AnalyticsService()
-    with patch(
-        "app.services.analytics_service.AnalyticsRepository", return_value=_empty_repo()
-    ):
-        out = await svc.get_analytics(mock_session, period="2026-09", actor=admin_user)
-
+    session, _ = _hybrid_session(by_team=[[str(TEAM_A), "Developers", "NDS", "12.5", 3]])
+    out = await AnalyticsService().get_analytics(session, period="2026-09", actor=admin_user)
     assert len(out.by_team) == 1
     assert out.by_team[0].team == "Developers"
     assert out.by_team[0].dept_name == "NDS"
+    assert out.by_team[0].cost_usd == Decimal("12.5")
 
 
 # ── H2: by_model 비용 내림차순 결정론 ─────────────────────────────────────
 
 @pytest.mark.unit
-async def test_by_model_sorted_cost_descending(mock_session, admin_user):
-    """repo dict 의 DB 반환 순서를 그대로 쓰면 상세 표(cost DESC)·팔레트 index 와
-    어긋난다 — 서비스가 내림차순으로 못 박는다."""
-    repo = _empty_repo(cost_by_model={
-        "cheap": Decimal("1"),
-        "expensive": Decimal("100"),
-        "mid": Decimal("50"),
-    })
-    svc = AnalyticsService()
-    with patch(
-        "app.services.analytics_service.AnalyticsRepository", return_value=repo
-    ):
-        out = await svc.get_analytics(mock_session, period="2026-09", actor=admin_user)
+async def test_by_model_sorted_cost_descending(admin_user):
+    """by_model 은 비용 DESC(+ alias) — 상세 표(cost DESC)·팔레트 index 와 같은 순서.
+    순서는 SQL 이 정하고(결정적 2차 키 포함) 서비스는 그 순서를 그대로 쓴다."""
+    from app.services import usage_reads as reads
 
+    assert "ORDER BY t.c DESC, t.model_alias" in reads._ANALYTICS_SELECT
+    session, _ = _hybrid_session(by_model=[["expensive", "100", 3, None], ["mid", "50", 2, None],
+                                           ["cheap", "1", 1, None]])
+    out = await AnalyticsService().get_analytics(session, period="2026-09", actor=admin_user)
     assert [b.model for b in out.by_model] == ["expensive", "mid", "cheap"]
+    assert [b.requests for b in out.by_model] == [3, 2, 1]
 
 
 # ── M1: display_name 카탈로그 조인 ────────────────────────────────────────
 
 @pytest.mark.unit
-async def test_by_model_maps_catalog_display_name(mock_session, admin_user):
+async def test_by_model_maps_catalog_display_name(admin_user):
     """카탈로그에 표시명이 있는 모델은 display_name 으로, 없는 alias 는 None —
     프론트의 modelDisplay fallback 규칙과 대응."""
-    repo = _empty_repo(cost_by_model={
-        "cataloged": Decimal("10"),
-        "uncataloged": Decimal("5"),
-    })
+    from app.services import usage_reads as reads
 
-    lookup_row = MagicMock()
-    lookup_row.alias = "cataloged"
-    lookup_row.display_name = "Claude Opus 4.5"
-
-    # session.execute 는 by_team(for row in result)·trends(.all())·룩업 등 여러
-    # 질의에 쓰인다 — 룩업(model_aliases select)에만 행을 주고 나머지는 비운다.
-    def _execute(stmt):
-        sql = str(stmt.compile(
-            dialect=postgresql.dialect(), compile_kwargs={"literal_binds": False}
-        ))
-        r = MagicMock()
-        r.__iter__.return_value = iter([])
-        r.all.return_value = [lookup_row] if "model_aliases" in sql else []
-        return r
-
-    mock_session.execute.side_effect = _execute
-
-    svc = AnalyticsService()
-    with patch(
-        "app.services.analytics_service.AnalyticsRepository", return_value=repo
-    ):
-        out = await svc.get_analytics(mock_session, period="2026-09", actor=admin_user)
-
+    assert "LEFT JOIN model.model_aliases" in reads._ANALYTICS_SELECT
+    session, _ = _hybrid_session(by_model=[["cataloged", "10", 1, "Claude Opus 4.5"],
+                                           ["uncataloged", "5", 1, None]])
+    out = await AnalyticsService().get_analytics(session, period="2026-09", actor=admin_user)
     names = {b.model: b.display_name for b in out.by_model}
     assert names["cataloged"] == "Claude Opus 4.5"
     assert names["uncataloged"] is None
 
 
 @pytest.mark.unit
-async def test_model_detail_query_joins_model_aliases(mock_session, admin_user):
-    svc = AnalyticsService()
-    await svc.get_model_cost_detail(mock_session, period="2026-09", actor=admin_user)
-    model_sql = _executed_sqls(mock_session)[0]
-    assert "model_aliases" in model_sql
-    assert "OUTER JOIN" in model_sql.upper()
-    assert "display_name" in model_sql
+def test_model_detail_query_joins_model_aliases():
+    from app.services import usage_reads as reads
+
+    sql = reads._MODEL_DETAIL_SELECT
+    assert "LEFT JOIN model.model_aliases" in sql
+    assert "display_name" in sql
 
 
 # ── M4: export 가 group_by/scope 를 존중 ─────────────────────────────────
@@ -270,31 +224,29 @@ async def test_export_forwards_scope_and_client(mock_session, admin_user):
 
 
 @pytest.mark.unit
-async def test_export_team_leader_keeps_isolation(mock_session):
+async def test_export_team_leader_keeps_isolation():
     """export 경로도 _resolve_scope 를 탄다 — TEAM_LEADER 가 scope='all' 로
-   내도 본인 팀으로 강제된다(서비스 위임이므로 get_analytics 에 위임 확인)."""
+    내도 본인 팀으로 강제된다(하이브리드 읽기의 바인드된 팀 집합으로 확인)."""
+    from tests.rollup_double import data_branches, team_isolated
+
     leader = CurrentUser(
         user_id=uuid.uuid4(), email="l@t.com",
         role=UserRole.TEAM_LEADER, team_id=TEAM_A,
     )
-    svc = AnalyticsService()
-    repo = _empty_repo()
-    with patch(
-        "app.services.analytics_service.AnalyticsRepository", return_value=repo
-    ):
-        await svc.export_analytics(
-            mock_session, format="json", period="2026-09", group_by="model",
-            scope="all", actor=leader,
-        )
-    # TEAM_LEADER + 'all' → repo 호출에 scope_ids(본인 팀)가 실려야 한다.
-    kw = repo.sum_usage_by_model.call_args.kwargs
-    assert kw["scope_ids"] == [TEAM_A]
+    session, seen = _hybrid_session()
+    await AnalyticsService().export_analytics(
+        session, format="json", period="2026-09", group_by="model",
+        scope="all", actor=leader,
+    )
+    data_q = [(q, p) for q, p in seen if data_branches(q)]
+    assert data_q
+    assert all(team_isolated(q, p, [TEAM_A]) for q, p in data_q)
 
 
 # ── per-app budget_usages 이중계상 회귀 ──────────────────────────────────
 
 @pytest.mark.unit
-async def test_seed_residual_query_filters_client_rows(mock_session, admin_user):
+async def test_seed_residual_query_filters_client_rows(admin_user):
     """budget_usages 시드 잔차 집계는 반드시 client IS NULL(총합 행)만 더한다.
 
     워커는 (scope, scope_id, period, client) 단위로 per-app 행도 쓴다 —
@@ -302,29 +254,22 @@ async def test_seed_residual_query_filters_client_rows(mock_session, admin_user)
     필터 없이 SUM 하면 사용액이 최대 2배로 부풀고, 잔차(seed)가 허위로 생겨
     대시보드의 사용자 비용이 과대계상된다.
     """
-    svc = AnalyticsService()
-    with patch(
-        "app.services.analytics_service.AnalyticsRepository", return_value=_empty_repo()
-    ):
-        await svc.get_analytics(
-            mock_session, period="2026-09", group_by="user", actor=admin_user
-        )
-
-    sqls = _executed_sqls(mock_session)
-    bu_sqls = [s for s in sqls if "budget_usages" in s]
+    session, seen = _hybrid_session()
+    await AnalyticsService().get_analytics(
+        session, period="2026-09", group_by="user", actor=admin_user
+    )
+    bu_sqls = [q for q, _ in seen if "budget_usages" in q]
     assert bu_sqls, "seed 잔차 질의가 실행되지 않음"
-    for s in bu_sqls:
-        assert "CLIENT IS NULL" in s.upper(), f"client IS NULL 누락: {s[:200]}"
+    for q in bu_sqls:
+        assert "CLIENT IS NULL" in q.upper(), f"client IS NULL 누락: {q[:200]}"
 
 
 @pytest.mark.unit
-async def test_usage_by_user_seed_query_filters_client_rows(mock_session):
-    """`get_usage_by_user`(대시보드 top users)의 seed CTE 도 총합 행만 더한다."""
-    svc = AnalyticsService()
-    await svc.get_usage_by_user(mock_session, period="2026-09", date="2026-09-15")
-
-    sqls = _executed_sqls(mock_session)
-    bu_sqls = [s for s in sqls if "budget_usages" in s]
+async def test_usage_by_user_seed_query_filters_client_rows():
+    """`get_usage_by_user`(대시보드 top users)의 seed 질의도 총합 행만 더한다."""
+    session, seen = _hybrid_session()
+    await AnalyticsService().get_usage_by_user(session, period="2026-09", date="2026-09-15")
+    bu_sqls = [q for q, _ in seen if "budget_usages" in q]
     assert bu_sqls, "seed 잔차 질의가 실행되지 않음"
-    for s in bu_sqls:
-        assert "CLIENT IS NULL" in s.upper(), f"client IS NULL 누락: {s[:200]}"
+    for q in bu_sqls:
+        assert "CLIENT IS NULL" in q.upper(), f"client IS NULL 누락: {q[:200]}"

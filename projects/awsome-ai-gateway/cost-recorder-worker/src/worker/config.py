@@ -94,13 +94,33 @@ class Settings(BaseSettings):
 
     # Daily aggregator cron. 기본 매일 00:10 (reporting_timezone 기준).
     daily_usage_agg_cron: str = "10 0 * * *"
-    # 매 실행마다 재집계하는 최근 완료 일수 — 스트림 백로그로 늦게 INSERT 된
-    # 행이 기존 집계 키에 누락되지 않도록 최근 N일을 UPSERT(멱등).
-    # ⚠️ 2 일로 두면 소비가 주말 넘게 막힌 뒤 복구된 백로그가 집계에 영구 누락된다 —
-    #    스트림 보존(~100k entries)으로 실현 가능한 늦도착 상한인 1주일로 늘린다.
-    daily_usage_agg_recent_days: int = 8
+    # 매 실행마다 무조건 재집계하는 최근 완료 일수(어제 + 그제).
+    # ⚠️ 예전엔 8일이었다 — 늦게 도착한 행을 놓치지 않으려는 안전망이었는데, 0061 부터는
+    #    늦은 행이 같은 트랜잭션에서 usage.rollup_dirty_marks 를 남기고 시간 잡이 나이와 무관하게
+    #    그 날짜를 다시 집계한다. 8일 무조건 재집계는 cold 기준 8×47~88s(최대 ~12분)를 매일
+    #    쓰면서 같은 결과를 다시 만들 뿐이라 2일로 줄인다(env 로 되돌릴 수 있다).
+    daily_usage_agg_recent_days: int = 2
     # 통째로 누락된 과거 날짜(크론 실패·워커 다운)를 탐지·백필하는 lookback 일수.
+    # 기동 점검도 이 창 안에서만 본다(전체 이력 스캔 없음 — 그 밖은 백필 CLI).
     daily_usage_agg_backfill_lookback_days: int = 30
+    # 집계 전용 엔진(워커 flush 엔진과 분리) — cold 하루 집계 47~88s(1.36M 행/일 실측)가
+    # 워커 command_timeout(60s)에 걸려 실패하던 문제. 하루/한 시간 집계 문장의 상한이다
+    # (asyncpg command_timeout + 트랜잭션 안 SET LOCAL statement_timeout).
+    daily_usage_agg_command_timeout: float = 900.0
+    # 집계 전용 풀 — advisory lock 커넥션 1 + 작업 세션 1 + 동시에 뜬 다른 잡의 lock 시도 1.
+    daily_usage_agg_pool_size: int = 3
+    # 야간 잡이 시간 잡·기동 점검의 advisory lock 을 기다리는 시간(초). 시간 잡은 기다리지 않는다.
+    daily_usage_agg_nightly_lock_wait_sec: float = 900.0
+    # 실패한 날짜(failed_at)를 시간 잡이 다시 시도하기까지의 대기(초). 야간 잡은 항상 시도한다.
+    daily_usage_agg_failed_retry_sec: int = 10_800
+    # 시간 롤업 잡 — 오늘(과 일 집계가 아직 없는 최근 날짜)의 완료된 시간 + dirty 날짜 재집계.
+    hourly_rollup_enabled: bool = True
+    hourly_rollup_cron: str = "5 * * * *"
+    # 일 집계가 신뢰 불가일 때 시간 롤업으로 메울 최근 날짜 수(어제 야간 잡 전 등).
+    daily_usage_agg_hourly_bridge_days: int = 2
+    # 늦은 행 판정 여유(초) — 행의 시간 버킷 끝이 now + 이 값 이전이면 표시한다. flush
+    # 트랜잭션이 느리게 커밋돼 시간 잡 스냅샷 뒤에 보이는 경우까지 덮는다(시간 잡은 :05).
+    rollup_dirty_margin_sec: int = 120
 
     # daily_aggregates 의 일별 캘린더 경계 + cron 실행 타임존(§59). IANA TZ 이름.
     # admin-api 의 REPORTING_TIMEZONE 과 동일 값으로 맞춰야 한다 — 안 그러면

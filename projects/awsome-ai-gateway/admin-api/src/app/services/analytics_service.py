@@ -13,11 +13,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import CurrentUser
 from app.core.exceptions import ForbiddenError, ValidationError
-from app.core.usage_filters import client_filter, reporting_tz_sql
 from app.models.auth import UserRole
 from app.models.usage import ROIScope
-from app.repositories.analytics_repository import AnalyticsRepository
-from app.services.web_search_cost import web_search_visible, ws_columns, ws_from_row
+from app.services import usage_reads as reads
+from app.services import usage_rollup as ur
+from app.services.web_search_cost import web_search_visible, ws_from_totals, ws_settings
 from app.schemas.analytics import (
     AnalyticsResponse,
     CostSummary,
@@ -138,224 +138,86 @@ class AnalyticsService:
         actor: CurrentUser,
         start_date: str | None = None,
         end_date: str | None = None,
+        scope_ids: list[uuid.UUID] | None | object = ...,
     ) -> AnalyticsResponse:
-        repo = AnalyticsRepository(session)
+        """Analytics 개요 — 하이브리드 롤업 읽기 2문장(합계·분해 + 일별 추이) + seed 잔차.
 
+        숫자의 정의는 종전 raw 집계와 같다(SUCCESS·리포팅 tz·앱·요청 시점 팀). scope_ids 를
+        넘기면(라우터가 캐시 키를 만들려고 이미 해석한 경우) 다시 해석하지 않는다.
+        """
         # custom 날짜 구간 — 둘 다 있어야 적용. 한쪽만 오면 400 이다(조용한 월 fallback
         # 은 "날짜를 바꿔도 숫자가 안 변하는" 무증상 오답의 재탕). 형식·달력·순서·연 범위
-        # 검증은 kst_day_range_filter → day_range_to_utc 가 한다(ValidationError → 400).
-        from app.core.usage_filters import cost_date_range_filter
-        range_where = None
-        if start_date or end_date:
-            if not (start_date and end_date):
-                raise ValidationError("custom range requires both start_date and end_date")
-            range_where = cost_date_range_filter(start_date, end_date)
+        # 검증은 day_range_to_utc 가 한다(ValidationError → 400, 366일 초과 422).
+        rng = ur.resolve_range(period, start_date, end_date)
 
         # Determine scope filter — 해석 규칙은 _resolve_scope 가 단일 소스
         # (/admin/analytics/models 도 같은 규칙을 공유한다).
-        roi_scope, scope_ids = await _resolve_scope(actor, scope, session)
+        if scope_ids is ...:
+            _roi_scope, scope_ids = await _resolve_scope(actor, scope, session)
 
-        # Real-time aggregation from usage_logs (not pre-aggregated roi_aggregations)
-        query_scope = roi_scope or ROIScope.GLOBAL
+        base = ur.RollupScope.of(rng, teams=scope_ids, client=client)
+        t = await reads.totals(session, base)
+        by_model_raw, by_team_raw, by_user_raw = await reads.analytics_overview(
+            session, base, want_users=(group_by == "user"))
+        day_scope = ur.RollupScope.of(rng, teams=scope_ids, client=client, by_day=True)
+        trends_raw, team_day_raw = await reads.analytics_trends(session, day_scope)
+        meta = ur.merge_meta(await ur.fetch_meta(session, base),
+                             await ur.fetch_meta(session, day_scope))
 
-        cost_by_model = await repo.sum_usage_by_model(period, query_scope, None, client, scope_ids=scope_ids, cost_where=range_where)
-        # ⚠️ 같은 scope/client 필터(_apply_scope_filter·_apply_client_filter)를 재사용하는
-        #    repo 메서드로 뽑는다 — WHERE 를 손으로 다시 쓰면 TEAM_LEADER 격리가 갈라진다.
-        requests_by_model = await repo.count_requests_by_model(period, query_scope, None, client, scope_ids=scope_ids, cost_where=range_where)
-        total_cost = sum(cost_by_model.values(), Decimal("0"))
-        active_users_count = await repo.count_active_users(period, query_scope, None, client, scope_ids=scope_ids, cost_where=range_where)
-        # 성공/에러를 한 스캔으로 — 성공 전용 range_where 가 아니라 SUCCESS 필터
-        # 가 빠진 구간 조건을 넘긴다(구분은 집계 FILTER 절이 한다).
-        no_success_where = (
-            cost_date_range_filter(start_date, end_date, success_only=False)
-            if range_where is not None
-            else None
-        )
-        total_requests_count, error_requests_count = await repo.request_counts(
-            period, query_scope, None, client, scope_ids=scope_ids, cost_where=no_success_where
-        )
-        # 버킷별 합계 한 번의 질의로 총 토큰 + 토큰 분석 패널 데이터를 같이 채운다 —
-        # total_tokens 를 따로 더하면 두 값의 근원 쿼리가 갈라진다.
-        token_buckets = await repo.token_bucket_totals(period, query_scope, None, client, scope_ids=scope_ids, cost_where=range_where)
-        total_tokens_count = sum(token_buckets.values())
+        total_cost = t.total_cost
+        active_users_count = t.active_users
         token_breakdown = TokenBreakdown(
-            input_tokens=token_buckets["input_tokens"],
-            output_tokens=token_buckets["output_tokens"],
-            cache_read_tokens=token_buckets["cache_read_tokens"],
-            cache_write_tokens=token_buckets["cache_write_tokens"],
-            total_tokens=total_tokens_count,
+            input_tokens=t.input_tokens,
+            output_tokens=t.output_tokens,
+            cache_read_tokens=t.cache_read_tokens,
+            cache_write_tokens=t.cache_creation_tokens,
+            total_tokens=t.total_tokens,
         )
-
         avg_cost = total_cost / active_users_count if active_users_count > 0 else Decimal("0")
-
         cost_summary = CostSummary(
-            total_requests=total_requests_count,
-            error_requests=error_requests_count,
-            total_tokens=total_tokens_count,
+            total_requests=t.total_requests,
+            error_requests=t.error_requests,
+            total_tokens=t.total_tokens,
             total_cost_usd=total_cost,
             active_users=active_users_count,
             avg_cost_per_user_usd=avg_cost,
         )
 
-        # requests 를 채운다 — 예전엔 기본값 0 이 그대로 나가서, Analytics 화면에서
-        # 내려받는 JSON export 가 모든 모델에 대해 "요청 0건" 을 보고했다.
-        # ⚠️ 비용 내림차순 정렬 필수 — repo 는 ORDER BY 없이 dict 를 주므로(DB 반환
-        #    순서) 그대로 나가면 막대 차트가 같은 페이지의 상세 표(cost DESC)와 다른
-        #    순서로 그려진다. 색상도 index 기반이라 순서가 어긋나면 모델별 색까지 달라진다.
-        sorted_models = sorted(
-            cost_by_model.items(), key=lambda kv: kv[1], reverse=True
-        )
-
-        # 카탈로그 표시명 룩업 — 프론트의 modelDisplay(alias, display_name) 재료.
-        from app.models.model import ModelAlias
-        from sqlalchemy import select as _sel
-
-        display_names: dict[str, str] = {}
-        if sorted_models:
-            rows = (
-                await session.execute(
-                    _sel(ModelAlias.alias, ModelAlias.display_name).where(
-                        ModelAlias.alias.in_([m for m, _ in sorted_models])
-                    )
-                )
-            ).all()
-            display_names = {r.alias: r.display_name for r in rows if r.display_name}
-
+        # 비용 내림차순(+ alias) — 같은 페이지의 상세 표(cost DESC)와 같은 순서·같은 팔레트 index.
+        # requests 를 채운다(JSON export 가 "요청 0건" 을 보고하던 결함). display_name 은 카탈로그.
         by_model = [
-            ModelBreakdown(
-                model=model,
-                cost_usd=cost,
-                requests=requests_by_model.get(model, 0),
-                display_name=display_names.get(model),
-            )
-            for model, cost in sorted_models
+            ModelBreakdown(model=m, cost_usd=Decimal(str(c)), requests=int(n), display_name=dn)
+            for m, c, n, dn in by_model_raw
         ]
 
-        # Team breakdown — aggregate per team from usage_logs
-        # TEAM_LEADER 도 본인 팀(들)의 행은 본다 — 한 사람이 복수 팀 리더일 수 있어
-        # 행이 여러 개일 수 있다. 예전엔 비-GLOBAL 이면 by_team 을 비워 '팀별' 차트가
-        # 항상 빈 상태로 나왔다.
-        by_team: list[TeamBreakdown] = []
-        from sqlalchemy import distinct, func, select
-        from app.models.auth import Department, Team
-        from app.models.usage import UsageLog
-        from app.core.usage_filters import cost_period_filter
+        # Team breakdown — 요청 시점 team_id 귀속. TEAM_LEADER 도 본인 팀(들)의 행은 본다.
         # ⚠️ team 라벨에 UUID 를 넣지 말 것 — 차트 x축에 그대로 노출된다.
-        #    INNER JOIN 이 안전한 근거: usage_logs.team_id 는 NOT NULL + auth.teams.id
-        #    FK (app/models/usage.py) 이므로 조인으로 사라지는 행이 없다(합계 불변).
-        team_where = [range_where if range_where is not None else cost_period_filter(period)]  # §59 SUCCESS + KST (team 귀속은 usage_logs.team_id 직접)
-        if scope_ids:  # TEAM_LEADER/team scope 격리 — 본인 팀(들)만
-            team_where.append(UsageLog.team_id.in_(scope_ids))
-        if (cf := client_filter(client)) is not None:
-            team_where.append(cf)
-        stmt = select(
-            UsageLog.team_id,
-            Team.name.label("team_name"),
-            Department.name.label("dept_name"),
-            func.sum(UsageLog.cost_usd).label("cost"),
-            func.count(distinct(UsageLog.user_id)).label("users"),
-        ).join(
-            Team, Team.id == UsageLog.team_id
-        ).outerjoin(
-            # 부서 없는 팀도 행이 나와야 한다(trends_by_team 과 같은 이유).
-            Department, Department.id == Team.dept_id
-        ).where(
-            *team_where,
-        ).group_by(UsageLog.team_id, Team.name, Department.name
-        ).order_by(func.sum(UsageLog.cost_usd).desc(), UsageLog.team_id)  # R25-N6: 결정적 정렬
-        result = await session.execute(stmt)
-        for row in result:
-            if row.team_id:
-                by_team.append(TeamBreakdown(
-                    team=row.team_name or str(row.team_id),
-                    team_id=str(row.team_id),
-                    cost_usd=row.cost or Decimal("0"),
-                    active_users=row.users or 0,
-                    dept_name=row.dept_name,
-                ))
+        by_team = [
+            TeamBreakdown(team=name or str(tid), team_id=str(tid), cost_usd=Decimal(str(c)),
+                          active_users=int(u), dept_name=dept)
+            for tid, name, dept, c, u in by_team_raw
+        ]
 
-
-        # User breakdown — group_by='user' 요청 시만 집계(불필요 조인 회피). §60.9:
-        # 그간 UI 에 '사용자별' 옵션은 있었으나 백엔드가 group_by 무시 → by_model 표시되던
-        # 버그 수정. usage_logs SUCCESS+KST(cost_period_filter) + User 조인, PII(sso_subject)
-        # 미노출(display_name·email 만). 상위 50명(차트 가독).
+        # User breakdown — group_by='user' 요청 시만(§60.9). PII(sso_subject) 미노출. 상위 50명.
         by_user: list[UserBreakdown] = []
         if group_by == "user":
-            from sqlalchemy import func, select
-            from app.models.usage import UsageLog
-            from app.models.auth import User
-            from app.core.usage_filters import cost_period_filter
-
-            user_where = [range_where if range_where is not None else cost_period_filter(period)]
-            if scope_ids:  # TEAM_LEADER/team scope 격리
-                user_where.append(UsageLog.team_id.in_(scope_ids))
-            if (cf := client_filter(client)) is not None:
-                user_where.append(cf)
-            ustmt = (
-                select(
-                    User.id.label("user_id"),
-                    User.display_name.label("name"),
-                    User.email.label("email"),
-                    func.sum(UsageLog.cost_usd).label("cost"),
-                    func.count().label("requests"),
-                )
-                .join(User, User.id == UsageLog.user_id)
-                .where(*user_where)
-                .group_by(User.id, User.display_name, User.email)
-                .order_by(func.sum(UsageLog.cost_usd).desc(), User.id)
-                # LIMIT 을 두지 않는다 — seed 병합이 이 집합에 대해 일어나는데,
-                # top-N 으로 자르면 N위 밑 사용자의 실사용이 seed 병합에서 빠져
-                # "seed only"(requests=0) 틀린 행이 된다. 사용자 수는 기관 규모로
-                # 상한이 잡혀 있어 전건 집계가 맞다(R25-S2).
-            )
             # ── 마이그레이션 주입분(seed) 반영 ──
-            #
-            # `/usage/by-user` 와 **같은 공식**을 쓴다(그 엔드포인트의 주석에 왜 이 형태인지
-            # 적어 두었다). 여기는 기간이 월 단위(cost_period_filter)라 일자 보정이 필요
-            # 없어 더 단순하다: seed = max(budget_usages 월 누적 − 월 실사용(전 status), 0).
-            #
-            # 이 차트에 넣어야 하는 이유: 이건 사용자가 실제로 보는 화면이다. seed 를 빼면
-            # 이관된 사용자는 차트에서 싸 보이는데 예산 페이지는 96% 소진을 말한다 —
-            # 같은 화면 안에서 서로 다른 사실을 주장하는 상태다. 순위도 seed 를 포함해야
-            # "비용 상위 50명" 이라는 축이 맞는다.
-            #
-            # ⚠️ 팀 격리를 여기서도 지켜야 한다. budget_usages 에는 team_id 가 없으므로
-            #    auth.users 로 조인해 걸러야 한다 — 안 하면 TEAM_LEADER 가 다른 팀 사용자의
-            #    이관 금액을 받아 가는 권한 누출이 된다(위 user_where 격리와 같은 이유).
-            from app.core.usage_filters import period_to_utc_range
+            # `/usage/by-user` 와 **같은 공식**: seed = max(budget_usages 월 누적 − 월 실사용(전 status), 0).
+            # 이 화면에 넣어야 예산 페이지(96% 소진)와 분석 화면이 같은 사실을 말한다. 순위도
+            # seed 를 포함해야 "비용 상위 50명" 축이 맞는다.
+            # ⚠️ 팀 격리: budget_usages 에는 team_id 가 없으므로 auth.users 로 조인해 거른다.
+            # seed 잔차는 월 버킷 개념이라 custom 구간·client 필터에서는 실사용만 표시한다.
+            from sqlalchemy import func, select
+
+            from app.models.auth import User
             from app.models.budget import BudgetScope, BudgetUsage
 
-            # seed 잔차는 월 버킷(budget_usages.period='YYYY-MM') 개념이라 임의 일자
-            # 구간에는 사상되지 않는다 — custom range 에서는 실사용만 표시한다.
-            # client 필터 시에도 건너뛴다 — 시드는 client 무구분 총액이라 특정 앱에
-            # 전액 귀속시키면 그 앱의 지출이 부풀고, seed-only 사용자가 모든
-            # client 필터 아래에 나타난다.
             seeded: dict[uuid.UUID, tuple[str | None, str | None, Decimal]] = {}
-            if range_where is None and client_filter(client) is None:
-                m_start, m_end = period_to_utc_range(period)
-
-                # 월 실사용(전 status) — 잔차의 뺄 값.
-                # ⚠️ 팀 스코프 필터를 **넣지 않는다** — budget_usages(USER) 는
-                #    사용자 전체 카운터인데 사용액을 팀 소속 행으로만 빼면, 월중
-                #    팀 이동 사용자는 A팀 시절 사용분이 빼지지 않아 잔차가 그만큼
-                #    부풀고(= A팀 지출이 B팀 리더에게 seed 로 노출된다).
-                actual_where = [
-                    UsageLog.requested_at >= m_start,
-                    UsageLog.requested_at < m_end,
-                ]
-                actual_stmt = (
-                    select(
-                        UsageLog.user_id.label("user_id"),
-                        func.coalesce(func.sum(UsageLog.cost_usd), 0).label("actual"),
-                    )
-                    .where(*actual_where)
-                    .group_by(UsageLog.user_id)
-                )
-                month_actual = {
-                    r.user_id: Decimal(str(r.actual))
-                    for r in (await session.execute(actual_stmt)).all()
-                }
-
+            if not rng.is_custom and ur.norm_client(client) is None:
+                # 월 실사용(전 status) — 팀 스코프를 **넣지 않는다**(budget_usages(USER) 는 사용자
+                # 전체 카운터 — 월중 팀 이동 사용자의 A팀 시절 사용분이 잔차에 남지 않게).
+                month_actual = await reads.cost_by_user_all_status(
+                    session, ur.RollupScope.of(ur.month_range(period)))
                 recorded_stmt = (
                     select(
                         User.id.label("user_id"),
@@ -368,131 +230,57 @@ class AnalyticsService:
                     .where(
                         BudgetUsage.scope == BudgetScope.USER,
                         BudgetUsage.period == period,
-                        # ⚠️ client IS NULL = 총합 행만. per-app 행(client='claude-code'
-                        #    등)은 그 부분집합이라 빼지 않으면 사용자당 사용액이
-                        #    최대 2배로 부풀려진다.
+                        # ⚠️ client IS NULL = 총합 행만(per-app 행은 부분집합).
                         BudgetUsage.client.is_(None),
                     )
                     .group_by(User.id, User.display_name, User.email)
                 )
                 if scope_ids:
                     recorded_stmt = recorded_stmt.where(User.team_id.in_(scope_ids))
-
                 for r in (await session.execute(recorded_stmt)).all():
                     residual = Decimal(str(r.used)) - month_actual.get(r.user_id, Decimal("0"))
                     if residual > 0:
                         seeded[r.user_id] = (r.name, r.email, residual)
 
-            rows = (await session.execute(ustmt)).all()
-            for row in rows:
-                extra = seeded.pop(row.user_id, None)
+            for uid, name, email, c, n in by_user_raw or []:
+                uid = uuid.UUID(str(uid))
+                extra = seeded.pop(uid, None)
                 by_user.append(UserBreakdown(
-                    user=row.name,
-                    email=row.email,
-                    user_id=str(row.user_id),
-                    cost_usd=(row.cost or Decimal("0")) + (extra[2] if extra else Decimal("0")),
-                    requests=row.requests or 0,
+                    user=name, email=email, user_id=str(uid),
+                    cost_usd=Decimal(str(c)) + (extra[2] if extra else Decimal("0")),
+                    requests=int(n or 0),
                 ))
-            # usage_logs 에 한 건도 없이 seed 만 있는 사용자(이관 직후) — 목록의 기준
-            # 테이블이 usage_logs 라 그냥 두면 차트에서 사라진다.
+            # 사용량 없이 seed 만 있는 사용자(이관 직후)도 차트에 나와야 한다.
             for seed_uid, (name, email, amount) in seeded.items():
                 by_user.append(UserBreakdown(
                     user=name, email=email, user_id=str(seed_uid), cost_usd=amount, requests=0
                 ))
-
-            # seed 를 더한 뒤 다시 상위 50명을 고른다 — SQL 의 ORDER BY/LIMIT 은 실사용
-            # 기준이었다. 이 재정렬이 없으면 seed 가 큰 사용자가 51위에 밀려 안 보인다.
+            # seed 를 더한 뒤 다시 상위 50명 — SQL 순서는 실사용 기준이었다.
             by_user.sort(key=lambda b: b.cost_usd, reverse=True)
             del by_user[50:]
 
-        # 비용 추이 — 리포팅 타임존 일 버킷(§59). 예전엔 trends 를 아예 대입하지 않아서 기본값 []
-        # 이 나갔고, 대시보드/Analytics 의 두 추이 차트가 옆 KPI 는 실제 금액을 보여주는
-        # 동안 영구히 "데이터 없음" 을 렌더했다.
-        # ⚠️ scope_id 격리는 by_user 와 **동일 규칙**으로. 이걸 빼면 TEAM_LEADER 가
-        #    전사 일별 비용을 받아 가는 권한 누출이 된다.
-        from sqlalchemy import func, select
-
-        from app.core.usage_filters import cost_period_filter
-        from app.models.usage import UsageLog
-
-        _kst_day = func.date(func.timezone(reporting_tz_sql(), UsageLog.requested_at))
-        trend_where = [range_where if range_where is not None else cost_period_filter(period)]
-        if scope_ids:
-            trend_where.append(UsageLog.team_id.in_(scope_ids))
-        if (cf := client_filter(client)) is not None:  # 대시보드 ?client= 필터와 정합 (KPI/Top 과 동일 기준)
-            trend_where.append(cf)
-        trend_stmt = (
-            select(
-                _kst_day.label("day"),
-                func.coalesce(func.sum(UsageLog.cost_usd), 0).label("cost_usd"),
-                func.count().label("requests"),
-            )
-            .where(*trend_where)
-            .group_by(_kst_day)
-            .order_by(_kst_day)
-        )
+        # 비용 추이 — 리포팅 tz 일 버킷(§59). scope_ids 격리는 위와 같은 규칙.
         trends = [
-            TrendItem(
-                date=str(r.day),  # 'YYYY-MM-DD' — CostTrendCard 가 slice(5) 로 잘라 쓴다
-                cost_usd=r.cost_usd or Decimal("0"),
-                requests=r.requests or 0,
-            )
-            for r in (await session.execute(trend_stmt)).all()
+            TrendItem(date=str(d), cost_usd=Decimal(str(c)), requests=int(n))
+            for d, c, n in trends_raw
         ]
-
-        # 팀별 추이 — trends 와 같은 WHERE(scope_ids·client)에 team 차원만 추가.
-        # ADMIN 은 전 팀, TEAM_LEADER 는 리더인 팀들만 나온다(by_team 과 같은 격리).
-        team_trend_stmt = (
-            select(
-                UsageLog.team_id,
-                Team.name.label("team_name"),
-                Department.name.label("dept_name"),
-                _kst_day.label("day"),
-                func.coalesce(func.sum(UsageLog.cost_usd), 0).label("cost_usd"),
-                func.count().label("requests"),
-            )
-            .join(Team, Team.id == UsageLog.team_id)
-            # dept 는 팀에 안 달려 있을 수 있어 OUTER — 부서 없는 팀도 시리즈가 나와야 한다.
-            .outerjoin(Department, Department.id == Team.dept_id)
-            .where(*trend_where)
-            .group_by(UsageLog.team_id, Team.name, Department.name, _kst_day)
-            .order_by(Team.name, _kst_day)
-        )
-        _trend_rows: dict[uuid.UUID, TeamTrend] = {}
-        for r in (await session.execute(team_trend_stmt)).all():
-            tt = _trend_rows.get(r.team_id)
+        # 팀별 추이 — trends 와 같은 범위·격리에 team 차원만 추가(팀 이름순 → 날짜순).
+        _trend_rows: dict[str, TeamTrend] = {}
+        for tid, name, dept, d, c, n in team_day_raw:
+            tt = _trend_rows.get(tid)
             if tt is None:
-                tt = _trend_rows[r.team_id] = TeamTrend(
-                    team=r.team_name or str(r.team_id),
-                    team_id=str(r.team_id),
-                    dept_name=r.dept_name,
-                )
-            tt.points.append(TrendItem(
-                date=str(r.day),
-                cost_usd=r.cost_usd or Decimal("0"),
-                requests=r.requests or 0,
-            ))
+                tt = _trend_rows[tid] = TeamTrend(team=name or str(tid), team_id=str(tid),
+                                                  dept_name=dept)
+            tt.points.append(TrendItem(date=str(d), cost_usd=Decimal(str(c)), requests=int(n)))
         trends_by_team = list(_trend_rows.values())
 
-        # 웹 검색(모니터링 전용) — trends 와 같은 구간·scope_ids·client 격리. 단 SUCCESS
-        # 필터는 빼고 센다(검색은 모델 호출이 실패해도 이미 실행·과금). 모델 비용
-        # cost_summary 에는 더하지 않는다.
-        ws_where = [
-            no_success_where if no_success_where is not None
-            else cost_period_filter(period, success_only=False)
-        ]
-        if scope_ids:
-            ws_where.append(UsageLog.team_id.in_(scope_ids))
-        if (cf := client_filter(client)) is not None:
-            ws_where.append(cf)
-        web_search = ws_from_row(
-            (await session.execute(select(*ws_columns()).where(*ws_where))).one()
-        )
+        # 웹 검색(모니터링 전용) — 같은 구간·scope·client, status 무관. 모델 비용에 더하지 않는다.
+        web_search = ws_from_totals(t.ws_queries, t.ws_cost, t.ws_untracked,
+                                    await ws_settings(session))
 
         return AnalyticsResponse(
-            # custom 구간이면 응답의 period 도 진짜 구간을 말한다 — CSV/JSON export 가
-            # 이 필드를 파일명 근거로 쓰므로 '2026-07' 같은 잘못된 월로 나가지 않게.
-            period=f"{start_date}~{end_date}" if range_where is not None else period,
+            # custom 구간이면 응답의 period 도 진짜 구간을 말한다(CSV/JSON export 파일명 근거).
+            period=rng.label if rng.is_custom else period,
             cost_summary=cost_summary,
             by_model=by_model,
             by_team=by_team,
@@ -501,6 +289,8 @@ class AnalyticsService:
             trends_by_team=trends_by_team,
             token_breakdown=token_breakdown,
             web_search=web_search,
+            data_as_of=meta.data_as_of,
+            delayed_days=[d.isoformat() for d in meta.delayed_days],
         )
 
     async def get_model_cost_detail(
@@ -516,65 +306,23 @@ class AnalyticsService:
     ) -> dict:
         """모델별 상세 비용 — /analytics 페이지의 상세 섹션 데이터.
 
-        overview(get_analytics)와 같은 필터셋을 받는다 — 기간(월 또는 custom
-        구간)·client·scope·역할 격리가 한 근원에서 나오지 않으면 같은 화면의
-        카드와 표가 서로 다른 집합을 보게 된다.
-        격리 규칙은 _resolve_scope 가 단일 소스다.
+        overview(get_analytics)와 같은 필터셋(기간·client·scope·역할 격리)을 받는다 — 한
+        근원에서 나오지 않으면 같은 화면의 카드와 표가 서로 다른 집합을 보게 된다.
         """
-        from sqlalchemy import func, select
-
-        from app.core.usage_filters import cost_date_range_filter, cost_period_filter
-        from app.models.usage import UsageLog
-
         _roi_scope, scope_ids = await _resolve_scope(actor, scope, session)
-
-        # custom 날짜 구간 — get_analytics 와 같은 규칙(둘 다 있어야 적용, 아니면 400).
-        if start_date or end_date:
-            if not (start_date and end_date):
-                raise ValidationError("custom range requires both start_date and end_date")
-            base_where = cost_date_range_filter(start_date, end_date)
-        else:
-            base_where = cost_period_filter(period)  # §59 SUCCESS + KST
-
-        where: list = [base_where]
-        if scope_ids:  # TEAM_LEADER/team scope 격리 — 본인 팀(들)만
-            where.append(UsageLog.team_id.in_(scope_ids))
-        if (cf := client_filter(client)) is not None:
-            where.append(cf)
-
-        # display_name 은 ModelAlias 카탈로그에서 온다 — alias 원시값만 내리면
-        # 대시보드 도넛(modelDisplay 사용)과 이 표가 같은 모델을 다르게 표기한다.
-        # 카탈로그에 없는 alias 도 있으므로 OUTER JOIN + 프론트 fallback.
-        from app.models.model import ModelAlias
-
-        model_stmt = (
-            select(
-                UsageLog.model_alias,
-                func.max(ModelAlias.display_name).label("display_name"),
-                func.count().label("request_count"),
-                func.coalesce(func.sum(UsageLog.cost_usd), 0).label("total_cost_usd"),
-                func.coalesce(func.sum(UsageLog.input_tokens), 0).label("input_tokens"),
-                func.coalesce(func.sum(UsageLog.output_tokens), 0).label("output_tokens"),
-                func.coalesce(func.sum(UsageLog.cache_read_tokens), 0).label("cache_read_tokens"),
-                func.coalesce(func.sum(UsageLog.cache_creation_tokens), 0).label("cache_creation_tokens"),
-                func.avg(UsageLog.latency_ms).label("avg_latency_ms"),
-            )
-            .select_from(UsageLog)
-            .outerjoin(ModelAlias, ModelAlias.alias == UsageLog.model_alias)
-            .where(*where)
-            .group_by(UsageLog.model_alias)
-            .order_by(func.sum(UsageLog.cost_usd).desc())
-        )
-        model_result = await session.execute(model_stmt)
+        rng = ur.resolve_range(period, start_date, end_date)
+        sc = ur.RollupScope.of(rng, teams=scope_ids, client=client, success_only=True)
+        day_sc = ur.RollupScope.of(rng, teams=scope_ids, client=client, success_only=True,
+                                   by_day=True)
+        model_rows = await reads.model_detail(session, sc)
+        daily_rows = await reads.model_daily(session, day_sc)
+        meta = ur.merge_meta(await ur.fetch_meta(session, sc), await ur.fetch_meta(session, day_sc))
 
         models = []
-        for row in model_result.all():
-            # ⚠️ 분자(total_cost_usd)와 분모(total_tokens)의 버킷이 같아야 한다. 예전엔
-            #    분모가 input+output 뿐이라 캐시를 많이 쓰는 모델의 단가가 실제보다 크게
-            #    부풀어, "1k 토큰당 비용" 열이 두 Opus 모델의 가격 순위를 뒤집어 보였다.
-            #    cache_creation/cache_read 는 별도 과금 버킷이므로 더한다.
-            #    reasoning_tokens 는 이미 output_tokens 안에 포함(models/usage.py:61)이라
-            #    더하면 이중계상 — 넣지 않는다.
+        for row in model_rows:
+            # ⚠️ 분자(total_cost_usd)와 분모(total_tokens)의 버킷이 같아야 한다 — 캐시를 빼면
+            #    캐시를 많이 쓰는 모델의 단가가 부풀어 순위가 뒤집혀 보였다. reasoning_tokens 는
+            #    output_tokens 에 이미 포함이라 더하지 않는다.
             total_tokens = (
                 (row.input_tokens or 0)
                 + (row.output_tokens or 0)
@@ -585,44 +333,32 @@ class AnalyticsService:
             models.append({
                 "model_alias": row.model_alias,
                 "display_name": row.display_name,
-                "request_count": row.request_count,
+                "request_count": int(row.request_count),
                 "total_cost_usd": round(float(row.total_cost_usd), 4),
-                "input_tokens": row.input_tokens,
-                "output_tokens": row.output_tokens,
-                "cache_read_tokens": row.cache_read_tokens,
-                "cache_creation_tokens": row.cache_creation_tokens,
+                "input_tokens": int(row.input_tokens),
+                "output_tokens": int(row.output_tokens),
+                "cache_read_tokens": int(row.cache_read_tokens),
+                "cache_creation_tokens": int(row.cache_creation_tokens),
                 "avg_latency_ms": round(float(row.avg_latency_ms or 0)),
                 "cost_per_1k_tokens": round(cost_per_1k, 6),
             })
 
-        # 일별 binning 도 KST(§59) — func.date(timestamptz)는 세션 TZ(UTC)라 KST 변환 후 date.
-        _kst_day = func.date(func.timezone(reporting_tz_sql(), UsageLog.requested_at))
-        daily_stmt = (
-            select(
-                _kst_day.label("day"),
-                UsageLog.model_alias,
-                func.coalesce(func.sum(UsageLog.cost_usd), 0).label("cost_usd"),
-            )
-            .where(*where)
-            .group_by(_kst_day, UsageLog.model_alias)
-            .order_by(_kst_day)
-        )
-        daily_result = await session.execute(daily_stmt)
         daily_trend = [
             {
                 "date": str(row.day),
                 "model_alias": row.model_alias,
                 "cost_usd": round(float(row.cost_usd), 4),
             }
-            for row in daily_result.all()
+            for row in daily_rows
         ]
 
         grand_total = sum(m["total_cost_usd"] for m in models)
         return {
-            "period": f"{start_date}~{end_date}" if start_date and end_date else period,
+            "period": rng.label if rng.is_custom else period,
             "total_cost_usd": round(grand_total, 4),
             "models": models,
             "daily_trend": daily_trend,
+            **meta.as_dict(),
         }
 
     async def export_analytics(
@@ -658,125 +394,48 @@ class AnalyticsService:
         period: str,
         date: str,
     ) -> UsageByUserResponse:
-        """User 단위 누적 (period 1일 ~ date, KST, SUCCESS only). Dashboard 요약 테이블용."""
-        from sqlalchemy import func, select
-
-        from app.core.usage_filters import kst_day_range_filter
-        from app.models.auth import Department, Team, User
-        from app.models.usage import UsageLog, UsageStatus
+        """User 단위 누적 (period 1일 ~ date, 리포팅 tz, SUCCESS only). Dashboard 요약 테이블용."""
+        import datetime as _dt
 
         _validate_period_date(period, date)
-
-        period_start = f"{period}-01"
-
-        stmt = (
-            select(
-                UsageLog.user_id.label("user_id"),
-                User.display_name.label("user_name"),
-                User.email.label("user_email"),
-                func.coalesce(func.sum(UsageLog.cost_usd), 0).label("cost_usd"),
-                func.count().label("calls"),
-                func.coalesce(func.sum(UsageLog.input_tokens), 0).label("input_tokens"),
-                func.coalesce(func.sum(UsageLog.output_tokens), 0).label("output_tokens"),
-                func.coalesce(func.sum(UsageLog.cache_read_tokens), 0).label("cache_read_tokens"),
-                func.coalesce(func.sum(UsageLog.cache_creation_tokens), 0).label(
-                    "cache_creation_tokens"
-                ),
-                Team.id.label("team_id"),
-                Team.name.label("team_name"),
-                Department.id.label("department_id"),
-                Department.name.label("department_name"),
-            )
-            .select_from(UsageLog)
-            .outerjoin(User, User.id == UsageLog.user_id)
-            .outerjoin(Team, Team.id == User.team_id)
-            .outerjoin(Department, Department.id == Team.dept_id)
-            .where(
-                UsageLog.status == UsageStatus.SUCCESS,
-                # ⚠️ `date(timezone('Asia/Seoul', requested_at)) >= date(:start)` 형태는
-                #    좌변이 컬럼에 함수를 씌운 표현식이라 requested_at 인덱스를 못 타고
-                #    usage_logs 를 전부 훑는다(월 필터를 cost_period_filter 로 고친 것과
-                #    같은 이유). 경계를 파라미터 쪽에서 UTC 반개구간으로 환산하면 컬럼이
-                #    그대로 남아 인덱스를 탄다. 집합은 동일하므로 숫자는 움직이지 않는다:
-                #    KST 일자 ∈ [start, date] ⟺ requested_at ∈ [KST start, KST date+1).
-                kst_day_range_filter(period_start, date),
-            )
-            .group_by(
-                UsageLog.user_id,
-                User.display_name,
-                User.email,
-                Team.id,
-                Team.name,
-                Department.id,
-                Department.name,
-            )
-            .order_by(func.sum(UsageLog.cost_usd).desc())
-        )
-
-        rows = (await session.execute(stmt)).all()
+        month = ur.month_range(period)
+        rng = ur.DayRange(month.start, _dt.date.fromisoformat(date), period)
+        sc = ur.RollupScope.of(rng, success_only=True)
+        rows = await reads.by_user_detail(session, sc)
+        meta = await ur.fetch_meta(session, sc)
 
         # ── 마이그레이션 주입분(seed) 반영 ──
         #
-        # 문제: `POST /admin/budgets/seed-spent` 는 이관 이전 사용액을
-        # `budget.budget_usages` 에 절대값으로 넣는데, 분석 경로는 `usage_logs` 만 읽었다.
-        # 그래서 예산 화면은 $963 을 보여주고 분석 화면은 $13 을 보여줬다 — 같은 사용자,
-        # 같은 기간, 서로 다른 숫자. 운영자가 어느 쪽을 믿어야 할지 알 수 없다.
-        #
-        # 왜 `max(실사용, budget_usages)` 가 아닌가(그 형태를 먼저 써 봤다면 안 되는 이유):
-        #   * `budget_usages` 에는 **일자 축이 없다.** 월 누적 한 행뿐이다.
-        #   * 그리고 모든 status 를 누적한다 — 분석은 SUCCESS 만 센다.
-        #   ⇒ `date` 를 월 중간으로 주면 월 총액이 거의 항상 이겨서, 바깥 cost_usd 는
-        #     date 를 **무시하고** 월 총액을 돌려주는 반면 calls/토큰은 date 범위였다.
-        #     한 응답 안에서 두 필드가 다른 기간을 말하는 상태가 된다.
-        #
-        # 그래서 seed 를 **월 단위 상수**로 역산한다:
+        # `POST /admin/budgets/seed-spent` 는 이관 이전 사용액을 budget_usages 에 절대값으로
+        # 넣는데, 분석 경로는 사용량만 읽어서 예산 화면($963)과 분석 화면($13)이 갈렸다.
+        # `max(실사용, budget_usages)` 가 아닌 이유: budget_usages 에는 일자 축이 없고 전 status 를
+        # 누적한다 — date 를 월 중간으로 주면 cost_usd 만 월 총액이 되고 calls/토큰은 date 범위가
+        # 되어 한 응답이 두 기간을 말한다. 그래서 seed 를 **월 단위 상수**로 역산한다:
         #     seed := max(budget_usages 월 누적 − 같은 달 실사용(전 status), 0)
-        # 이 값은 usage_logs 로 설명되지 않는 잔차 = 이관 금액이다. 여기에 일자 범위
-        # 실사용을 더하면 date 는 지켜지고 seed 금액은 보존된다.
-        #
-        # ⚠️ 전 status 로 빼는 것이 load-bearing 이다. SUCCESS 만으로 빼면 실패 요청의
-        #    비용이 잔차에 남아 seed 를 과대계상한다(budget_usages 는 전 status 누적).
+        # ⚠️ 전 status 로 빼는 것이 load-bearing 이다(SUCCESS 만 빼면 실패 비용이 잔차에 남는다).
         from sqlalchemy import text as sa_text
 
-        from app.core.usage_filters import period_to_utc_range
-
-        month_start_utc, month_end_utc = period_to_utc_range(period)
-
-        seed_rows = (
+        month_actual = await reads.cost_by_user_all_status(session, ur.RollupScope.of(month))
+        recorded = (
             await session.execute(
                 sa_text(
                     """
-                    WITH month_actual AS (
-                        SELECT user_id, COALESCE(SUM(cost_usd), 0) AS actual
-                        FROM usage.usage_logs
-                        WHERE requested_at >= :utc_start AND requested_at < :utc_end
-                        GROUP BY user_id
-                    ),
-                    recorded AS (
-                        SELECT scope_id AS user_id, COALESCE(SUM(used_usd), 0) AS used
-                        FROM budget.budget_usages
-                        -- ⚠️ client IS NULL = 총합 행만. per-app 행은 부분집합이라
-                        --    같이 더하면 사용액이 최대 2배로 부풀려진다.
-                        WHERE scope = 'USER' AND period = :period AND client IS NULL
-                        GROUP BY scope_id
-                    )
-                    SELECT r.user_id,
-                           GREATEST(r.used - COALESCE(m.actual, 0), 0) AS seeded
-                    FROM recorded r
-                    LEFT JOIN month_actual m ON m.user_id = r.user_id
-                    WHERE GREATEST(r.used - COALESCE(m.actual, 0), 0) > 0
+                    SELECT scope_id AS user_id, COALESCE(SUM(used_usd), 0) AS used
+                    FROM budget.budget_usages
+                    -- ⚠️ client IS NULL = 총합 행만. per-app 행은 부분집합이라
+                    --    같이 더하면 사용액이 최대 2배로 부풀려진다.
+                    WHERE scope = 'USER' AND period = :period AND client IS NULL
+                    GROUP BY scope_id
                     """
                 ),
-                # 월 전체(1일~말일)를 UTC 반개구간으로. 일자 범위 필터와 같은 규약이라
-                # 인덱스를 그대로 탄다(kst_day_range_filter 주석 참조).
-                {
-                    "period": period,
-                    "utc_start": month_start_utc,
-                    "utc_end": month_end_utc,
-                },
+                {"period": period},
             )
         ).all()
-        seeded_by_user = {str(r.user_id): Decimal(str(r.seeded)) for r in seed_rows}
+        seeded_by_user: dict[str, Decimal] = {}
+        for r in recorded:
+            residual = Decimal(str(r.used)) - month_actual.get(r.user_id, Decimal("0"))
+            if residual > 0:
+                seeded_by_user[str(r.user_id)] = residual
 
         items = [
             UsageByUserItem(
@@ -784,13 +443,13 @@ class AnalyticsService:
                 user_id=str(r.user_id),
                 user_name=r.user_name,
                 user_email=r.user_email,
-                cost_usd=r.cost_usd + seeded_by_user.get(str(r.user_id), Decimal("0")),
+                cost_usd=Decimal(str(r.cost_usd)) + seeded_by_user.get(str(r.user_id), Decimal("0")),
                 seeded_usd=seeded_by_user.get(str(r.user_id), Decimal("0")),
-                calls=r.calls,
-                input_tokens=r.input_tokens,
-                output_tokens=r.output_tokens,
-                cache_read_tokens=r.cache_read_tokens,
-                cache_write_tokens=r.cache_creation_tokens,
+                calls=int(r.calls),
+                input_tokens=int(r.input_tokens),
+                output_tokens=int(r.output_tokens),
+                cache_read_tokens=int(r.cache_read_tokens),
+                cache_write_tokens=int(r.cache_creation_tokens),
                 department_id=str(r.department_id) if r.department_id else None,
                 department_name=r.department_name,
                 team_id=str(r.team_id) if r.team_id else None,
@@ -799,12 +458,12 @@ class AnalyticsService:
             for r in rows
         ]
 
-        # ⚠️ usage_logs 에 한 건도 없는데 seed 만 있는 사용자가 존재한다(이관 직후, 아직
-        #    게이트웨이를 쓰지 않은 사람). 위 목록은 usage_logs 기준이라 그 사람이 통째로
-        #    빠진다 — 예산은 소진됐는데 분석에는 없는, 설명 불가능한 상태다.
+        # ⚠️ 사용량이 한 건도 없는데 seed 만 있는 사용자(이관 직후)도 목록에 나와야 한다.
         seen = {it.user_id for it in items}
         missing = [uid for uid in seeded_by_user if uid not in seen]
         if missing:
+            from sqlalchemy import select
+
             from app.models.auth import Department as _Dept
             from app.models.auth import Team as _Team
             from app.models.auth import User as _User
@@ -846,7 +505,10 @@ class AnalyticsService:
 
         # seed 를 더한 뒤 다시 정렬한다 — SQL 의 ORDER BY 는 실사용 기준이었다.
         items.sort(key=lambda it: it.cost_usd, reverse=True)
-        return UsageByUserResponse(period=period, date=date, items=items)
+        return UsageByUserResponse(
+            period=period, date=date, items=items,
+            data_as_of=meta.data_as_of, delayed_days=[d.isoformat() for d in meta.delayed_days],
+        )
 
     @staticmethod
     def _to_csv(data: AnalyticsResponse, group_by: str) -> str:

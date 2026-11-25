@@ -733,6 +733,17 @@ adminApi:
     # 워커 수는 Dockerfile CMD 가 --workers 1 로 고정(_StreamRelay 가 프로세스
     # 로컬). settings.WORKERS 는 앱이 읽지 않는다 — 오인 방지로 1로 맞춘다.
     WORKERS: "1"
+    # ── 분석 읽기 격리(wave 2) — 새 인프라 없이 코드·설정만으로 ──
+    # Dashboard·Analytics·웹 검색 사용량·사용자×모델은 기본 풀과 분리된 작은 풀을 쓴다 —
+    # 관리자 화면이 몰려도 /v1/auth/exchange 등 기본 풀은 기다리지 않는다. pod 당 최대
+    # SIZE+OVERFLOW 커넥션(기본 3+2). 문장 상한은 트랜잭션 안 SET LOCAL statement_timeout
+    # (RDS Proxy 를 pin 하지 않는다). 캐시 TTL: 오늘 포함 범위 / 지난 범위.
+    ANALYTICS_DB_POOL_SIZE: "3"
+    ANALYTICS_DB_MAX_OVERFLOW: "2"
+    ANALYTICS_DB_POOL_TIMEOUT: "10"
+    ANALYTICS_STATEMENT_TIMEOUT_MS: "30000"
+    ANALYTICS_CACHE_TTL_SEC: "30"
+    ANALYTICS_CACHE_TTL_PAST_SEC: "300"
     # uvicorn --timeout-graceful-shutdown — 위 terminationGracePeriodSeconds 산식
     # 과 짝(10 preStop + 이 값 + 15 drain + 10 audit + 5 여유). 값을 바꾸면 grace 도
     # 같은 산식으로 조정할 것.
@@ -1014,6 +1025,9 @@ scheduler:
 
   env:
     LOG_LEVEL: "INFO"
+    # ROI 집계(usage.roi_aggregations) — 읽는 곳이 없어 기본 OFF(wave 2). Analytics ROI 카드는
+    # 하이브리드 롤업에서 직접 계산한다. "true" 면 종전대로 ROI_AGGREGATION_CRON 에 돈다.
+    ROI_AGGREGATION_ENABLED: "false"
     ROI_AGGREGATION_CRON: "*/15 * * * *"
     KEY_EXPIRY_CRON: "0 * * * *"
 
@@ -1206,3 +1220,12 @@ costRecorderWorker:
     DAILY_USAGE_AGG_CRON: "10 0 * * *"
     # REPORTING_TIMEZONE(daily_aggregates 캘린더 경계 + cron 실행 타임존)은
     # 공통 ConfigMap(global.reportingTimezone)에서 주입됨 — admin-api 와 항상 일치.
+    # ── 롤업 집계(wave 2) ──
+    # 집계 전용 엔진의 문장 상한(초) — flush 엔진(60s)과 분리. cold 하루 집계 47~88s 실측.
+    DAILY_USAGE_AGG_COMMAND_TIMEOUT: "900"
+    # 매 야간 실행마다 무조건 다시 집계하는 최근 일수(늦은 행은 dirty 표시로 따로 잡는다).
+    DAILY_USAGE_AGG_RECENT_DAYS: "2"
+    # 시간 롤업 잡 — 오늘의 완료된 시간 + dirty/실패 날짜 재집계. admin-api 의 "오늘" 읽기가
+    # 진행 중인 한 시간만 원본을 보게 한다.
+    HOURLY_ROLLUP_ENABLED: "true"
+    HOURLY_ROLLUP_CRON: "5 * * * *"

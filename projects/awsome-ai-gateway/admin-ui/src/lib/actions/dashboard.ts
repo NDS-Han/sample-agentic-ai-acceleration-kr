@@ -121,6 +121,9 @@ export interface DashboardKPI {
   active_models: number;
   /** 모니터링 전용 — total_cost_usd·budget_* 에 포함되지 않는다(배포 전 백엔드는 없음). */
   web_search?: WebSearchUsage;
+  /** 하이브리드 롤업 읽기 메타 — 사용한 가장 최근 집계 시각(ISO)·원본으로 읽은 지연 날짜. */
+  data_as_of?: string | null;
+  delayed_days?: string[];
 }
 
 /**

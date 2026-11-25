@@ -6,7 +6,7 @@ import { useMemo } from 'react';
 import { useLocale, useTranslations } from 'next-intl';
 
 import { useDisplayTz } from '@/components/common/ReportingTimezoneProvider';
-import { fmtDateMinute, fmtDateTime, fmtTime } from '@/lib/utils/format';
+import { fmtDateMinute, fmtDateTime, fmtHourMinute, fmtTime } from '@/lib/utils/format';
 import { tzAbbr, tzExact, tzZoneLabel, withTzAbbr } from '@/lib/utils/timezone';
 
 /**
@@ -20,6 +20,7 @@ import { tzAbbr, tzExact, tzZoneLabel, withTzAbbr } from '@/lib/utils/timezone';
  *    쓰면 DST 전환을 낀 표에서 옛 행(PDT)과 어긋난다. 행별 정확한 약어·오프셋은
  *    cellTitle(iso) 툴팁('PDT (GMT-7)')으로 셀마다 준다.
  *  - stamp/stampZ: 연도 포함 분 단위('2026-11-06 09:13') — 발급일·마지막 요청 등.
+ *  - hmZ: 시·분만 + TZ 이름('14:05 GMT+9') — 집계 기준 시각(DataFreshness).
  */
 export function usePointInTime() {
   const locale = useLocale();
@@ -41,6 +42,8 @@ export function usePointInTime() {
       stamp: (iso: string) => (tz ? fmtDateMinute(iso, tz) : ''),
       stampZ: (iso: string) => (tz ? withTzAbbr(fmtDateMinute(iso, tz), tz, iso) : ''),
       timeZ: (iso: string) => (tz ? withTzAbbr(fmtTime(iso, locale, tz), tz, iso) : ''),
+      /** 'HH:MM GMT+9' — 시·분 + 그 시점 TZ 이름(집계 기준 시각 등). */
+      hmZ: (iso: string) => (tz ? withTzAbbr(fmtHourMinute(iso, tz), tz, iso) : ''),
       /** 열 제목 + TZ — 마운트 전에는 라벨만. */
       header: (label: string) => (abbr ? tc('withZone', { label, zone: abbr }) : label),
       /** 셀 툴팁 — 어느 시계인지 IANA 이름까지. */
