@@ -13,6 +13,38 @@ from app.models.audit import CacheInvalidationFailure
 
 logger = structlog.get_logger()
 
+#: gateway-proxy subscribes here and evicts its in-process auth caches (wave 1).
+GATEWAY_AUTH_INVALIDATION_CHANNEL = "gateway:auth:invalidate"
+_VK_KEY_PREFIXES = ("key:cache:vk:", "key:vk:")
+
+
+async def publish_gateway_auth_invalidation(
+    redis, keys: list[str] | None = None, *, user_ids: list[str] | None = None
+) -> None:
+    """Tell gateway pods to drop local auth entries for these VKs/users. Best-effort.
+
+    The gateway re-validates against Redis/DB on every request while those are healthy;
+    its local copy is a TTL cache + last-known-good fallback. This message makes
+    revocations/entitlement changes also clear that fallback immediately. If the publish
+    fails, the gateway's TTL (``auth_local_cache_ttl_sec``) bounds the staleness.
+    """
+    hashes = sorted({
+        k[len(p):] for k in (keys or []) for p in _VK_KEY_PREFIXES if k.startswith(p)
+    })
+    users = sorted({str(u) for u in (user_ids or [])})
+    if not hashes and not users:
+        return
+    try:
+        import json as _json
+
+        await redis.publish(
+            GATEWAY_AUTH_INVALIDATION_CHANNEL,
+            _json.dumps({"key_hashes": hashes, "user_ids": users}),
+        )
+    except Exception:
+        logger.warning("gateway_auth_invalidation_publish_failed", keys=len(hashes),
+                       users=len(users))
+
 
 class CacheInvalidationManager:
     """Best-effort Redis DEL with failure logging and manual retry support."""
@@ -38,6 +70,8 @@ class CacheInvalidationManager:
                 logger.warning("cache.invalidation_failed", key=key, exc_info=True)
                 if session:
                     await self._record_failure(session, key)
+
+        await publish_gateway_auth_invalidation(self._redis, keys)
 
     async def invalidate_pattern(
         self,

@@ -10,6 +10,7 @@ from typing import Protocol
 
 import jwt
 import structlog
+from redis.exceptions import RedisError
 from sqlalchemy import select
 from sqlalchemy import text as _sql_text
 from sqlalchemy.exc import SQLAlchemyError
@@ -18,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.auth import JwtPublicKey, User
 from app.models.model import TeamAllowedModel, UserAllowedModel
 from app.schemas.domain import AuthContext, AuthType, Role
+from app.services.hot_path import HotDbUnavailable, run_db
 
 logger = structlog.get_logger(__name__)
 
@@ -197,6 +199,53 @@ class AuthStrategy(Protocol):
     ) -> AuthContext: ...
 
 
+class AuthLocalCaches:
+    """In-process auth caches (wave 1 hot-path isolation). Active only when configured.
+
+    - ``active``: user_id → is_active (TTL ``auth_local_cache_ttl_sec``). Replaces the
+      per-request ``SELECT is_active`` on a Redis AuthContext hit.
+    - ``ctx``: key_hash → AuthContext, the last known good result. Used only as a
+      fallback when Redis/DB cannot answer (within ``max_stale``) — Redis stays the
+      primary source so revocations/entitlement changes (admin-api DELs) still apply
+      immediately while Redis is healthy.
+    Invalidation: admin-api publishes on ``auth_invalidation_channel``; TTL is the fallback.
+    """
+
+    def __init__(self, ttl: float, max_stale: float, max_entries: int,
+                 redis_fallback_timeout: float, db_timeout: float) -> None:
+        from app.services.hot_path import LocalCache
+
+        self.active = LocalCache(ttl, max_stale, max_entries)
+        self.ctx = LocalCache(ttl, max_stale, max_entries)
+        self.redis_fallback_timeout = redis_fallback_timeout
+        self.db_timeout = db_timeout
+        self.stale_served = 0
+
+    def invalidate(self, payload: dict) -> None:
+        if payload.get("all"):
+            self.active.clear()
+            self.ctx.clear()
+            logger.info("auth_local_cache_invalidated", scope="all")
+            return
+        users = {str(u) for u in payload.get("user_ids") or []}
+        hashes = {str(h) for h in payload.get("key_hashes") or []}
+        for u in users:
+            self.active.evict(u)
+        n = self.ctx.evict_where(lambda k, v: k in hashes or str(v.user_id) in users)
+        for h in hashes:
+            self.ctx.evict(h)
+        logger.info("auth_local_cache_invalidated", users=len(users), keys=len(hashes), evicted=n)
+
+
+#: Set by the app lifespan (``configure_auth_local_caches``); None = legacy behaviour.
+AUTH_LOCAL_CACHES: AuthLocalCaches | None = None
+
+
+def configure_auth_local_caches(caches: AuthLocalCaches | None) -> None:
+    global AUTH_LOCAL_CACHES
+    AUTH_LOCAL_CACHES = caches
+
+
 class VKAuthStrategy:
     """Virtual Key 인증 (Bedrock 경로 /model/*)."""
 
@@ -210,79 +259,129 @@ class VKAuthStrategy:
         # admin-api key_service.issue_key 의 raw_key[:11] 과 같은 규칙 —
         # VK 포맷("vk-" + 8hex)이 바뀌면 양쪽을 함께 고쳐야 한다.
         key_prefix = token[:11]
+        caches = AUTH_LOCAL_CACHES
+
+        def _serve_stale(reason: str) -> AuthContext | None:
+            """Last known good AuthContext for this key (fail-to-cache), or None."""
+            if caches is None:
+                return None
+            ctx = caches.ctx.get_stale(key_hash)
+            if ctx is None:
+                return None
+            caches.stale_served += 1
+            logger.warning("vk_auth_served_from_local_cache", reason=reason,
+                           age_sec=round(caches.ctx.age(key_hash) or 0, 1))
+            out = ctx.model_copy()
+            out.key_prefix = key_prefix
+            return out
+
+        async def _redis_get(key: str):
+            # 로컬 폴백이 있으면 Redis 행(hang)을 오래 기다리지 않는다.
+            if caches is not None and caches.ctx.get_stale(key_hash) is not None:
+                async with asyncio.timeout(caches.redis_fallback_timeout):
+                    return await redis.get(key)
+            return await redis.get(key)
+
+        # 0) Redis 열화(미들웨어가 redis=None 으로 넘김) — 아는 키면 로컬 캐시로.
+        if redis is None:
+            stale = _serve_stale("redis_degraded")
+            if stale is not None:
+                return stale
+            raise AuthBackendUnavailableError("redis unavailable, VK lookup impossible")
 
         # 1) AuthContext 캐시 조회
-        if redis is not None:
-            cached = await redis.get(f"key:cache:vk:{key_hash}")
-            if cached:
-                # 깨진 캐시 엔트리(JSON 손상, AuthContext 스키마 드리프트로 인한
-                # ValidationError)는 미스로 처리해 DB 해소로 떨어진다 — 401 이면
-                # 배포 직후 캐시 TTL(≤300s) 동안 전 VK 사용자가 잠긴다.
+        try:
+            cached = await _redis_get(f"key:cache:vk:{key_hash}")
+        except (TimeoutError, RedisError, OSError):
+            stale = _serve_stale("redis_error")
+            if stale is not None:
+                return stale
+            raise
+        if cached:
+            # 깨진 캐시 엔트리(JSON 손상, AuthContext 스키마 드리프트로 인한
+            # ValidationError)는 미스로 처리해 DB 해소로 떨어진다 — 401 이면
+            # 배포 직후 캐시 TTL(≤300s) 동안 전 VK 사용자가 잠긴다.
+            try:
+                cached_ctx = AuthContext(**json.loads(cached))
+            except Exception:
+                logger.warning("vk_auth_cache_corrupt", key_hash=key_hash[:16])
+                cached_ctx = None
+            if cached_ctx is not None:
+                # VK 폐기 시 admin-api 가 key:vk:{hash} 와 key:cache:vk:{hash} 를
+                # 함께 DEL 한다. 캐시 DEL 이 일시 Redis 장애로 실패하면 AuthContext
+                # 가 남아 폐기 키가 TTL(≤300s) 동안 통과했다 — 그래서 캐시 히트도
+                # 매핑 키 존재를 함께 확인한다. revoke 가 두 키를 같이 지우므로
+                # 매핑 부재 = 폐기됨.
                 try:
-                    cached_ctx = AuthContext(**json.loads(cached))
-                except Exception:
-                    logger.warning("vk_auth_cache_corrupt", key_hash=key_hash[:16])
-                    cached_ctx = None
-                if cached_ctx is not None:
-                    # VK 폐기 시 admin-api 가 key:vk:{hash} 와 key:cache:vk:{hash} 를
-                    # 함께 DEL 한다. 캐시 DEL 이 일시 Redis 장애로 실패하면 AuthContext
-                    # 가 남아 폐기 키가 TTL(≤300s) 동안 통과했다 — 그래서 캐시 히트도
-                    # 매핑 키 존재를 함께 확인한다. revoke 가 두 키를 같이 지우므로
-                    # 매핑 부재 = 폐기됨.
-                    vk_mapping = await redis.get(f"key:vk:{key_hash}")
-                    if vk_mapping is None:
-                        try:
-                            await redis.delete(f"key:cache:vk:{key_hash}")
-                        except Exception:
-                            logger.warning("vk_cache_cleanup_failed")
-                        raise PermissionError("Invalid or inactive virtual key")
-                    # user.is_active 재확인 — 캐시 TTL(300s) 안에 계정 비활성화된 경우 즉시 차단
-                    if db is not None:
-                        from sqlalchemy import select as sa_select
-                        result = await db.execute(
-                            sa_select(User.is_active).where(User.id == cached_ctx.user_id)
-                        )
-                        is_active = result.scalar_one_or_none()
-                        # `is False` 는 행 없음(None — hard-deleted 유저)을 통과
-                        # 시킨다 — 삭제된 유저가 VK 캐시 TTL(300s) 동안 인증된다.
-                        # None 도 차단한다(R22 r1 N1).
-                        if not is_active:
-                            try:
-                                await redis.delete(f"key:cache:vk:{key_hash}", f"key:vk:{key_hash}")
-                            except Exception:
-                                logger.warning("vk_cache_cleanup_failed")
-                            raise PermissionError("User account is deactivated")
-                    # 캐시 JSON 안의 prefix 값과 무관하게 매 요청 raw token 에서
-                    # 덮어쓴다 — 가변 캐시 데이터가 아니라 인증 입력의 결정적 함수다.
-                    cached_ctx.key_prefix = key_prefix
-                    return cached_ctx
+                    vk_mapping = await _redis_get(f"key:vk:{key_hash}")
+                except (TimeoutError, RedisError, OSError):
+                    stale = _serve_stale("redis_error")
+                    if stale is not None:
+                        return stale
+                    raise
+                if vk_mapping is None:
+                    if caches is not None:
+                        caches.ctx.evict(key_hash)
+                    try:
+                        await redis.delete(f"key:cache:vk:{key_hash}")
+                    except Exception:
+                        logger.warning("vk_cache_cleanup_failed")
+                    raise PermissionError("Invalid or inactive virtual key")
+                # user.is_active 재확인 — 캐시 TTL(300s) 안에 계정 비활성화된 경우 즉시 차단
+                is_active = await self._is_active(cached_ctx.user_id, db, caches)
+                # `is False` 는 행 없음(None — hard-deleted 유저)을 통과
+                # 시킨다 — 삭제된 유저가 VK 캐시 TTL(300s) 동안 인증된다.
+                # None 도 차단한다(R22 r1 N1).
+                if not is_active:
+                    if caches is not None:
+                        caches.ctx.evict(key_hash)
+                    try:
+                        await redis.delete(f"key:cache:vk:{key_hash}", f"key:vk:{key_hash}")
+                    except Exception:
+                        logger.warning("vk_cache_cleanup_failed")
+                    raise PermissionError("User account is deactivated")
+                # 캐시 JSON 안의 prefix 값과 무관하게 매 요청 raw token 에서
+                # 덮어쓴다 — 가변 캐시 데이터가 아니라 인증 입력의 결정적 함수다.
+                cached_ctx.key_prefix = key_prefix
+                if caches is not None:
+                    caches.ctx.put(key_hash, cached_ctx)
+                return cached_ctx
 
         # 2) VK→user_id 매핑 조회 (Admin API가 발급 시 저장). Redis 가 유일한
         #    소스다 — DB 의 auth.virtual_keys 는 암호화된 원문이라 해시로 조회가
         #    안 되고, 무효키 폭주가 DB 를 때리는 것을 막는 의도된 설계(§9).
         user_id = None
-        if redis is not None:
-            raw = await redis.get(f"key:vk:{key_hash}")
-            if raw:
-                user_id = raw if isinstance(raw, str) else raw.decode()
+        try:
+            raw = await _redis_get(f"key:vk:{key_hash}")
+        except (TimeoutError, RedisError, OSError):
+            stale = _serve_stale("redis_error")
+            if stale is not None:
+                return stale
+            raise
+        if raw:
+            user_id = raw if isinstance(raw, str) else raw.decode()
 
         if user_id is None:
-            if redis is None:
-                raise AuthBackendUnavailableError("redis unavailable, VK lookup impossible")
+            if caches is not None:
+                caches.ctx.evict(key_hash)
             raise PermissionError("Invalid or inactive virtual key")
 
-        # 3) 사용자 정보 조회
-        if db is None:
-            raise AuthBackendUnavailableError("DB unavailable, cache miss")
-
-        user_result = await db.execute(select(User).where(User.id == user_id))
-        user = user_result.scalar_one_or_none()
+        # 3) 사용자 정보 + entitlements 조회 (hot-path DB: 짧은 데드라인, fail-to-cache)
+        try:
+            user, allowed_models, allowed_clients = await self._load_user(user_id, db, caches)
+        except HotDbUnavailable as e:
+            stale = _serve_stale("db_unavailable")
+            if stale is not None and str(stale.user_id) == str(user_id):
+                return stale
+            # 처음 보는 키 — 기다리지 않고 명확한 503.
+            raise AuthBackendUnavailableError(
+                f"auth database unavailable and this key is not cached locally ({e})"
+            ) from e
         if user is None or not user.is_active:
+            if caches is not None:
+                caches.ctx.evict(key_hash)
+                caches.active.put(str(user_id), False)
             raise PermissionError("User not found or inactive")
-
-        allowed_models, allowed_clients = await _resolve_entitlements(
-            db, str(user.id), str(user.team_id) if user.team_id else None
-        )
 
         # roles: TEAM_LEADER 만 DB 역할을 실어준다 — /v1/usage/team/{id} 가
         # "TEAM_LEADER(본인 팀) 또는 ADMIN" 계약인데 TEAM_LEADER 는 VK 만 가지므로
@@ -307,20 +406,76 @@ class VKAuthStrategy:
             allowed_clients=allowed_clients,
             sso_subject=user.sso_subject,
         )
+        if caches is not None:
+            caches.active.put(str(user.id), True)
+            caches.ctx.put(key_hash, auth_context)
 
         # 4) AuthContext 캐시 저장 — best-effort: 쓰기 실패는 다음 요청의 캐시
         #    미스일 뿐이라, 인증에 성공한 요청까지 RedisError→503 으로 만들면 안 된다.
-        if redis is not None:
-            try:
-                await redis.setex(
-                    f"key:cache:vk:{key_hash}",
-                    VK_CACHE_TTL,
-                    auth_context.model_dump_json(),
-                )
-            except Exception:
-                logger.warning("vk_auth_cache_write_failed")
+        try:
+            await redis.setex(
+                f"key:cache:vk:{key_hash}",
+                VK_CACHE_TTL,
+                auth_context.model_dump_json(),
+            )
+        except Exception:
+            logger.warning("vk_auth_cache_write_failed")
 
         return auth_context
+
+    @staticmethod
+    async def _is_active(user_id: str, db: AsyncSession | None,
+                         caches: AuthLocalCaches | None) -> bool | None:
+        """is_active — 로컬 캐시(TTL) → hot-path DB(데드라인) → 마지막 값/Redis 캐시 신뢰."""
+        from sqlalchemy import select as sa_select
+
+        if caches is None:
+            # legacy: 요청마다 DB.
+            if db is None:
+                return True
+            result = await db.execute(sa_select(User.is_active).where(User.id == user_id))
+            return result.scalar_one_or_none()
+
+        fresh = caches.active.get_fresh(str(user_id))
+        if fresh is not None:
+            return fresh
+
+        async def _q(session):
+            r = await session.execute(sa_select(User.is_active).where(User.id == user_id))
+            return r.scalar_one_or_none()
+
+        try:
+            val = await run_db(_q, timeout=caches.db_timeout, what="auth.is_active")
+        except HotDbUnavailable:
+            stale = caches.active.get_stale(str(user_id))
+            if stale is not None:
+                return stale
+            # 이 키의 Redis AuthContext 는 ≤VK_CACHE_TTL 전에 DB 검증을 거친 값이다 —
+            # DB 가 느리면 그것을 마지막 정상값으로 신뢰한다(대기보다 낫다).
+            logger.warning("vk_is_active_unverified_db_unavailable", user_id=str(user_id))
+            return True
+        caches.active.put(str(user_id), bool(val) if val is not None else False)
+        return val
+
+    @staticmethod
+    async def _load_user(user_id: str, db: AsyncSession | None,
+                         caches: AuthLocalCaches | None):
+        """(user, allowed_models, allowed_clients) — 캐시 미스 경로."""
+        async def _q(session):
+            user_result = await session.execute(select(User).where(User.id == user_id))
+            user = user_result.scalar_one_or_none()
+            if user is None or not user.is_active:
+                return user, None, None
+            am, ac = await _resolve_entitlements(
+                session, str(user.id), str(user.team_id) if user.team_id else None
+            )
+            return user, am, ac
+
+        if caches is None:
+            if db is None:
+                raise AuthBackendUnavailableError("DB unavailable, cache miss")
+            return await _q(db)
+        return await run_db(_q, timeout=caches.db_timeout, what="auth.load_user")
 
 
 class JWTAuthStrategy:

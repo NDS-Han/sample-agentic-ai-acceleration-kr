@@ -19,6 +19,25 @@ def _reset_rl_breaker():
     rls.reset_breaker_for_test()
 
 
+@pytest.fixture(autouse=True)
+def _reset_hot_path_state():
+    """wave 1 hot-path 싱글톤(DB 브레이커·로컬 캐시)을 테스트마다 초기화 — 한 테스트의
+    DB 장애 시뮬레이션이 열어 둔 브레이커가 다음 테스트의 DB 조회를 건너뛰게 하지 않게."""
+    from app.services import auth_service, hot_path, web_search_quota
+
+    def _reset():
+        hot_path.DB_BREAKER.reset()
+        hot_path.DB_BREAKER._dm = None
+        hot_path._HOT_SESSION_FACTORY = None
+        auth_service.configure_auth_local_caches(None)
+        web_search_quota._LAST_COUNTER.clear()
+        web_search_quota.POLICY_LOADER._cache.clear()
+
+    _reset()
+    yield
+    _reset()
+
+
 @pytest.fixture
 def mock_redis():
     redis = AsyncMock()

@@ -976,8 +976,11 @@ class TestPendingRedisPublish:
             mock_audit.log = AsyncMock()
             await key_service.revoke_key(mock_session, key_id=vk.id, actor=admin_user)
 
-        # 커밋 전에는 아무것도 발행되지 않는다 — 큐에만 있다
-        mock_redis.publish.assert_not_called()
+        # 커밋 전에는 알림 이벤트가 발행되지 않는다 — 큐에만 있다.
+        # (gateway:auth:invalidate 는 캐시 DEL 과 같은 시점의 축출 신호라 제외 — wave 1)
+        assert [c for c in mock_redis.publish.call_args_list
+                if c.args[0] != "gateway:auth:invalidate"] == []
+        mock_redis.publish.reset_mock()
         pending = mock_session.info[PENDING_REDIS_KEY]
         assert len(pending) == 1
         channel, payload_json = pending[0]

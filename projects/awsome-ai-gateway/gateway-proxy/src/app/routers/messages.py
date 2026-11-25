@@ -73,6 +73,9 @@ from app.services.rate_limit_enforcement import strip_internal_body_fields
 
 logger = structlog.get_logger(__name__)
 
+#: Shared so the last known team chain survives a slow DB (wave 1, A5).
+_FALLBACK_CHAIN_LOADER = DowngradePolicyLoader()
+
 router = APIRouter()
 _router_service = RouterService()
 
@@ -552,15 +555,16 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
     _team_id_raw = getattr(auth_context, "team_id", None) if auth_context else None
     if _team_id_raw:
         try:
-            from app.middleware.downgrade import _coerce_uuid
+            from app.middleware.downgrade import _bounded_lookup, _coerce_uuid
 
             _team_uuid = _coerce_uuid(_team_id_raw)
-            _dl = DowngradePolicyLoader()
-            if not is_db_degraded and session_factory is not None:
-                async with session_factory() as _db_chain:
-                    _fb_rules = await _dl.get_active_rules(redis, _db_chain, _team_uuid)
-            else:
-                _fb_rules = await _dl.get_active_rules(redis, None, _team_uuid)
+            _dl = _FALLBACK_CHAIN_LOADER
+            # 데드라인 + 열화 준수(wave 1, A5) — 시간 초과면 아래 except 로 전역 층 폴백.
+            _fb_rules = await _bounded_lookup(
+                None if is_db_degraded else session_factory,
+                lambda db: _dl.get_active_rules(redis, db, _team_uuid),
+                "fallback_chain",
+            )
             # 로더는 threshold 오름차순 — from_alias 당 첫 규칙이 이기게 두면
             # 가장 덜 공격적인 치환(품질 손실 최소)이 가용성 폴백이 된다.
             for _r in _fb_rules:

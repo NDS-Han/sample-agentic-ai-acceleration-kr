@@ -50,7 +50,8 @@ _SRC = Path(__file__).resolve().parents[2] / "src" / "app"
 class _FakeRequest:
     def __init__(self, level: DegradationLevel):
         dm = SimpleNamespace(level=level)
-        self.app = SimpleNamespace(state=SimpleNamespace(degradation_manager=dm, db_engine=None))
+        self.app = SimpleNamespace(state=SimpleNamespace(
+            degradation_manager=dm, db_engine=None, started=True, shutting_down=False))
         self.scope = {"state": {"_degradation_manager": dm}}
 
 
@@ -85,14 +86,16 @@ async def test_redis_degradation_is_still_reported_in_the_body():
 @pytest.mark.parametrize(
     "level", [DegradationLevel.DB_DEGRADED, DegradationLevel.BOTH_DEGRADED]
 )
-async def test_db_degradation_still_takes_the_pod_out(level: DegradationLevel):
-    """⚠️ 대조군이자 요구사항. DB 가 없으면 폴백 자체가 성립하지 않는다.
+async def test_db_degradation_no_longer_takes_the_pod_out(level: DegradationLevel):
+    """wave 1 (A1): DB 열화도 Redis 와 같은 **플릿 공통** 상태다 — 공유 Aurora 가 느려지면
+    (예: 관리자 분석 부하) 전 파드가 동시에 NotReady 가 되어 ALB 타깃이 비었다.
 
-    이 단정이 없으면 "readiness 를 항상 200 으로" 만들어도 위 테스트가 통과한다.
+    이제 프록시는 로컬 캐시(인증·강등·웹검색 정책)로 버티고, 진짜로 답할 수 없는 요청만
+    명확한 503 으로 실패시킨다. readiness 는 프로세스 로컬 신호만 본다.
     """
     status, body = await _ready(level)
-    assert status == 503, f"{level.value} 인데 파드가 rotation 에 남는다"
-    assert body["status"] == "not_ready"
+    assert status == 200, f"{level.value} 로 파드가 빠진다(전 파드 동시)"
+    assert body["status"] == "ready" and body["db_degraded"] is True
 
 
 async def test_healthy_is_ready():
@@ -100,17 +103,13 @@ async def test_healthy_is_ready():
     assert status == 200 and body["redis_degraded"] is False
 
 
-def test_the_readiness_predicate_names_the_db_levels_explicitly():
-    """게이트가 "HEALTHY 인가" 로 되돌아가면 다시 전 파드가 빠진다.
-
-    허용 레벨의 여집합이 아니라 **차단 레벨을 명시**하는 형태여야, 나중에 레벨이 추가될 때
-    (예: 새 종속성) 기본이 "서빙 계속" 이 된다.
-    """
+def test_the_readiness_predicate_is_process_local():
+    """게이트가 공유 의존성(DB/Redis/풀)을 다시 보기 시작하면 전 파드가 함께 빠진다."""
     src = (_SRC / "routers" / "health.py").read_text(encoding="utf-8")
-    assert "_NOT_READY_LEVELS" in src, "차단 레벨을 명시하는 상수가 없다"
-    assert "level == DegradationLevel.HEALTHY and not pool_saturated" not in src, (
-        "판정이 'HEALTHY 인가' 로 되돌아갔다 — Redis 단독 장애가 전 파드를 뺀다"
-    )
+    assert "ready = started and not shutting_down" in src
+    assert "_NOT_READY_LEVELS" not in src, "열화 레벨로 readiness 를 다시 판정한다"
+
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
