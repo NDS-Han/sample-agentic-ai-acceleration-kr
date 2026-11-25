@@ -305,6 +305,27 @@ def desired_values(cfg: GatewayConfig) -> dict:
     if rd.get("pool_size"):
         v.setdefault("redis", {})["poolSize"] = int(rd["pool_size"])
 
+    # 서비스별 DB pool 상한 — sizing snake 키를 차트 db: 확장점(camel)으로.
+    # gen 레이어가 env overlay 보다 뒤에 적용돼 선언 시 항상 이기고, 미선언
+    # 서비스는 키를 만들지 않아 공통 ConfigMap 동작을 그대로 승계한다.
+    _DB_HELM_SVC = {
+        "gateway-proxy": "gatewayProxy", "admin-api": "adminApi",
+        "scheduler": "scheduler", "notification-worker": "notificationWorker",
+        "cost-recorder-worker": "costRecorderWorker",
+    }
+    _DB_KEY_MAP = {
+        "db_pool_size": "poolSize", "db_max_overflow": "maxOverflow",
+        "db_pool_timeout": "poolTimeout", "db_pool_recycle": "poolRecycle",
+    }
+    for _svc, _ov in sz.items():
+        _hk = _DB_HELM_SVC.get(_svc)
+        if not _hk or not isinstance(_ov, dict):
+            continue
+        _db = {ck: int(_ov[sk]) for sk, ck in _DB_KEY_MAP.items()
+               if _ov.get(sk) is not None}
+        if _db:
+            v.setdefault(_hk, {})["db"] = _db
+
     if cfg.features.alerting.log_shipping:
         # Fargate 로그 라우터 — 클러스터명 추론은 env 디렉토리명
         # (module eks-fargate 가 <project>-<env> 로 짓고 env 디렉토리도 같은

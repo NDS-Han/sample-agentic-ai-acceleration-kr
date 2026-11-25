@@ -286,6 +286,36 @@ def test_eks_sizing_absent_emits_nothing(tmp_path):
     assert "autoscaling" not in v.get("gatewayProxy", {})
     assert "redis" not in v
     assert "BEDROCK_THREAD_POOL_SIZE" not in v["gatewayProxy"]["env"]
+    for svc in ("gatewayProxy", "adminApi", "scheduler",
+                "notificationWorker", "costRecorderWorker"):
+        assert "db" not in v.get(svc, {})
+
+
+def test_eks_sizing_db_pool_renders_chart_db_block(tmp_path):
+    """deploy.sizing 의 db_* 키(snake)가 차트 db: 확장점(camel)으로 렌더 —
+    서비스별 SQLAlchemy pool 상한을 gateway.yaml 이 소유한다. 미선언 키는
+    차트 공통 ConfigMap 값을 승계하도록 만들지 않는다."""
+    doc = dict(BASE, deploy={**BASE["deploy"], "sizing": {
+        "gateway-proxy": {"db_pool_size": 5, "db_max_overflow": 5,
+                          "db_pool_recycle": 1500},
+        "notification-worker": {"db_pool_size": 2, "db_max_overflow": 3,
+                                "db_pool_recycle": 1500},
+        "scheduler": {"db_pool_size": 2, "db_max_overflow": 3,
+                      "db_pool_recycle": 1500},
+    }})
+    _, out, _ = _render(tmp_path, doc)
+    v = yaml.safe_load((out / "values.yaml").read_text())
+    assert v["gatewayProxy"]["db"] == {
+        "poolSize": 5, "maxOverflow": 5, "poolRecycle": 1500}
+    assert v["notificationWorker"]["db"] == {
+        "poolSize": 2, "maxOverflow": 3, "poolRecycle": 1500}
+    assert v["scheduler"]["db"] == {
+        "poolSize": 2, "maxOverflow": 3, "poolRecycle": 1500}
+    # 미선언 서비스는 db 블록 자체가 없어야 env overlay/ConfigMap 승계
+    assert "db" not in v.get("adminApi", {})
+    assert "db" not in v.get("costRecorderWorker", {})
+    # poolTimeout 미선언 → 키 자체를 만들지 않는다
+    assert "poolTimeout" not in v["gatewayProxy"]["db"]
 
 
 def test_eks_capacity_tier_expands_preset(tmp_path):

@@ -204,6 +204,14 @@ deploy:
       min_replicas: 4          # → gatewayProxy.autoscaling.minReplicas
       max_replicas: 10         # → gatewayProxy.autoscaling.maxReplicas
       bedrock_thread_pool_size: 192   # → gatewayProxy.env.BEDROCK_THREAD_POOL_SIZE
+      db_pool_size: 5          # → gatewayProxy.db.poolSize (프로세스당)
+      db_max_overflow: 5       # → gatewayProxy.db.maxOverflow
+      db_pool_recycle: 1500    # → gatewayProxy.db.poolRecycle (RDS Proxy idle 1800s 하회 권장)
+      # db_pool_timeout        # → gatewayProxy.db.poolTimeout (미선언 시 공통 ConfigMap 10s)
+    admin-api:                 # db_* 키 지원 서비스: gateway-proxy, admin-api,
+      db_pool_size: 5          #   cost-recorder-worker, notification-worker, scheduler
+      db_max_overflow: 5
+    scheduler: { db_pool_size: 2, db_max_overflow: 3 }
     redis:
       pool_size: 200           # → redis.poolSize (워커 프로세스당)
 ```
