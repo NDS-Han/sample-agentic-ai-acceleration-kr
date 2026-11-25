@@ -44,6 +44,13 @@ def _spawn(coro) -> asyncio.Task:
     t = asyncio.create_task(coro)
     _PENDING_TASKS.add(t)
     t.add_done_callback(_PENDING_TASKS.discard)
+    # 요청 수명 원장(wave 3b): 요청 뒤까지 사는 태스크(disconnect 드레인 등)가 끝날 때까지 그 요청을
+    # "진행 중"으로 붙잡는다 — 드레인의 finalize 가 end 를 보내기 전에 close 가 나가지 않게.
+    from app.services import cost_ledger
+
+    release = cost_ledger.hold()
+    if release is not None:
+        t.add_done_callback(release)
     return t
 
 

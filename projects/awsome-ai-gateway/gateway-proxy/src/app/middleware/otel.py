@@ -35,6 +35,13 @@ class OTelMiddleware:
 
         log = logger.bind(request_id=request_id, path=path)
 
+        # 요청 수명 원장(wave 3b) — admission 의 start 와 짝이 되는 close(행 없이 끝난 요청)를 이
+        # 경계에서
+        # 판정한다. 요청 뒤까지 사는 드레인 태스크는 streaming._spawn 이 붙잡는다.
+        from app.services import cost_ledger
+
+        ledger_token = cost_ledger.bind(request_id, path)
+
         # Get metrics from app.state (set during lifespan)
         _app_state = getattr(scope.get("app", None), "state", None)
         _metrics = getattr(_app_state, "metrics", None) if _app_state else None
@@ -58,6 +65,7 @@ class OTelMiddleware:
                 _metrics.error_total.add(1, {"path": path, "error_type": "unhandled"})
             raise
         finally:
+            cost_ledger.request_done(ledger_token)
             duration = time.monotonic() - start_time
             if _metrics:
                 _metrics.active_connections.add(-1)

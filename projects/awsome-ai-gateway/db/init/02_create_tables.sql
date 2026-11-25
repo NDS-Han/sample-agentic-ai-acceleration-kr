@@ -1441,6 +1441,39 @@ CREATE TABLE IF NOT EXISTS usage.reconciliation_runs (
 CREATE INDEX IF NOT EXISTS idx_reconciliation_runs_started
     ON usage.reconciliation_runs (started_at DESC);
 
+-- migration 0063: 요청 시작 원장(B2). 게이트웨이 admission 의 'start' 이벤트를 워커가 적고, 완료 이벤트가
+-- 오면 지운다. 완료 없이 게이트웨이 프로세스 생존 신호가 끊긴 시작은 sweeper 가 추정 행
+-- (estimated_usage=true)을 한 번 쓴다(swept_at/swept_charge_usd — 늦은 실제 완료는 그 행을 교체).
+-- closed_at = 행 없이 끝난 요청의 표지(순서가 뒤바뀐 start 가 다시 열지 못하게, 보존 후 정리).
+CREATE TABLE IF NOT EXISTS usage.request_starts (
+    request_id        VARCHAR(128)  PRIMARY KEY,
+    instance_id       VARCHAR(200)  NOT NULL DEFAULT '',
+    started_at        TIMESTAMPTZ   NOT NULL,
+    received_at       TIMESTAMPTZ   NOT NULL DEFAULT now(),
+    payload           TEXT          NOT NULL,
+    closed_at         TIMESTAMPTZ,
+    swept_at          TIMESTAMPTZ,
+    swept_charge_usd  NUMERIC(16,6)
+);
+CREATE INDEX IF NOT EXISTS idx_request_starts_open
+    ON usage.request_starts (started_at) WHERE closed_at IS NULL AND swept_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_request_starts_closed
+    ON usage.request_starts (closed_at) WHERE closed_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_request_starts_swept
+    ON usage.request_starts (swept_at) WHERE swept_at IS NOT NULL;
+
+-- migration 0063: cost:stream XADD 실패 시 비용 이벤트 DB 폴백(B3). 워커가 스트림과 같은 경로로 소화하고
+-- 지운다(usage_logs request_id UNIQUE + 재처리 필터 — 양쪽에 같은 이벤트가 있어도 한 행).
+CREATE TABLE IF NOT EXISTS usage.cost_pending_events (
+    id          BIGSERIAL     PRIMARY KEY,
+    request_id  VARCHAR(128),
+    kind        VARCHAR(8)    NOT NULL,
+    payload     TEXT          NOT NULL,
+    created_at  TIMESTAMPTZ   NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_cost_pending_events_request
+    ON usage.cost_pending_events (request_id);
+
 -- migration 0045: (dept_id,name)/(org_id,name) 유니크 — check-then-act 경합으로
 -- 중복 행이 생기면 get_team_by_dept_and_name LIMIT 1 이 비결정이 된다.
 -- ⚠️ 중복이 이미 있는 설치본에서 여기서 unique_violation 으로 죽으면 alembic

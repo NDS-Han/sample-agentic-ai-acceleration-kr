@@ -28,11 +28,13 @@ from worker.config import get_settings
 from worker.daily_aggregator import run_daily_aggregation, run_hourly_rollup, run_startup_backfill
 from worker.db import create_aggregator_engine, create_db_engine, create_session_factory
 from worker.observability import WorkerMetrics, init_otel, shutdown_otel
+from worker.pending_events import run_pending_drain
 from worker.reconciliation import LAST as RECON_LAST
 from worker.reconciliation import run_reconciliation
 from worker.redis_client import create_redis_client
 from worker.repricer import run_reprice
 from worker.stream_consumer import StreamConsumer
+from worker.sweeper import run_sweep
 from worker.web_search_pricing import WebSearchPricing
 from worker.worker import TaskSupervisor
 
@@ -165,6 +167,20 @@ async def main() -> None:
                                      timezone=settings.reporting_timezone),
             id="cost_reconciliation", args=[agg_session_factory, redis, metrics],
             replace_existing=True, misfire_grace_time=3600, max_instances=1, coalesce=True,
+        )
+    # wave 3b — 게이트웨이 DB 폴백(usage.cost_pending_events) 소화(B3)와 요청 시작 sweeper(B2).
+    # 둘 다 flusher 의 같은 기록 경로를 쓴다. 다중 replica 안전(FOR UPDATE SKIP LOCKED).
+    if settings.pending_events_interval_sec > 0:
+        scheduler.add_job(
+            run_pending_drain, "interval", seconds=settings.pending_events_interval_sec,
+            id="cost_pending_events_drain", args=[session_factory, flusher, metrics],
+            replace_existing=True, max_instances=1, coalesce=True,
+        )
+    if settings.request_sweep_interval_sec > 0:
+        scheduler.add_job(
+            run_sweep, "interval", seconds=settings.request_sweep_interval_sec,
+            id="request_start_sweeper", args=[session_factory, redis, flusher, metrics],
+            replace_existing=True, max_instances=1, coalesce=True,
         )
     scheduler.start()
     # Backfill은 비차단으로 이벤트 루프에 스케줄 — startup 블로킹 금지.

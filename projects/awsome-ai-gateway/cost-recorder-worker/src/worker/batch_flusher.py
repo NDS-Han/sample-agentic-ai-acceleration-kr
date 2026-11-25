@@ -28,7 +28,7 @@ from sqlalchemy.exc import DataError, DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from worker.config import get_settings
-from worker.schemas.cost_stream import CostStreamEntry
+from worker.schemas.cost_stream import CostStreamEntry, RequestCloseEvent, RequestStartEvent
 from worker.web_search_pricing import DEFAULT_PRICE_PER_1K, WebSearchPricing, web_search_cost
 
 logger = structlog.get_logger(__name__)
@@ -398,6 +398,99 @@ async def _filter_replays(
     return [e for e in entries if e.request_id not in existing]
 
 
+# ── 요청 시작 원장(wave 3b, B2) — usage.request_starts ────────────────────────────────────
+#: start 기록. 같은 request_id 의 비용 행이 이미 있으면(완료가 먼저 도착) 적지 않는다. 열린 시작은
+#: 마지막
+#: start 로 덮는다(폴백 루프가 후보마다 admission → sweeper 는 현재 후보의 예약을 정산해야 한다).
+#: 닫혔거나(close) 이미 추정 행을 쓴(swept) 시작은 건드리지 않는다.
+_UPSERT_START = text(
+    """
+    INSERT INTO usage.request_starts (request_id, instance_id, started_at, payload)
+    SELECT CAST(:request_id AS varchar), CAST(:instance_id AS varchar),
+           CAST(:started_at AS timestamptz), CAST(:payload AS text)
+    WHERE NOT EXISTS (
+        SELECT 1 FROM usage.usage_logs WHERE request_id = CAST(:request_id AS varchar))
+    ON CONFLICT (request_id) DO UPDATE
+       SET payload = EXCLUDED.payload, instance_id = EXCLUDED.instance_id
+     WHERE usage.request_starts.closed_at IS NULL AND usage.request_starts.swept_at IS NULL
+    """
+)
+
+#: close — 열린 시작을 닫는다. 시작이 아직 없으면 닫힌 표지를 남긴다(순서가 뒤바뀌어 늦게 온 start
+#: 가
+#: 다시 열지 못하게 — 보존 기간 뒤 sweeper 가 정리). RETURNING 의 swept_at 이 있으면 그 요청에 이미
+#: 추정 행을 썼다는 뜻이다 → 되돌린다(행 없이 끝난 요청).
+_CLOSE_START = text(
+    """
+    INSERT INTO usage.request_starts (request_id, instance_id, started_at, payload, closed_at)
+    VALUES (CAST(:request_id AS varchar), CAST(:instance_id AS varchar), now(), '{}', now())
+    ON CONFLICT (request_id) DO UPDATE SET closed_at = now()
+     WHERE usage.request_starts.closed_at IS NULL
+    RETURNING request_id, swept_at, swept_charge_usd, payload
+    """
+)
+
+#: 완료 배치의 시작 행 잠금 — sweeper(FOR UPDATE SKIP LOCKED)가 같은 요청을 동시에 쓸어 담지 못하게
+#: 하고,
+#: 이미 쓸어 담은(swept) 시작이면 그 추정 행을 실제 값으로 교체한다. 정렬은 교착 방지.
+_LOCK_STARTS = text(
+    """
+    SELECT request_id, swept_at, swept_charge_usd
+    FROM usage.request_starts
+    WHERE request_id = ANY(CAST(:ids AS varchar[]))
+    ORDER BY request_id
+    FOR UPDATE
+    """
+)
+
+_DELETE_STARTS = text(
+    "DELETE FROM usage.request_starts WHERE request_id = ANY(CAST(:ids AS varchar[]))"
+)
+
+#: sweeper 의 추정 행을 늦게 온 실제 완료로 교체한다(estimated 인 행만 — 한 번만).
+_REPLACE_SWEPT = text(
+    """
+    UPDATE usage.usage_logs SET
+        model_alias = :model_alias, provider = :provider,
+        input_tokens = :input_tokens, output_tokens = :output_tokens,
+        cache_creation_tokens = :cache_creation_tokens, cache_read_tokens = :cache_read_tokens,
+        reasoning_tokens = :reasoning_tokens, web_search_count = :web_search_count,
+        web_search_cost_usd = :web_search_cost_usd, cost_usd = :cost_usd,
+        latency_ms = :latency_ms, ttft_ms = :ttft_ms,
+        status = CAST(:status AS usage.usage_status),
+        completed_at = CAST(:completed_at AS timestamptz),
+        is_streaming = :is_streaming, estimated_usage = :estimated_usage,
+        downgraded_from = :downgraded_from, availability_fallback_from =
+        :availability_fallback_from,
+        bedrock_request_id = :bedrock_request_id, context_tier = :context_tier,
+        session_id = COALESCE(:session_id, session_id), pricing_missing = :pricing_missing
+    WHERE request_id = :request_id AND estimated_usage
+    RETURNING request_id
+    """
+)
+
+#: 행 없이 끝난 요청의 추정 행 삭제(close 가 sweep 뒤에 도착).
+_DELETE_SWEPT_ROW = text(
+    "DELETE FROM usage.usage_logs WHERE request_id = :request_id AND estimated_usage "
+    "RETURNING requested_at"
+)
+
+
+class _Mark:
+    """_late_marks 가 읽는 최소 형태(requested_at ISO)."""
+
+    def __init__(self, ts: datetime) -> None:
+        self.requested_at = ts.isoformat()
+
+
+def _split(items: list) -> tuple[list[CostStreamEntry], list[RequestStartEvent],
+                                  list[RequestCloseEvent]]:
+    ends = [e for e in items if isinstance(e, CostStreamEntry)]
+    starts = [e for e in items if isinstance(e, RequestStartEvent)]
+    closes = [e for e in items if isinstance(e, RequestCloseEvent)]
+    return ends, starts, closes
+
+
 class BatchFlusher:
     """Redis Stream에서 가져온 entries를 DB/Redis에 반영."""
 
@@ -520,6 +613,14 @@ class BatchFlusher:
         if not entries:
             return
 
+        # 요청 수명 이벤트(start/close, wave 3b)는 완료 행과 별도 트랜잭션으로 먼저 반영한다 — 둘 다
+        # 멱등이라 뒤의 완료 트랜잭션이 실패해 배치가 재전달돼도 안전하다.
+        entries, starts, closes = _split(entries)
+        if starts or closes:
+            await self.apply_lifecycle(starts, closes, end_ids={e.request_id for e in entries})
+        if not entries:
+            return
+
         # 배치 안 중복을 먼저 접는다 — 크래시 없이도 spool 재발행으로 생긴다.
         entries = _dedup_in_batch(entries)
         # VK 행의 dept_id 를 팀에서 해석한다(B5) — 트랜잭션 밖(별도 세션).
@@ -538,33 +639,14 @@ class BatchFlusher:
         # 1. DB 쓰기 — 단일 트랜잭션. FK 위반 시 per-row fallback.
         try:
             async with self._session_factory() as session:
-                # ⚠️ budget_usages 는 **가산** UPSERT 다. 재처리된 entry 를 걸러내지 않으면
-                #    사용자의 기록 사용액이 영구히 두 배가 된다(_filter_replays 주석 참조).
-                fresh = await _filter_replays(session, entries)
-                filtered = len(entries) - len(fresh)
-                if filtered and self._metrics:
-                    # replay 스톰(dup XADD·이중 배달 버그)은 로그 한 줄로만 보이던
-                    # 영역 — 카운터로 올려 대시보드에서 감지 가능하게 한다.
-                    self._metrics.replays_filtered.add(filtered)
-                if not fresh:
-                    # 전량 replay — usage_logs 는 이미 커밋됐다. 여기서 조기 반환하면
-                    # 전 트랜잭션 커밋 후 카운터/알림 단계에서 죽었던 배치의 daily
-                    # 카운터와 threshold 알림이 영구 생략된다. 그 파생효과들은
-                    # 비멱등(INCRBY·Pub/Sub)이라 replay 구분이 불가해 재시도할 수
-                    # 없다 — 문서화된 설계 한계(알림 유실 허용)이며, 카운터는
-                    # daily_aggregates 가 다음날 정정한다.
-                    logger.info("batch_all_replays_skipped", batch_size=len(entries))
-                    await session.commit()
-                    return
-                inserted_ids = await self._insert_usage_logs(session, fresh, ws_price)
-                # ⚠️ 가산 UPSERT 는 INSERT 가 **실제로 성공한** 행만 — SELECT-then-INSERT
-                #    창에서 다른 소비자가 먼저 같은 request_id 를 커밋했으면 우리 INSERT 는
-                #    no-op(RETURNING 없음)인데, 그 행까지 더하면 이중청구다.
-                written = [e for e in fresh if e.request_id in inserted_ids]
-                await self._upsert_budget_usages(session, written, ws_price)
-                await self._mark_late_days_dirty(session, written)
+                recorded = await self._write_ends(session, entries, ws_price)
                 await session.commit()
-                recorded = written
+                if not recorded:
+                    # 전량 replay — usage_logs 는 이미 커밋됐다. 그 배치의 daily 카운터와
+                    # threshold 알림(비멱등 INCRBY·Pub/Sub)은 재시도할 수 없다 — 문서화된 설계
+                    # 한계(알림 유실 허용)이며, 카운터는 daily_aggregates 가 다음날 정정한다.
+                    logger.info("batch_all_replays_skipped", batch_size=len(entries))
+                    return
         except Exception as ie:
             if not _is_permanent_flush_error(ie):
                 raise
@@ -623,17 +705,12 @@ class BatchFlusher:
         for e in entries:
             try:
                 async with self._session_factory() as session:
-                    # ⚠️ 배치 경로와 **같은** 방어가 필요하다. 여기만 빼면 IntegrityError
-                    #    한 번으로 폴백 경로로 넘어간 배치가 계속 이중청구한다.
-                    if not await _filter_replays(session, [e]):
-                        await session.commit()
-                        continue
-                    inserted_ids = await self._insert_usage_logs(session, [e], ws_price)
-                    if e.request_id in inserted_ids:
-                        await self._upsert_budget_usages(session, [e], ws_price)
-                        await self._mark_late_days_dirty(session, [e])
-                        written.append(e)
+                    # ⚠️ 배치 경로와 **같은** 방어(재처리 필터·시작 원장·추정 행 교체)가 필요하다.
+                    #    여기만 빼면 IntegrityError 한 번으로 폴백 경로로 넘어간 배치가
+                    # 이중청구한다.
+                    done = await self._write_ends(session, [e], ws_price)
                     await session.commit()
+                    written.extend(done)
             except Exception as ie:
                 if not _is_permanent_flush_error(ie):
                     raise
@@ -690,23 +767,20 @@ class BatchFlusher:
         """
         written = 0
         dead_lettered = 0
+        entries, starts, closes = _split(entries)
+        if starts or closes:
+            # 수명 이벤트는 영구 오류가 날 열이 없다(문자열·시각) — 실패는 전파(PEL 보존).
+            await self.apply_lifecycle(starts, closes, end_ids={e.request_id for e in entries})
         ws_price = await self._web_search_price()
         for e in entries:
             try:
                 async with self._session_factory() as session:
                     # 배치 경로와 같은 재처리 방어 — 부분 커밋된 행의 이중청구 방지.
-                    if not await _filter_replays(session, [e]):
-                        await session.commit()
-                        continue
-                    inserted_ids = await self._insert_usage_logs(session, [e], ws_price)
-                    inserted = e.request_id in inserted_ids
-                    if inserted:
-                        await self._upsert_budget_usages(session, [e], ws_price)
-                        await self._mark_late_days_dirty(session, [e])
+                    done = await self._write_ends(session, [e], ws_price)
                     await session.commit()
                     # 실제로 커밋된 행만 written 에 센다 — commit 실패(영구
                     # 오류)면 dead_lettered 로 가므로 둘 다 세면 안 된다.
-                    if inserted:
+                    if done:
                         written += 1
             except Exception as exc:
                 if not _is_permanent_flush_error(exc):
@@ -725,6 +799,149 @@ class BatchFlusher:
             # 과소청구 유실이 된다.
         return written, dead_lettered
 
+    async def _write_ends(
+        self, session: AsyncSession, entries: list[CostStreamEntry], ws_price: Decimal
+    ) -> list[CostStreamEntry]:
+        """완료 행 기록의 단일 경로(배치·per-row·dead-letter 공용). 호출자가 commit 한다.
+
+        1. 같은 request_id 의 시작 행을 잠근다(_LOCK_STARTS) — sweeper 와 직렬화. 잠근 **뒤에**
+           재처리 필터를 돌려야 방금 커밋된 sweeper 의 추정 행이 보인다(READ COMMITTED 문장 스냅샷).
+        2. 새 행 INSERT(RETURNING 기준 budget 가산) — 예전과 같다.
+        3. 이미 sweeper 가 추정 행을 쓴 요청이면 그 행을 실제 값으로 교체하고 예산 원장에는 차액만
+           더한다(행은 하나 그대로 — 중복 없음).
+        4. 시작 행 삭제 — 이 요청은 끝났다.
+        반환 = 이번에 기록(삽입 또는 교체)된 entry — daily 카운터·임계 알림 대상.
+        """
+        ids = sorted({e.request_id for e in entries})
+        swept: dict[str, Decimal] = {}
+        for r in (await session.execute(_LOCK_STARTS, {"ids": ids})).all():
+            if r.swept_at is not None:
+                swept[r.request_id] = Decimal(str(r.swept_charge_usd or 0))
+        # ⚠️ budget_usages 는 **가산** UPSERT 다. 재처리된 entry 를 걸러내지 않으면
+        #    사용자의 기록 사용액이 영구히 두 배가 된다(_filter_replays 주석 참조).
+        fresh = await _filter_replays(session, entries)
+        filtered = len(entries) - len(fresh)
+        fresh_ids = {e.request_id for e in fresh}
+        inserted_ids = await self._insert_usage_logs(session, fresh, ws_price) if fresh else set()
+        # ⚠️ 가산 UPSERT 는 INSERT 가 **실제로 성공한** 행만 — SELECT-then-INSERT
+        #    창에서 다른 소비자가 먼저 같은 request_id 를 커밋했으면 우리 INSERT 는
+        #    no-op(RETURNING 없음)인데, 그 행까지 더하면 이중청구다.
+        written = [e for e in fresh if e.request_id in inserted_ids]
+        await self._upsert_budget_usages(session, written, ws_price)
+        replaced: list[CostStreamEntry] = []
+        for e in entries:
+            if e.request_id in swept and e.request_id not in fresh_ids:
+                if await self._replace_swept(session, e, swept.pop(e.request_id), ws_price):
+                    replaced.append(e)
+        if replaced:
+            filtered -= len(replaced)
+            logger.warning("swept_rows_replaced_by_real_usage", count=len(replaced))
+            if self._metrics is not None and hasattr(self._metrics, "request_sweeps"):
+                self._metrics.request_sweeps.add(len(replaced), {"outcome": "replaced"})
+        if filtered > 0 and self._metrics:
+            # replay 스톰(dup XADD·이중 배달 버그)은 로그 한 줄로만 보이던
+            # 영역 — 카운터로 올려 대시보드에서 감지 가능하게 한다.
+            self._metrics.replays_filtered.add(filtered)
+        await self._mark_late_days_dirty(session, written + replaced)
+        await session.execute(_DELETE_STARTS, {"ids": ids})
+        return written + replaced
+
+    async def _replace_swept(self, session: AsyncSession, e: CostStreamEntry,
+                             swept_charge: Decimal, ws_price: Decimal) -> bool:
+        """sweeper 추정 행 → 실제 완료 값. 예산 원장 차액 = 실제 청구액 − 추정 청구액."""
+        params = self._row_params(e, ws_price)
+        row = (await session.execute(_REPLACE_SWEPT, params)).scalar_one_or_none()
+        if row is None:
+            return False
+        real = charged_of(e, ws_price) if _has_metered_usage(e) else Decimal("0")
+        await self._add_budget_delta(session, user_id=e.user_id, team_id=e.team_id,
+                                     teamless=e.teamless, client=e.client, period=e.period,
+                                     delta=real - swept_charge)
+        return True
+
+    async def _add_budget_delta(self, session: AsyncSession, *, user_id: str, team_id: str,
+                                teamless: bool, client: str | None, period: str,
+                                delta: Decimal) -> None:
+        """budget_usages 에 (음수 포함) 차액을 더한다.
+
+        스코프 규칙은 _upsert_budget_usages 와 같다(USER 총합, 팀 있으면 TEAM, 앱별 행).
+        """
+        if not delta:
+            return
+        params = [{"scope": "USER", "scope_id": user_id, "period": period, "cost": str(delta),
+                   "client": None}]
+        if not teamless:
+            params.append({"scope": "TEAM", "scope_id": team_id, "period": period,
+                           "cost": str(delta), "client": None})
+        if client in _PER_APP_CLIENTS:
+            params.append({"scope": "USER", "scope_id": user_id, "period": period,
+                           "cost": str(delta), "client": client})
+        await session.execute(_UPSERT_BUDGET_USAGE, params)
+
+    async def apply_lifecycle(self, starts: list[RequestStartEvent],
+                              closes: list[RequestCloseEvent], *, end_ids: set[str]) -> None:
+        """start/close 를 usage.request_starts 에 반영한다(한 트랜잭션, 멱등).
+
+        * 같은 배치에 완료(end)나 close 가 있는 start 는 적지 않는다 — 짧은 요청은 대부분 같은
+        배치에서
+          상쇄된다(행을 만들었다 지우는 쓰기 없음).
+        * close 가 이미 추정 행을 쓴(swept) 시작을 닫으면, 그 요청은 비용 행 없이 끝난 것이다 — 추정
+          행을 지우고 예산 원장에서 추정 청구액을 뺀다.
+        """
+        close_ids = {c.request_id for c in closes}
+        latest: dict[str, RequestStartEvent] = {}
+        for st in starts:
+            if st.request_id in end_ids or st.request_id in close_ids:
+                continue
+            latest[st.request_id] = st  # 마지막 start(현재 후보)가 이긴다
+        start_params = []
+        for st in latest.values():
+            try:
+                started_at = datetime.fromisoformat(st.requested_at)
+            except (TypeError, ValueError):
+                logger.warning("request_start_bad_time", request_id=st.request_id)
+                continue
+            start_params.append({
+                "request_id": st.request_id[:128], "instance_id": (st.instance_id or "")[:200],
+                "started_at": started_at,
+                "payload": (st._raw or st.model_dump_json()).replace("\x00", ""),
+            })
+        undone = 0
+        async with self._session_factory() as session:
+            if start_params:
+                await session.execute(_UPSERT_START, start_params)
+            for c in {c.request_id: c for c in closes}.values():
+                r = (await session.execute(_CLOSE_START, {
+                    "request_id": c.request_id[:128],
+                    "instance_id": (c.instance_id or "")[:200]})).first()
+                if r is None or r.swept_at is None:
+                    continue
+                if await self._undo_swept(session, c.request_id, r.payload,
+                                          Decimal(str(r.swept_charge_usd or 0))):
+                    undone += 1
+            await session.commit()
+        if undone:
+            logger.warning("swept_rows_undone_by_close", count=undone)
+            if self._metrics is not None and hasattr(self._metrics, "request_sweeps"):
+                self._metrics.request_sweeps.add(undone, {"outcome": "undone"})
+
+    async def _undo_swept(self, session: AsyncSession, request_id: str, payload: str,
+                          swept_charge: Decimal) -> bool:
+        try:
+            st = RequestStartEvent.model_validate_json(payload)
+        except Exception:
+            logger.warning("swept_start_payload_unreadable", request_id=request_id)
+            return False
+        ts = (await session.execute(
+            _DELETE_SWEPT_ROW, {"request_id": request_id})).scalar_one_or_none()
+        if ts is None:
+            return False
+        await self._add_budget_delta(session, user_id=st.user_id, team_id=st.team_id,
+                                     teamless=st.teamless, client=st.client, period=st.period,
+                                     delta=-swept_charge)
+        await self._mark_late_days_dirty(session, [_Mark(ts)])
+        return True
+
     async def _insert_usage_logs(
         self,
         session: AsyncSession,
@@ -740,50 +957,55 @@ class BatchFlusher:
         """
         inserted: set[str] = set()
         for e in entries:
-            params = {
-                "request_id": e.request_id,
-                "user_id": e.user_id,
-                "team_id": e.team_id,
-                "dept_id": e.dept_id,
-                "model_alias": e.model_alias,
-                "provider": e.provider,
-                "input_tokens": e.input_tokens,
-                "output_tokens": e.output_tokens,
-                "cache_creation_tokens": e.cache_creation_tokens,
-                "cache_read_tokens": e.cache_read_tokens,
-                "reasoning_tokens": e.reasoning_tokens,
-                "web_search_count": e.web_search_count,
-                # 웹 검색 비용 — 청구 총액의 일부(budget_usages 에도 같은 값, DECISION 2).
-                # 0 = 추적 중·검색 없음(NULL 은 이 기능 이전 행에만 남는다).
-                "web_search_cost_usd": str(ws_cost_of(e, ws_price)),
-                "pricing_missing": bool(e.pricing_missing),
-                "cost_usd": str(e.cost_usd),
-                "latency_ms": e.latency_ms,
-                "ttft_ms": e.ttft_ms,
-                # SUCCESS 하드코딩이던 것을 엔트리의 종결 상태로 — 워커 도입 이후
-                # monitoring ERROR/TIMEOUT 집계가 영구 0%였던 회귀의 핵심 수정(E2E S5).
-                "status": _usage_status(e),
-                # asyncpg requires datetime instances for timestamptz bindings,
-                # not ISO strings — parse here rather than letting CAST handle it.
-                "requested_at": datetime.fromisoformat(e.requested_at),
-                "completed_at": datetime.fromisoformat(e.completed_at),
-                "is_streaming": e.is_streaming,
-                "estimated_usage": e.estimated_usage,
-                "downgraded_from": e.downgraded_from,
-                "availability_fallback_from": e.availability_fallback_from,
-                "sso_subject": e.sso_subject,
-                "bedrock_request_id": e.bedrock_request_id,
-                "client": e.client,
-                "context_tier": e.context_tier,
-                "key_prefix": e.key_prefix,
-                "session_id": e.session_id,
-            }
+            params = self._row_params(e, ws_price)
             row_id = (
                 await session.execute(_INSERT_USAGE_LOGS, params)
             ).scalar_one_or_none()
             if row_id is not None:
                 inserted.add(row_id)
         return inserted
+
+    def _row_params(self, e: CostStreamEntry, ws_price: Decimal) -> dict:
+        """usage_logs 행 바인딩 — INSERT 와 추정 행 교체(UPDATE)가 같은 값을 쓴다."""
+        params = {
+            "request_id": e.request_id,
+            "user_id": e.user_id,
+            "team_id": e.team_id,
+            "dept_id": e.dept_id,
+            "model_alias": e.model_alias,
+            "provider": e.provider,
+            "input_tokens": e.input_tokens,
+            "output_tokens": e.output_tokens,
+            "cache_creation_tokens": e.cache_creation_tokens,
+            "cache_read_tokens": e.cache_read_tokens,
+            "reasoning_tokens": e.reasoning_tokens,
+            "web_search_count": e.web_search_count,
+            # 웹 검색 비용 — 청구 총액의 일부(budget_usages 에도 같은 값, DECISION 2).
+            # 0 = 추적 중·검색 없음(NULL 은 이 기능 이전 행에만 남는다).
+            "web_search_cost_usd": str(ws_cost_of(e, ws_price)),
+            "pricing_missing": bool(e.pricing_missing),
+            "cost_usd": str(e.cost_usd),
+            "latency_ms": e.latency_ms,
+            "ttft_ms": e.ttft_ms,
+            # SUCCESS 하드코딩이던 것을 엔트리의 종결 상태로 — 워커 도입 이후
+            # monitoring ERROR/TIMEOUT 집계가 영구 0%였던 회귀의 핵심 수정(E2E S5).
+            "status": _usage_status(e),
+            # asyncpg requires datetime instances for timestamptz bindings,
+            # not ISO strings — parse here rather than letting CAST handle it.
+            "requested_at": datetime.fromisoformat(e.requested_at),
+            "completed_at": datetime.fromisoformat(e.completed_at),
+            "is_streaming": e.is_streaming,
+            "estimated_usage": e.estimated_usage,
+            "downgraded_from": e.downgraded_from,
+            "availability_fallback_from": e.availability_fallback_from,
+            "sso_subject": e.sso_subject,
+            "bedrock_request_id": e.bedrock_request_id,
+            "client": e.client,
+            "context_tier": e.context_tier,
+            "key_prefix": e.key_prefix,
+            "session_id": e.session_id,
+        }
+        return params
 
     async def _mark_late_days_dirty(
         self, session: AsyncSession, entries: list[CostStreamEntry]

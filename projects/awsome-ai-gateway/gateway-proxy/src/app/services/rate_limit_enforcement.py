@@ -314,6 +314,39 @@ async def enforce_rate_limits(
     metrics=None,
     reservation_id: str | None = None,
 ) -> JSONResponse | None:
+    """라우터용 admission 진입점 — 한도 집행(``_enforce_rate_limits``) + 통과 시 'start' 이벤트.
+
+    wave 3b(B2): 통과한 요청마다 ``cost:stream`` 에 start 를 보낸다(``cost_ledger``). 파드가
+    finalize 없이 죽으면 워커 sweeper 가 이 시작으로 추정 행을 쓴다. Redis 가 없거나 열화여서 한도
+    집행을 건너뛴 통과도 여기서 똑같이 start 를 남긴다(XADD 대신 spool → DB 폴백).
+    """
+    rejected = await _enforce_rate_limits(
+        redis=redis, auth_context=auth_context, model_config=model_config, body=body,
+        state=state, request_id=request_id, budget_status=budget_status, metrics=metrics,
+        reservation_id=reservation_id,
+    )
+    if rejected is None and auth_context is not None:
+        from app.services import cost_ledger
+
+        await cost_ledger.publish_start(
+            state=state, auth_context=auth_context, model_config=model_config,
+            request_id=request_id, body=body,
+        )
+    return rejected
+
+
+async def _enforce_rate_limits(
+    *,
+    redis,
+    auth_context: AuthContext,
+    model_config: ModelConfigSchema,
+    body: dict,
+    state: dict,
+    request_id: str,
+    budget_status: BudgetStatus | None = None,
+    metrics=None,
+    reservation_id: str | None = None,
+) -> JSONResponse | None:
     """라우터용 Pre-reserve RPM + TPM 체크 진입점.
 
     ``reservation_id`` 는 월예산 예약 마커에만 쓰는 별도 식별자다 — 폴백

@@ -111,6 +111,24 @@ class GatewayMetrics:
             unit="1",
         )
 
+        # 비용 이벤트 내구성(wave 3b) — cost:stream XADD 실패 시 DB 폴백(usage.cost_pending_events)
+        # 결과. outcome: written | failed. failed 가 계속 오르면 Redis·DB 동시 장애 — 메모리 spool
+        # 만
+        # 남아 파드 종료 시 유실된다.
+        self.cost_events_db_fallback_total: Counter = meter.create_counter(
+            "gateway_cost_events_db_fallback_total",
+            description=(
+                "Cost events written to the DB fallback table after XADD failure (labels: outcome)"
+            ),
+            unit="1",
+        )
+        # admission 'start' 이벤트(kind: start | close) 발행 수 — sweeper 의 분모.
+        self.cost_lifecycle_events_total: Counter = meter.create_counter(
+            "gateway_cost_lifecycle_events_total",
+            description="Request lifecycle events published to cost:stream (labels: kind)",
+            unit="1",
+        )
+
         # Downgrade (FR-3.6)
         self.downgrade_applied_total: Counter = meter.create_counter(
             "gateway_downgrade_applied_total",

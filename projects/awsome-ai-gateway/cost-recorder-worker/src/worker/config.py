@@ -146,6 +146,27 @@ class Settings(BaseSettings):
     #: dirty 날짜가 이 시간 넘게 남으면 불일치로 센다(R1).
     reconciliation_dirty_alert_hours: int = 48
 
+    # ── wave 3b: 요청 시작 원장 sweeper(B2) / 게이트웨이 DB 폴백 소화(B3) ──
+    #: sweeper 주기(초). 0 이면 끈다.
+    request_sweep_interval_sec: float = 30.0
+    #: 완료 없는 시작을 추정 행으로 쓰기까지의 최소 나이(초) — 그리고 그 게이트웨이 프로세스의 생존
+    #: 신호
+    #: (cost:live:<instance>)가 끊겨 있어야 한다.
+    request_sweep_min_age_sec: float = 300.0
+    #: 생존 신호와 무관하게 쓸어 담는 나이(초) — 신호를 읽을 수 없거나(Redis 장애) 살아 있는
+    #: 프로세스가
+    #: 시작을 흘린 경우의 상한. 게이트웨이 예약 마커 TTL(4 h)과 같다.
+    request_sweep_max_age_sec: float = 14_400.0
+    #: 스트림 lag 이 이보다 크면 쉰다 — 아직 소비하지 않은 완료가 있을 수 있다(추정 행 → 교체 왕복
+    #: 방지).
+    request_sweep_max_lag: int = 1000
+    request_sweep_batch_size: int = 200
+    #: 닫힌 표지(close)·추정 행을 쓴 시작의 보존 시간 — 늦게 도착한 중복 start/완료를 판정하는 창.
+    request_starts_retention_hours: int = 48
+    #: usage.cost_pending_events(게이트웨이 XADD 실패 폴백) 소화 주기(초). 0 이면 끈다.
+    pending_events_interval_sec: float = 2.0
+    pending_events_batch_size: int = 500
+
     reporting_timezone: str = "Asia/Seoul"
 
     @field_validator("reporting_timezone")

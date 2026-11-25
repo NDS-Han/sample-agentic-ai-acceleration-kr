@@ -127,21 +127,25 @@ async def test_flush_inserts_usage_and_upserts_budgets():
     #    entry 를 걸러내지 않으면 사용자의 기록 사용액이 영구히 두 배가 된다
     #    (batch_flusher._filter_replays 주석 참조). 개수만 세면 그 SELECT 가 뒤로 밀려
     #    무의미해진 것을 잡지 못하므로 순서를 함께 못 박는다.
-    assert session.execute.await_count == 6
+    # wave 3b: 앞뒤로 시작 원장 잠금(SELECT … FOR UPDATE)과 삭제가 붙는다 → 8.
+    assert session.execute.await_count == 8
     assert session.commit.await_count == 1
-    replay_sql = str(session.execute.await_args_list[0].args[0]).lower()
+    sqls = [str(c.args[0]).lower() for c in session.execute.await_args_list]
+    assert "from usage.request_starts" in sqls[0] and "for update" in sqls[0], sqls[0][:120]
+    replay_sql = sqls[1]
     assert "from usage.usage_logs" in replay_sql and "request_id" in replay_sql, (
-        f"첫 호출이 재처리 필터 SELECT 가 아니다: {replay_sql[:120]}"
+        f"재처리 필터 SELECT 가 INSERT 앞이 아니다: {replay_sql[:120]}"
     )
+    assert "delete from usage.request_starts" in sqls[-1]
 
     # 마지막 두 호출 = user UPSERT, team UPSERT — 합산된 cost (0.30)
-    user_call = session.execute.await_args_list[4]
+    user_call = session.execute.await_args_list[5]
     user_params = user_call.args[1]
     assert len(user_params) == 1  # 단일 (user, period) 그룹
     assert user_params[0]["scope"] == "USER"
     assert user_params[0]["cost"] == "0.30"
 
-    team_call = session.execute.await_args_list[5]
+    team_call = session.execute.await_args_list[6]
     team_params = team_call.args[1]
     assert team_params[0]["scope"] == "TEAM"
     assert team_params[0]["cost"] == "0.30"
@@ -301,7 +305,9 @@ async def test_threshold_team_scope_looks_up_team_id():
     await flusher.flush([entry])
 
     session = session_factory.return_value
-    cumulative_call = session.execute.await_args_list[4]
+    cumulative_call = next(
+        c for c in session.execute.await_args_list
+        if "budget.budget_usages" in str(c.args[0]) and "SELECT used_usd" in str(c.args[0]))
     params = cumulative_call.args[1]
     assert params["scope"] == "TEAM"
     assert params["scope_id"] == entry.team_id
@@ -536,7 +542,8 @@ async def test_zero_usage_error_marker_skips_budget_and_counters():
     assert captured[0]["status"] == "ERROR"
     # budget UPSERT 는 호출되지 않는다(replay SELECT + INSERT 만 실행)
     session = session_factory.return_value
-    sqls = [str(c.args[0]) for c in session.execute.await_args_list]
+    sqls = [str(c.args[0]) for c in session.execute.await_args_list
+            if "usage.request_starts" not in str(c.args[0])]  # 시작 원장 잠금/삭제(wave 3b) 제외
     assert len(sqls) == 2, f"예산 UPSERT 가 추가 호출됐다: {sqls}"
     assert not any("INTO budget.budget_usages" in s for s in sqls)
     # daily 카운터도 건너뛴다
