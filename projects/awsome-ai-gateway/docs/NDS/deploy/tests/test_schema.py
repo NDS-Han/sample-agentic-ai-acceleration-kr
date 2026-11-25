@@ -270,11 +270,30 @@ def test_sizing_valid_on_eks():
 
 
 def test_sizing_eks_unknown_service_rejected():
+    """DB 클라이언트가 아닌 서비스(admin-ui)는 eks sizing 에 선언 불가."""
     with pytest.raises(schema.SchemaError, match="알 수 없는 서비스"):
+        schema.from_dict(minimal(
+            deploy={"target": "eks", "size_tier": "t3",
+                    "sizing": {"admin-ui": {"min_replicas": 2}}},
+            images={"tag": "abc"}))
+
+
+def test_sizing_eks_unknown_db_key_rejected():
+    """db pool 서비스여도 허용 외 키(min_replicas 등)는 거부된다."""
+    with pytest.raises(schema.SchemaError, match="알 수 없는 키"):
         schema.from_dict(minimal(
             deploy={"target": "eks", "size_tier": "t3",
                     "sizing": {"admin-api": {"min_replicas": 2}}},
             images={"tag": "abc"}))
+
+
+def test_sizing_eks_db_pool_keys_accepted():
+    cfg = schema.from_dict(minimal(
+        deploy={"target": "eks", "size_tier": "t3",
+                "sizing": {"admin-api": {"db_pool_size": 5,
+                                         "db_max_overflow": 5}}},
+            images={"tag": "abc"}))
+    assert cfg.deploy.sizing["admin-api"]["db_pool_size"] == 5
 
 
 def test_sizing_valid_on_ecs():

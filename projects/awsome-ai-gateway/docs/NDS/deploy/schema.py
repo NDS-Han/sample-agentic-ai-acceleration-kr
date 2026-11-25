@@ -166,10 +166,21 @@ ECS_SERVICES = frozenset((
 
 # deploy.sizing 의 eks 소비 키 (render/eks.py desired_values 와 동일).
 # size_tier 는 eks 에서 문서용이라 실제 크기는 여기서 정한다.
+# db_* 키는 차트의 서비스별 db: 확장점으로 렌더된다 — snake_case sizing 키가
+# 차트 camelCase db.{poolSize,maxOverflow,poolTimeout,poolRecycle} 로 매핑되어
+# 공통 ConfigMap(envFrom) 값을 per-service env 로 override 한다.
+_EKS_DB_POOL_SIZING = frozenset((
+    "db_pool_size", "db_max_overflow", "db_pool_timeout", "db_pool_recycle",
+))
 EKS_SIZING = {
     "gateway-proxy": frozenset((
         "min_replicas", "max_replicas", "bedrock_thread_pool_size",
+        *_EKS_DB_POOL_SIZING,
     )),
+    "admin-api": _EKS_DB_POOL_SIZING,
+    "cost-recorder-worker": _EKS_DB_POOL_SIZING,
+    "notification-worker": _EKS_DB_POOL_SIZING,
+    "scheduler": _EKS_DB_POOL_SIZING,
     "redis": frozenset(("pool_size",)),
 }
 _ECS_SIZING_KEYS = frozenset((
