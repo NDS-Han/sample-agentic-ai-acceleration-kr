@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from sqlalchemy.exc import IntegrityError
 
-from worker.batch_flusher import DEFAULT_DEPT_ID, BatchFlusher
+from worker.batch_flusher import _USAGE_LOG_ARRAY_FIELDS, DEFAULT_DEPT_ID, BatchFlusher
 from worker.schemas.cost_stream import CostStreamEntry
 
 pytestmark = pytest.mark.unit
@@ -49,10 +49,15 @@ class _Db:
                 db.team_lookups += 1
                 r.all.return_value = [(TEAM, DEPT)] if TEAM in params["ids"] else []
             elif "INSERT INTO usage.usage_logs" in sql:
-                if params["request_id"] in db.fail_insert_for:
+                ids = params["request_ids"]
+                if any(rid in db.fail_insert_for for rid in ids):
                     raise IntegrityError("INSERT", params, Exception("fk"))
-                db.inserts.append(dict(params))
-                r.scalar_one_or_none.return_value = params["request_id"]
+                for i, rid in enumerate(ids):
+                    db.inserts.append({
+                        row_key: params[array_key][i]
+                        for array_key, row_key in _USAGE_LOG_ARRAY_FIELDS
+                    })
+                r.all.return_value = [(rid,) for rid in ids]
             elif "cost_dead_letters" in sql:
                 db.dead.extend(params if isinstance(params, list) else [params])
             else:

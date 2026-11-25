@@ -88,8 +88,8 @@ async def test_flush_marks_dirty_in_same_transaction(monkeypatch):
         assert "daily_aggregate_days" not in sql  # 재집계 행 잠금을 기다리는 경로 제거
         order.append("dirty" if "rollup_dirty_marks" in sql else sql.split()[0])
         r = MagicMock()
-        if "RETURNING" in sql:
-            r.scalar_one_or_none.return_value = params["request_id"]
+        if "INSERT INTO usage.usage_logs" in sql:
+            r.all.return_value = [(rid,) for rid in params["request_ids"]]
         r.__iter__ = lambda self=None: iter([])
         if "rollup_dirty_marks" in sql:
             assert params == {"days": [date(2026, 4, 21), date(2026, 4, 21)],
