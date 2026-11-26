@@ -79,7 +79,8 @@ class Settings(BaseSettings):
     # 열어 즉시 fallback 으로 보낸다. 기본 활성(소켓 타임아웃 대기 누적 방지). 끄려면
     # rl_breaker_enabled=false. 임계/복구는 아래 값으로.
     rl_breaker_enabled: bool = True
-    # ⚠️ p1-hotpath-redis 부터 미사용(호환용으로만 남김). rate-limit eval 은 이제 프로세스 공용
+    # ⚠️ DEPRECATED / no-op (env RL_BREAKER_FAIL_THRESHOLD, RL_BREAKER_RECOVERY_TIMEOUT).
+    #    p1-hotpath-redis 부터 미사용(호환용으로만 남김). rate-limit eval 은 이제 프로세스 공용
     #    Redis 브레이커(hot_path.REDIS_BREAKER — 예산·모델 캐시·비용 이벤트와 같은 것)를 쓴다.
     #    임계는 "한 번의 인프라 실패", 복구는 hot_redis_breaker_cooldown_sec.
     rl_breaker_fail_threshold: int = 5
