@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import uuid
 from datetime import datetime, timezone
@@ -14,6 +15,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.models.audit import AuditLog
 
 logger = structlog.get_logger()
+
+#: 요청 범위 감사 태그 — /aicm/v1 의 인증 의존성(core/integration_auth.py)만 설정한다.
+#: 설정되면 이 요청에서 기록되는 **모든** 감사 행의 changes 에 ``_integration`` /
+#: ``_idempotency_key`` 가 붙는다(서비스 계층이 직접 쓰는 행 포함). 기본 None — /admin 경로와
+#: 플래그 off 게이트웨이에서는 아무것도 붙지 않는다.
+audit_tags: contextvars.ContextVar[dict[str, str] | None] = contextvars.ContextVar(
+    "audit_tags", default=None
+)
 
 
 class AuditLogger:
@@ -101,6 +110,9 @@ class AuditLogger:
             # 어떤 토큰이 행동했는지 기록하지 않으면 revoke 후에도 행위자를
             # 특정할 수 없다.
             changes["_service_token_id"] = str(service_token_id)
+        tags = audit_tags.get()
+        if tags:
+            changes.update(tags)
         entry = {
             "id": uuid.uuid4(),
             "timestamp": datetime.now(timezone.utc),

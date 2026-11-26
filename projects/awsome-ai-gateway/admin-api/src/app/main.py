@@ -31,6 +31,7 @@ from app.core.exceptions import (
     ConflictError,
     DateRangeTooLongError,
     ForbiddenError,
+    IntegrationError,
     NotFoundError,
     RateLimitedError,
     STSVerificationError,
@@ -448,6 +449,19 @@ def register_exception_handlers(app: FastAPI) -> None:
             headers=headers,
         )
 
+    @app.exception_handler(IntegrationError)
+    async def integration_error_handler(request: Request, exc: IntegrationError):
+        # /aicm/v1 전용(플래그 off 면 발생하지 않음). type 은 상태코드 어휘를 그대로 쓴다.
+        error: dict = {
+            "type": _HTTP_STATUS_ERROR_TYPES.get(exc.status_code, "internal_error"),
+            "message": exc.message,
+            "code": exc.code,
+        }
+        if exc.details:
+            error["details"] = exc.details
+        headers = {"Retry-After": str(exc.retry_after)} if exc.retry_after else None
+        return JSONResponse(status_code=exc.status_code, content={"error": error}, headers=headers)
+
     @app.exception_handler(BudgetExceededError)
     async def budget_handler(request: Request, exc: BudgetExceededError):
         return JSONResponse(
@@ -721,6 +735,15 @@ def create_app() -> FastAPI:
 
     from app.routers import chat_agent  # admin-chat-agent BI assistant (Phase 2)
     app.include_router(chat_agent.router)
+
+    # AICM 통합(/aicm/v1) — 플래그가 켜졌을 때만 마운트한다. 꺼져 있으면 import 조차 하지
+    # 않아 라우트·OpenAPI 가 이 기능이 없던 때와 바이트 단위로 같다
+    # (tests/unit/test_aicm_flag_off.py).
+    if settings.AICM_API_ENABLED:
+        from app.routers.aicm import router as aicm_router
+
+        app.include_router(aicm_router)
+        logger.info("aicm.router_mounted", prefix="/aicm/v1")
 
     # Bedrock invocation log ↔ usage_logs 대조(runtime plane 본문 감사). 설정이 비어 있으면
     # 엔드포인트는 존재하되 503 으로 "미설정" 을 알린다 — 라우터를 조건부로 빼면 UI 가
