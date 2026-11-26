@@ -250,6 +250,22 @@ EXCEPTION WHEN unique_violation THEN
     RAISE WARNING 'idx_budget_usages_unique: 기존 중복 데이터로 유니크 인덱스 생성 건너뜀 — 운영 remediation 필요';
 END $$;
 
+-- AICM/admin 공용 advisory app-group 예산(0070). gateway hot path enforcement 에는
+-- 쓰이지 않는다 — 제어plane 정책 저장소이며 spend reservation 에도 포함되지 않는다.
+CREATE TABLE IF NOT EXISTS budget.user_app_group_budgets (
+    user_id           UUID                  NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+    app_group         VARCHAR(64)           NOT NULL,
+    max_budget_usd    NUMERIC(12,4)         NOT NULL,
+    policy            budget.budget_policy  NOT NULL DEFAULT 'HARD_BLOCK',
+    alert_thresholds  INTEGER[]             NOT NULL DEFAULT '{80,90,100}',
+    allocated_by      UUID                  NOT NULL REFERENCES auth.users(id),
+    created_at        TIMESTAMPTZ           NOT NULL DEFAULT now(),
+    updated_at        TIMESTAMPTZ           NOT NULL DEFAULT now(),
+    PRIMARY KEY (user_id, app_group),
+    CONSTRAINT ck_user_app_group_budget_name
+        CHECK (app_group ~ '^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$')
+);
+
 -- NOTE: budget.downgrade_policies는 model.model_aliases FK를 참조하므로
 --       model 스키마 블록 이후에 정의됨 (파일 하단 참조).
 
@@ -1506,6 +1522,36 @@ CREATE TABLE IF NOT EXISTS auth.integration_idempotency_keys (
 );
 CREATE INDEX IF NOT EXISTS idx_integration_idempotency_created
     ON auth.integration_idempotency_keys (created_at);
+
+
+-- migration 0071: AICM managed-field ownership records. PK 조회 하나로 사람 관리자 쓰기의
+-- 잠금 여부를 판정한다. gateway hot path 는 읽지 않는 제어plane 테이블.
+CREATE TABLE IF NOT EXISTS auth.external_management (
+    resource_type     VARCHAR(16)   NOT NULL,
+    resource_id       UUID          NOT NULL,
+    facet             VARCHAR(96)   NOT NULL,
+    managed_by        VARCHAR(32)   NOT NULL,
+    state             VARCHAR(16)   NOT NULL,
+    value_state       VARCHAR(16)   NOT NULL,
+    last_written_at   TIMESTAMPTZ   NOT NULL,
+    token_id          UUID          REFERENCES auth.service_tokens(id) ON DELETE SET NULL,
+    lineage_id        UUID,
+    request_id        VARCHAR(128)  NOT NULL DEFAULT '',
+    released_at       TIMESTAMPTZ,
+    released_by       UUID          REFERENCES auth.users(id) ON DELETE SET NULL,
+    release_reason    TEXT,
+    created_at        TIMESTAMPTZ   NOT NULL DEFAULT now(),
+    updated_at        TIMESTAMPTZ   NOT NULL DEFAULT now(),
+    PRIMARY KEY (resource_type, resource_id, facet),
+    CONSTRAINT ck_external_management_resource_type
+        CHECK (resource_type IN ('user', 'team')),
+    CONSTRAINT ck_external_management_state
+        CHECK (state IN ('managed', 'released')),
+    CONSTRAINT ck_external_management_value_state
+        CHECK (value_state IN ('set', 'cleared'))
+);
+CREATE INDEX IF NOT EXISTS idx_external_management_managed_by_state
+    ON auth.external_management (managed_by, state);
 
 -- migration 0045: (dept_id,name)/(org_id,name) 유니크 — check-then-act 경합으로
 -- 중복 행이 생기면 get_team_by_dept_and_name LIMIT 1 이 비결정이 된다.

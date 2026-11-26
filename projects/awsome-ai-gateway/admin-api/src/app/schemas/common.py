@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import enum
+from datetime import datetime
 from typing import Generic, TypeVar
 
 from pydantic import BaseModel, Field
@@ -54,6 +55,20 @@ class ScopeEnum(str, enum.Enum):
     USER = "USER"
     TEAM = "TEAM"
     GLOBAL = "GLOBAL"
+
+
+class ManagedByInfo(BaseModel):
+    """AICM managed-field metadata — additive, omitted entirely when absent."""
+
+    source: str
+    since: datetime
+    field: str
+
+
+def managed_by_field():
+    # pydantic exclude_if: None 이면 exclude_unset=False 여도 키 자체가 직렬화되지
+    # 않는다 — AICM_MANAGED_LOCK_ENABLED=false 의 기존 응답 byte-identity 용.
+    return Field(default=None, exclude_if=lambda v: v is None)
 
 
 # ── Pagination ──

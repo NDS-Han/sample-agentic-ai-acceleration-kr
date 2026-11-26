@@ -28,6 +28,12 @@ R4 redis_vs_db
     Redis 에 키가 없으면 불일치가 아니다(다음 요청이 DB 에서 재구축한다).
     허용 오차 reconciliation_redis_epsilon_usd(기본 $0.0001, wave 3c) — Redis 는 float64 이고,
     0062 이전(NUMERIC(12,4)) 원장에서 재구축된 카운터는 4자리 반올림 잔차를 안고 있다.
+retro_not_charged
+    BACKFILL_WS_HISTORY 감사로 usage/rollup 에만 소급된 웹 검색 비용(option B). 정보 카테고리라
+    mismatches 는 항상 0 이고, 같은 양은 budget_vs_raw 기대값에서 빠진다.
+web_search_cost_gap
+    web_search_cost_tracking_since 이후(report_date 끝까지)인데 web_search_count>0 인 행의
+    web_search_cost_usd 가 NULL/0 — 새 기록 경로의 구멍. 행 수가 곧 mismatch 다.
 R6 pricing
     report_date 의 토큰>0·비용 0·pricing_missing=false 행(조용한 $0).
     단가로 다시 계산한 비용 ≠ 기록 비용 — 캐시 쓰기·웹 검색 행은 제외(행에 분해가 없다).
@@ -186,6 +192,10 @@ WHERE period = :period AND tz = :tz AND grain_version >= :grain
 """
 
 #: 청구액(모델 + 웹 검색) 원장 대조. 키 = (scope, scope_id, client).
+#: BACKFILL_WS_HISTORY 로 usage 에만 소급 기록된 웹 검색 비용은 예산에 청구하지 않기로 한
+#: 값(option B)이다. 기대값에서는 **감사 행의 delta**(현재 usage 값이 아니라 소급 당시 값)를
+#: 빼고, 같은 양을 retro_not_charged 정보 카테고리로 보고한다. 그래서 소급 이후 누군가 usage
+#: 행을 따로 고치면 정책상 미청구분이 아니라 실제 불일치로 남는다.
 _R3_SQL = """
 WITH raw AS (
   SELECT user_id, team_id, client, SUM(cost_usd + COALESCE(web_search_cost_usd, 0)) AS amt
@@ -212,6 +222,38 @@ WITH raw AS (
 ), exp2 AS (
   SELECT scope, scope_id, client, SUM(amt) AS amt FROM (
     SELECT * FROM expected UNION ALL SELECT * FROM seeds) t GROUP BY 1, 2, 3
+), retro_rows AS (
+  SELECT l.user_id, l.team_id, l.client,
+         CAST(a.changes->>'web_search_count' AS bigint) AS queries,
+         CAST(a.changes->>'delta' AS numeric) AS amt,
+         COALESCE(a.changes->>'run_id', a.request_id) AS run_id
+  FROM audit.audit_logs a
+  JOIN usage.usage_logs l ON l.request_id = a.changes->>'request_id'
+  WHERE a.action = 'BACKFILL_WS_HISTORY' AND a.resource_type = 'UsageLog'
+    AND a.result = 'SUCCESS'
+    AND l.requested_at >= :start AND l.requested_at < :end
+), retro_scopes AS (
+  SELECT 'USER'::text AS scope, user_id AS scope_id, NULL::text AS client,
+         SUM(amt) AS amt
+    FROM retro_rows GROUP BY user_id
+  UNION ALL
+  SELECT 'TEAM', team_id, NULL, SUM(amt) FROM retro_rows
+    WHERE team_id <> CAST(:default_team AS uuid) GROUP BY team_id
+  UNION ALL
+  SELECT 'USER', user_id, client, SUM(amt) FROM retro_rows
+    WHERE client = ANY(CAST(:apps AS text[])) GROUP BY user_id, client
+), adjusted AS (
+  SELECT e.scope, e.scope_id, e.client, e.amt - COALESCE(r.amt, 0) AS amt
+  FROM exp2 e LEFT JOIN retro_scopes r
+    ON r.scope = e.scope AND r.scope_id = e.scope_id
+   AND r.client IS NOT DISTINCT FROM e.client
+), retro_total AS (
+  SELECT COUNT(*)::bigint AS rows,
+         COALESCE(SUM(queries), 0)::bigint AS queries,
+         COALESCE(SUM(amt), 0) AS amount_usd,
+         COALESCE(array_agg(DISTINCT run_id) FILTER (WHERE run_id IS NOT NULL),
+                  ARRAY[]::text[]) AS run_ids
+  FROM retro_rows
 ), ledger AS (
   SELECT scope::text AS scope, scope_id, client::text AS client, used_usd AS amt
   FROM budget.budget_usages
@@ -219,18 +261,21 @@ WITH raw AS (
     AND NOT (scope = 'TEAM' AND scope_id = CAST(:default_team AS uuid))
 )
 SELECT COUNT(*) AS mismatches,
-       COALESCE(SUM(COALESCE(ledger.amt, 0) - COALESCE(exp2.amt, 0)), 0) AS diff,
+       COALESCE(SUM(COALESCE(ledger.amt, 0) - COALESCE(adjusted.amt, 0)), 0) AS diff,
        (SELECT COALESCE(SUM(amt), 0) FROM expected WHERE scope = 'USER' AND client IS NULL)
          AS raw_total,
-       json_agg(json_build_array(COALESCE(ledger.scope, exp2.scope),
-                                 COALESCE(ledger.scope_id, exp2.scope_id),
-                                 COALESCE(ledger.client, exp2.client),
-                                 exp2.amt, ledger.amt))
+       (SELECT json_build_object('rows', rows, 'queries', queries,
+                                 'amount_usd', amount_usd::text, 'run_ids', run_ids)
+          FROM retro_total) AS retro,
+       json_agg(json_build_array(COALESCE(ledger.scope, adjusted.scope),
+                                 COALESCE(ledger.scope_id, adjusted.scope_id),
+                                 COALESCE(ledger.client, adjusted.client),
+                                 adjusted.amt, ledger.amt))
          FILTER (WHERE true) AS sample
-FROM exp2 FULL OUTER JOIN ledger
-  ON ledger.scope = exp2.scope AND ledger.scope_id = exp2.scope_id
- AND ledger.client IS NOT DISTINCT FROM exp2.client
-WHERE COALESCE(ledger.amt, 0) <> COALESCE(exp2.amt, 0)
+FROM adjusted FULL OUTER JOIN ledger
+  ON ledger.scope = adjusted.scope AND ledger.scope_id = adjusted.scope_id
+ AND ledger.client IS NOT DISTINCT FROM adjusted.client
+WHERE COALESCE(ledger.amt, 0) <> COALESCE(adjusted.amt, 0)
 """
 
 _LEDGER_ROWS_SQL = """
@@ -249,6 +294,28 @@ FROM usage.usage_logs WHERE requested_at >= :start AND requested_at < :end
 """
 
 _PRICING_OPEN_SQL = "SELECT COUNT(*) FROM usage.usage_logs WHERE pricing_missing"
+
+_TRACKING_SINCE_SQL = text(
+    "SELECT value FROM public.system_settings WHERE key = 'web_search_cost_tracking_since'"
+)
+
+#: wave-3 비용 추적 시작 이후인데 검색 수 > 0 · 비용 NULL/0 — 새 기록 경로의 구멍.
+#: report_date 하루의 끝(리포팅 tz)까지 본다. usage_logs 에 없는 in-flight 이벤트는
+#: 애초에 SELECT 되지 않으므로, 당일을 대조해도 flush 지연 자체가 거짓 양성을 만들지는 않는다.
+_WS_GAP_SQL = """
+WITH gaps AS (
+  SELECT request_id, requested_at, web_search_count
+  FROM usage.usage_logs
+  WHERE requested_at >= :since AND requested_at < :end
+    AND web_search_count > 0
+    AND (web_search_cost_usd IS NULL OR web_search_cost_usd = 0)
+)
+SELECT COUNT(*)::bigint AS rows,
+       COALESCE(SUM(web_search_count), 0)::bigint AS searches,
+       (SELECT array_agg(request_id) FROM (
+         SELECT request_id FROM gaps ORDER BY requested_at, request_id LIMIT 20) s) AS sample
+FROM gaps
+"""
 
 #: 단가로 다시 계산 — 분해가 행에 없는 경우(캐시 쓰기·웹 검색 멀티턴·장문 티어)는 제외한다.
 _RECOMPUTE_SQL = """
@@ -403,8 +470,14 @@ async def _r3(session: AsyncSession, tz: str, period: str) -> dict:
         "start": start, "end": end, "period": period, "default_team": DEFAULT_TEAM_ID,
         "apps": list(_PER_APP_CLIENTS)})).one()
     sample = row.sample if isinstance(row.sample, list) else json.loads(row.sample or "[]")
+    retro = row.retro if isinstance(row.retro, dict) else json.loads(row.retro or "{}")
+    retro.setdefault("rows", 0)
+    retro.setdefault("queries", 0)
+    retro.setdefault("amount_usd", "0")
+    retro.setdefault("run_ids", [])
     return {"mismatches": int(row.mismatches), "ledger_minus_expected": _f(row.diff),
-            "raw_charged_total": _f(row.raw_total), "sample": sample[:20]}
+            "raw_charged_total": _f(row.raw_total), "retro_not_charged": retro,
+            "sample": sample[:20]}
 
 
 async def _stream_lag(redis, settings) -> int | None:
@@ -468,6 +541,39 @@ async def _r4(session: AsyncSession, redis, settings, period: str) -> dict:
             "lost_sentinel": lost, "mismatches": len(bad), "sample": bad[:20]}
 
 
+def _parse_tracking_since(raw: Any) -> datetime | None:
+    """system_settings JSONB/문자열 → timezone-aware datetime. 형상이 틀리면 None."""
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            pass
+    if isinstance(raw, dict):
+        raw = raw.get("since")
+    if not raw:
+        return None
+    try:
+        ts = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return ts if ts.tzinfo is not None else None
+
+
+async def _ws_cost_gap(session: AsyncSession, tz: str, day: date) -> dict:
+    """post-cutover 웹 검색 비용 구멍 — 정보가 아니라 mismatch 로 보고한다."""
+    raw = (await session.execute(_TRACKING_SINCE_SQL)).scalar_one_or_none()
+    since = _parse_tracking_since(raw)
+    if since is None:
+        return {"state": "no_tracking_marker", "rows": 0, "searches": 0,
+                "mismatches": 0, "sample": []}
+    end = _day_window(ZoneInfo(tz), day + timedelta(days=1))[0]
+    r = (await session.execute(text(_WS_GAP_SQL), {"since": since, "end": end})).one()
+    sample = r.sample if isinstance(r.sample, list) else []
+    return {"state": "checked", "tracking_since": since.isoformat(),
+            "rows": int(r.rows), "searches": int(r.searches), "sample": sample,
+            "mismatches": int(r.rows)}
+
+
 async def _r6(session: AsyncSession, tz: str, day: date, warn_pct: float) -> dict:
     start, end = _day_window(ZoneInfo(tz), day)
     p = {"start": start, "end": end}
@@ -507,6 +613,10 @@ async def reconcile(session_factory: async_sessionmaker[AsyncSession], redis=Non
                 hourly_enabled=bool(settings.hourly_rollup_enabled))
             checks["monthly_vs_daily"] = await _r2(session, tz, day.replace(day=1))
             checks["budget_vs_raw"] = await _r3(session, tz, period)
+            retro = dict(checks["budget_vs_raw"].get("retro_not_charged") or {})
+            retro["mismatches"] = 0  # option B 정보 카테고리 — 미청구는 정책이지 불일치가 아니다
+            checks["retro_not_charged"] = retro
+            checks["web_search_cost_gap"] = await _ws_cost_gap(session, tz, day)
             checks["pricing"] = await _r6(session, tz, day,
                                           settings.reconciliation_estimated_warn_pct)
             checks["dirty_stale"] = {"mismatches": int((await session.execute(

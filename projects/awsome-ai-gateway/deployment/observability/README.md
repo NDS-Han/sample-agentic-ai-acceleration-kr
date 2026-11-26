@@ -9,6 +9,8 @@ observability namespace (Fargate profile "platform" 포함)
 ├── kube-prometheus-stack (helm release "kps")
 │   ├── Prometheus       (1 replica, emptyDir, retention 24h)
 │   ├── Grafana          (1 replica, IRSA for CloudWatch data source)
+│   ├── Alertmanager     (1 replica, emptyDir — Slack 전달은 env 별 Secret 이 있을 때만,
+│   │                     docs/NDS/observability.md §10)
 │   ├── kube-state-metrics
 │   └── prometheus-operator
 │

@@ -337,6 +337,9 @@ class Settings(BaseSettings):
     AICM_RL_READ_PER_MIN: int = 600
     AICM_RL_WRITE_PER_MIN: int = 120
     AICM_RL_LIFECYCLE_PER_MIN: int = 30
+    # sync-cognito 는 오래 걸리는 제어면 배치다 — read/write 와 분리해 sync 폭주가
+    # 일반 예산/정책 쓰기 예산을 소진하지 않게 한다.
+    AICM_RL_SYNC_PER_MIN: int = 10
     # 통합이 쓰는 Cognito 호출 몫(초당, 전 replica 합산 — Redis 공유 버킷). Cognito 쿼터는
     # 계정·리전 단위라 로그인 보강·sync 와 공유한다(UserUpdate 25 RPS, UserList 30 RPS 는
     # 조정 불가). Redis 장애 시 프로세스 로컬 버킷 cap // DIVISOR(=replica 수 가정).
@@ -357,6 +360,9 @@ class Settings(BaseSettings):
     AICM_PROVISION_GROUPS_ATTRIBUTE: str = "custom:groups"
     # Idempotency-Key 보존 기간(일). 오래된 행은 같은 통합의 새 키 기록 때 조금씩 지운다.
     AICM_IDEMPOTENCY_RETENTION_DAYS: int = 7
+    # AICM 이 마지막으로 쓴 필드를 사람 admin 쓰기에서 409 로 잠근다. 기본 OFF —
+    # OFF 에서는 기존 응답 바이트/상태코드가 그대로고, 기록만 조용히 남는다.
+    AICM_MANAGED_LOCK_ENABLED: bool = False
 
     # AWS Price List API 리전(GetProducts). Price List 는 us-east-1/ap-south-1/
     # eu-central-1 엔드포인트만 지원 — 우리 홈리전 ap-northeast-2 가 아니어도 정상.

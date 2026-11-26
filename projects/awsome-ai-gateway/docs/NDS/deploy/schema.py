@@ -317,6 +317,25 @@ class OidcConfig:
 
 
 @dataclass
+class ObservabilityAlertingConfig:
+    """클러스터 내 Alertmanager(kube-prometheus-stack) — eks 전용, 기본 꺼짐.
+
+    features.alerting(terraform SNS/CloudWatch)과는 다른 축이다. render 가
+    deployment/gen/<env>/eks/observability.env 에 쓰고 observability install.sh 가 읽는다.
+    꺼짐(기본): Alertmanager 파드·전달 리소스 없음 — 게이트웨이 PrometheusRule 만 설치.
+    켜짐: Alertmanager 1 파드 + env 별 Slack Secret(있을 때만) 전달."""
+    enabled: bool = False
+    # Slack incoming-webhook URL 을 담은 Secret(ns observability, key api_url) 이름.
+    # 비우면 alertmanager-slack-<env>. URL 자체는 gateway.yaml 에 두지 않는다.
+    slack_secret_name: str = ""
+
+
+@dataclass
+class ObservabilityConfig:
+    alerting: ObservabilityAlertingConfig = field(default_factory=ObservabilityAlertingConfig)
+
+
+@dataclass
 class GatewayConfig:
     env: str = ""
     aws: AwsConfig = field(default_factory=AwsConfig)
@@ -329,6 +348,7 @@ class GatewayConfig:
     branding: BrandingConfig = field(default_factory=BrandingConfig)
     oidc: OidcConfig = field(default_factory=OidcConfig)
     infra: InfraConfig = field(default_factory=InfraConfig)
+    observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
 
     # ------------------------------------------------------------------ #
     def warnings(self) -> list[str]:
@@ -930,6 +950,13 @@ class GatewayConfig:
                 e.append("oidc 를 쓰려면 authorize_url / token_url 도 필요합니다 (hosted-ui 엔드포인트).")
         if self.oidc.vk_ttl_hours < 0:
             e.append("oidc.vk_ttl_hours 는 0 이상이어야 합니다 (0=차트 기본).")
+        _oa = self.observability.alerting
+        if _oa.enabled and self.deploy.target != "eks":
+            e.append("observability.alerting.enabled 는 eks 전용입니다 (kube-prometheus-stack "
+                     f"Alertmanager) — target={self.deploy.target!r}.")
+        if _oa.slack_secret_name and not _K8S_NAME_RE.fullmatch(_oa.slack_secret_name):
+            e.append("observability.alerting.slack_secret_name 은 k8s 리소스 이름이어야 합니다 "
+                     f"(소문자·숫자·'-'·'.', 최대 253자): {_oa.slack_secret_name!r}")
         return e
 
 
@@ -1110,7 +1137,11 @@ def _image_tags(v: Any, errors: list[str]) -> dict[str, str]:
 _TOP_LEVEL_KEYS = frozenset((
     "version", "env", "aws", "deploy", "network", "domain",
     "features", "images", "clients", "oidc", "infra", "branding",
+    "observability",
 ))
+_OBSERVABILITY_KEYS = frozenset(("alerting",))
+_OBS_ALERTING_KEYS = frozenset(("enabled", "slack_secret_name"))
+_K8S_NAME_RE = re.compile(r"[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?")
 _AWS_KEYS = frozenset(("region", "account_id", "allowed_roles"))
 _DEPLOY_KEYS = frozenset(("target", "size_tier", "sizing", "capacity_tier",
                           "tfstate_bucket", "tfstate_table", "release",
@@ -1160,8 +1191,17 @@ def from_dict(raw: dict) -> GatewayConfig:
     branding = _require_mapping(raw.get("branding"), "branding", errors)
     oidc = _require_mapping(raw.get("oidc"), "oidc", errors)
     infra = _require_mapping(raw.get("infra"), "infra", errors)
+    _obs = _require_mapping(raw.get("observability"), "observability", errors)
+    _obs_alert = _require_mapping(_obs.get("alerting"), "observability.alerting", errors)
 
     _check_unknown(raw, _TOP_LEVEL_KEYS, "gateway.yaml", errors)
+    _check_unknown(_obs, _OBSERVABILITY_KEYS, "observability", errors)
+    _check_unknown(_obs_alert, _OBS_ALERTING_KEYS, "observability.alerting", errors)
+    _slack_secret = _obs_alert.get("slack_secret_name")
+    if _slack_secret is not None and not isinstance(_slack_secret, str):
+        errors.append("observability.alerting.slack_secret_name 은 문자열이어야 합니다: "
+                      f"{_slack_secret!r}")
+        _slack_secret = ""
     _check_unknown(aws, _AWS_KEYS, "aws", errors)
     _check_unknown(deploy, _DEPLOY_KEYS, "deploy", errors)
     _check_unknown(network, _NETWORK_KEYS, "network", errors)
@@ -1296,6 +1336,11 @@ def from_dict(raw: dict) -> GatewayConfig:
                                       "branding.managed_login")
                            if "managed_login" in branding else False),
         ),
+        observability=ObservabilityConfig(alerting=ObservabilityAlertingConfig(
+            enabled=_safe_bool(_obs_alert.get("enabled", False), errors,
+                               "observability.alerting.enabled"),
+            slack_secret_name=(_slack_secret or "").strip(),
+        )),
         infra=InfraConfig(
             azs=_str_items(infra.get("azs"), "infra.azs", errors),
             vpc_cidr=_opt_str(infra.get("vpc_cidr"), ""),

@@ -325,7 +325,7 @@ check_secrets_manager() {
 # 자세한 배경은 deployment/observability/README.md 참조.
 ensure_observability() {
     info "Observability 스택 확인/설치 (Fargate HPA + 관측 공통)"
-    bash "$DEPLOY_DIR/observability/kube-prometheus-stack/install.sh"
+    ALERT_ENV="$ENV" bash "$DEPLOY_DIR/observability/kube-prometheus-stack/install.sh"
     bash "$DEPLOY_DIR/observability/prometheus-adapter/install.sh"
     bash "$DEPLOY_DIR/observability/otel-collector/install.sh"
 }

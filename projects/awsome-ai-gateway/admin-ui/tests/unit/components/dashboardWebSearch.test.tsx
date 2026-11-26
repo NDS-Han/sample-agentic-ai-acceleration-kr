@@ -230,6 +230,8 @@ describe('WEB SEARCH · AGENTCORE 섹션', () => {
     expect(screen.getByTestId('web-search-cost-subtitle').textContent).toBe('96 queries × $7.00 per 1,000');
     expect(screen.getByTestId('web-search-avg-day').textContent).toBe('4.8');
     expect(screen.getByTestId('web-search-per-request').textContent).toBe('0.20');
+    expect(within(s).getByText('Avg per day (queries/day)')).toBeTruthy();
+    expect(within(s).getByText('Per request (queries/request)')).toBeTruthy();
     expect(within(s).getByText('Daily queries')).toBeTruthy();
     expect(within(s).getByRole('button', { name: 'About web search pricing' })).toBeTruthy();
     // 섹션에 보이는 무료분·예산 안내 문장·추적 시작 문구 없음(툴팁 안 문장만 존재).

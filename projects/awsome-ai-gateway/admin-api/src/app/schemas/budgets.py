@@ -7,16 +7,19 @@ from decimal import Decimal
 
 from typing import Annotated
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
-from app.schemas.common import BudgetPolicy
+from app.schemas.common import BudgetPolicy, ManagedByInfo, managed_by_field
 
 
 # ── Requests ──
 
 
 # DB 컬럼은 Numeric(12,4) — 상한 없이 두면 asyncpg 가 500 을 던진다.
-_BUDGET_MAX = Decimal("99999999.99")
+# Numeric(12,4) 의 실제 최대치. TEAM 의 "unlimited" 는 핫패스를 바꾸지 않기 위해
+# 이 sentinel cap 으로 저장한다(사실상 무제한; REPORT/HANDOFF 에 명시).
+_BUDGET_MAX = Decimal("99999999.9999")
+UNLIMITED_TEAM_BUDGET_USD = _BUDGET_MAX
 
 
 class SetBudgetRequest(BaseModel):
@@ -41,6 +44,15 @@ class SetBudgetRequest(BaseModel):
     default_user_cap_usd: Decimal | None = Field(default=None, ge=0, le=_BUDGET_MAX)
     # confirmation_required(409) 응답 뒤의 확인 재요청 표시 (§3-0).
     confirm: bool = False
+
+    @field_validator("max_budget_usd", mode="before")
+    @classmethod
+    def _parse_unlimited(cls, value):
+        # AICM 계약: TEAM budget 의 "unlimited" 문자열은 팀 차단을 해제한다.
+        # gateway-proxy hot path 는 바꾸지 않으므로 최대 Numeric cap sentinel 로 저장한다.
+        if isinstance(value, str) and value.strip().lower() == "unlimited":
+            return UNLIMITED_TEAM_BUDGET_USD
+        return value
 
 
 class SetDefaultCapRequest(BaseModel):
@@ -136,6 +148,8 @@ class BudgetSummaryItem(BaseModel):
     # 수 없어서, 다이얼로그를 다시 열면 항상 [80,90,100] 이 보였다. 예산 미설정 대상은
     # None(설정 자체가 없다)이고 빈 목록은 "알림 없음" 이라는 유효한 설정이다.
     alert_thresholds: list[int] | None = None
+    managed_by: ManagedByInfo | None = managed_by_field()
+    default_cap_managed_by: ManagedByInfo | None = managed_by_field()
 
 
 class BudgetSummaryResponse(BaseModel):
@@ -159,17 +173,59 @@ class BudgetConfigDetailResponse(BaseModel):
     policy: BudgetPolicy | None = None
     alert_thresholds: list[int] | None = None
     default_user_cap_usd: Decimal | None = None
+    managed_by: ManagedByInfo | None = managed_by_field()
+    default_cap_managed_by: ManagedByInfo | None = managed_by_field()
 
 
 class AppBudgetItem(BaseModel):
     client: str
     max_budget_usd: Decimal
     policy: BudgetPolicy
+    managed_by: ManagedByInfo | None = managed_by_field()
 
 
 class UserAppBudgetsResponse(BaseModel):
     user_id: str
     apps: list[AppBudgetItem]
+    # AICM 이 app cap 하위 invariant(I-3)를 계산할 때 부모 총액 존재 여부를 별도
+    # 조회 없이 판단하게 한다.
+    has_total_budget: bool = False
+
+
+class AppGroupBudgetItem(BaseModel):
+    group: str
+    max_budget_usd: Decimal
+    policy: BudgetPolicy
+    alert_thresholds: list[int] = Field(default_factory=list)
+    managed_by: ManagedByInfo | None = managed_by_field()
+
+
+class UserAppGroupBudgetsResponse(BaseModel):
+    user_id: str
+    app_groups: list[AppGroupBudgetItem]
+
+
+class UsageByAppItem(BaseModel):
+    client: str
+    used_usd: Decimal
+    call_count: int
+    ws_queries: int = 0
+    ws_cost_usd: Decimal | None = None
+    ws_untracked: int = 0
+
+
+class UsageByAppResponse(BaseModel):
+    period: str
+    apps: list[UsageByAppItem]
+
+
+class TeamUserBudgetSummaryPage(BaseModel):
+    period: str
+    team_id: str
+    items: list[BudgetSummaryItem]
+    limit: int
+    offset: int
+    has_more: bool
 
 
 # ── Team Allocation ──
@@ -191,6 +247,7 @@ class AllocationEntry(BaseModel):
     cap_source: str | None = None
     # USER 행만: 실효 cap = A_u ?? D. 개인 cap 이 없으면 None(팀 한도만 적용).
     effective_cap_usd: Decimal | None = None
+    managed_by: ManagedByInfo | None = managed_by_field()
 
 
 class TeamBudgetAllocation(BaseModel):

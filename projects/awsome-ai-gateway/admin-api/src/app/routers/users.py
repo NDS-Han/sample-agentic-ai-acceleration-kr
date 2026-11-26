@@ -16,7 +16,16 @@ from app.core.exceptions import ForbiddenError
 from app.repositories._cursor import encode_cursor
 from app.services.user_allowed_client_service import UserAllowedClientService
 from app.services.user_allowed_model_service import UserAllowedModelService
+from app.services.managed_fields import (
+    FIELD_ALLOWED_CLIENTS,
+    FIELD_ALLOWED_MODELS,
+    RESOURCE_USER,
+    managed_info,
+    managed_rows,
+)
 from app.schemas.common import (
+    ManagedByInfo,
+    managed_by_field,
     PAGE_LIMIT_DEFAULT,
     PAGE_LIMIT_MAX,
     PAGE_LIMIT_MIN,
@@ -525,7 +534,7 @@ async def sync_cognito(
         key_service=request.app.state.key_service,
         cache_mgr=request.app.state.cache_mgr,
     )
-    result = await svc.sync_all(session)
+    result = await svc.sync_all(session, caller=_sync_caller(request, admin))
 
     # R16: 전체 Cognito sync 는 대량 생성/비활성화를 하는데 audit_logs 행이 없었다.
     await audit_logger.log(
@@ -555,6 +564,40 @@ async def sync_cognito(
         "teams_deleted": result.teams_deleted,
         "errors": result.errors,
     }
+
+
+def _sync_caller(request: Request, admin: CurrentUser):
+    """sync 호출자 분류 — AICM mirror integration 인지 사람 admin 인지.
+
+    판정은 경로 문자열이 아니라 ``request.state.integration_principal`` 이다:
+    이 principal 은 scoped svc 토큰 + CIDR + scope + rate-limit 을 통과한
+    mirror 인증(require_integration)에서만 세팅되므로 real /admin 의 사람 JWT
+    호출에서는 절대 존재하지 않는다.
+    """
+    from app.services.cognito_sync_service import SyncCaller
+
+    principal = getattr(request.state, "integration_principal", None)
+    request_id = (
+        getattr(request.state, "request_id", "")
+        or request.headers.get("x-request-id", "")
+    )
+    if principal is not None:
+        return SyncCaller(
+            is_integration=True,
+            actor_user_id=principal.actor.user_id,
+            actor_role=principal.actor.role.value,
+            service_token_id=principal.actor.service_token_id,
+            ip_address=principal.client_ip,
+            request_id=request_id,
+        )
+    return SyncCaller(
+        is_integration=False,
+        actor_user_id=admin.user_id,
+        actor_role=admin.role.value,
+        service_token_id=getattr(admin, "service_token_id", None),
+        ip_address=request.client.host if request.client else "0.0.0.0",
+        request_id=request_id,
+    )
 
 
 def _build_cognito_sync_service(key_service=None, cache_mgr=None):
@@ -604,6 +647,7 @@ async def sync_cognito_user(
         session,
         username,
         actor=admin,
+        caller=_sync_caller(request, admin),
         ip_address=request.client.host if request.client else "0.0.0.0",
         request_id=getattr(request.state, "request_id", "") or request.headers.get("x-request-id", ""),
     )
@@ -623,7 +667,7 @@ async def sync_cognito_group(
     svc = _build_cognito_sync_service(
         request.app.state.key_service, request.app.state.cache_mgr
     )
-    result = await svc.sync_group(session, groupname)
+    result = await svc.sync_group(session, groupname, caller=_sync_caller(request, admin))
     await audit_logger.log(
         session,
         actor_user_id=admin.user_id,
@@ -692,6 +736,7 @@ class AllowedClientsBody(BaseModel):
 class AllowedClientsResponse(BaseModel):
     user_id: uuid.UUID
     clients: list[str]   # [] = both allowed (default)
+    managed_by: ManagedByInfo | None = managed_by_field()
 
 
 @router.get("/users/{user_id}/allowed-clients", response_model=AllowedClientsResponse)
@@ -701,7 +746,13 @@ async def get_allowed_clients(
     session: AsyncSession = Depends(get_db_session),
 ):
     svc = UserAllowedClientService(session)
-    return AllowedClientsResponse(user_id=str(user_id), clients=await svc.get(user_id))
+    rows = await managed_rows(
+        session, resource_type=RESOURCE_USER, resource_ids=[user_id], facets=[FIELD_ALLOWED_CLIENTS]
+    )
+    return AllowedClientsResponse(
+        user_id=str(user_id), clients=await svc.get(user_id),
+        **({"managed_by": managed_info(rows[0])} if rows else {}),
+    )
 
 
 @router.put("/users/{user_id}/allowed-clients", response_model=AllowedClientsResponse, dependencies=[Depends(require_human_admin)])
@@ -762,6 +813,7 @@ async def clear_allowed_clients(
 class UserAllowedModelsResponse(BaseModel):
     user_id: uuid.UUID
     model_aliases: list[str]  # [] = override 없음 → 팀 정책으로 폴백
+    managed_by: ManagedByInfo | None = managed_by_field()
 
 
 @router.get("/users/{user_id}/allowed-models", response_model=UserAllowedModelsResponse)
@@ -771,8 +823,12 @@ async def get_user_allowed_models(
     session: AsyncSession = Depends(get_db_session),
 ):
     svc = UserAllowedModelService(session)
+    rows = await managed_rows(
+        session, resource_type=RESOURCE_USER, resource_ids=[user_id], facets=[FIELD_ALLOWED_MODELS]
+    )
     return UserAllowedModelsResponse(
-        user_id=str(user_id), model_aliases=await svc.get(user_id)
+        user_id=str(user_id), model_aliases=await svc.get(user_id),
+        **({"managed_by": managed_info(rows[0])} if rows else {}),
     )
 
 

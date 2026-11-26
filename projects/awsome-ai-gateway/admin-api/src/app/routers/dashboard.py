@@ -541,7 +541,7 @@ async def dashboard_web_search(
     요청당 검색 수. **모니터링 전용**(예산·한도와 무관).
 
     - 검색 수·비용은 status 무관(실패 요청의 검색도 과금 — services/web_search_cost).
-    - ``queries_per_request`` = 검색 수 / 성공 요청 수(KPI 의 total_requests 와 같은 모집단),
+    - ``queries_per_request`` = 검색 수 / (성공 + 취소 요청 수)(대시보드 요청 카드와 같은 모집단),
       소수 8자리(작은 값도 0 이 되지 않게).
     - ``avg_queries_per_day`` = 검색 수 / 경과일(리포팅 TZ; 당월은 오늘까지, 지난 달은 그 달 일수).
     - ``daily`` 는 검색이 있었던 날만 — 빈 날·미래 날 채우기는 UI(비용 추이와 같은 규칙).
@@ -562,7 +562,9 @@ async def dashboard_web_search(
 
         price, _is_default, _row = await get_price(session)
         days = elapsed_days(period, reporting_today())
-        successful = int(t.total_requests)
+        # 응답 필드명은 하위 호환을 위해 successful_requests 그대로 두지만, 분모는
+        # 대시보드 요청 카드와 같은 성공+취소다(cancelled 도 프로바이더 처리·과금 행).
+        counted_requests = int(t.total_requests) + int(t.cancelled_requests)
         return {
             "period": period,
             "deployed": ws.deployed,
@@ -571,11 +573,12 @@ async def dashboard_web_search(
             "queries": ws.queries,
             "cost_usd": ws.cost_usd,
             "untracked_queries": ws.untracked_queries,
-            "successful_requests": successful,
+            "successful_requests": counted_requests,
             "elapsed_days": days,
             "avg_queries_per_day": round(ws.queries / days, 2) if days > 0 else None,
             # 소수 2자리로 자르면 3/1,818 이 0.0 이 된다 — 표시 자릿수는 UI(fmtSmallRatio)가 정한다.
-            "queries_per_request": round(ws.queries / successful, 8) if successful > 0 else None,
+            "queries_per_request": (round(ws.queries / counted_requests, 8)
+                                   if counted_requests > 0 else None),
             "by_client": [
                 {
                     "client": r.client,

@@ -52,7 +52,7 @@ async def test_flag_off_requests_404(monkeypatch):
     app = _app(monkeypatch, False)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         for method, path in (("GET", "/aicm/v1/service-tokens"), ("POST", "/aicm/v1/users/provision"),
-                             ("PUT", "/aicm/v1/budgets/spent")):
+                             ("PUT", "/aicm/v1/admin/budgets/spent")):
             r = await c.request(method, path, headers={"Authorization": "Bearer itg-" + "0" * 64})
             assert r.status_code == 404, (method, path, r.status_code)
 
@@ -63,7 +63,7 @@ def test_flag_off_does_not_import_integration_modules():
         "os.environ.setdefault('VIRTUAL_KEY_ENCRYPTION_KEY', '0'*64);"
         "import app.main;"
         "mods = ['app.routers.aicm', 'app.services.user_lifecycle_service', 'app.services.cognito_admin',"
-        " 'app.core.idempotency', 'app.core.integration_auth'];"
+        " 'app.core.idempotency', 'app.core.integration_auth', 'app.routers.aicm_admin'];"
         "print([m for m in mods if m in sys.modules])"
     )
     out = subprocess.run([sys.executable, "-c", code], cwd=_ADMIN_API, capture_output=True, text=True,
@@ -89,7 +89,11 @@ def test_flag_on_routes_commit_before_response(monkeypatch):
 
     app = _app(monkeypatch, True)
     aicm = [r for r in app.routes if isinstance(r, APIRoute) and r.path.startswith("/aicm/v1")]
+<<<<<<< HEAD
     assert len(aicm) == 17
+=======
+    assert len(aicm) == 30  # legacy 5 + admin mirror 25 unique method+path routes
+>>>>>>> nds/dev
     assert all(isinstance(r, CommittingRoute) for r in aicm)
 
 
@@ -97,7 +101,7 @@ def test_admin_routers_do_not_import_integration_modules():
     banned = ("user_lifecycle_service", "cognito_admin", "integration_auth", "core.idempotency",
               "integration_token_service", "routers.aicm")
     for f in (_ADMIN_API / "src" / "app" / "routers").glob("*.py"):
-        if f.name == "aicm.py":
+        if f.name in ("aicm.py", "aicm_admin.py"):
             continue
         text = f.read_text(encoding="utf-8")
         assert not [b for b in banned if b in text], f.name

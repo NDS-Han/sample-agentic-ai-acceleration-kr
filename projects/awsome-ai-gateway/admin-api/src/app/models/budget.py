@@ -83,6 +83,37 @@ class BudgetConfig(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class UserAppGroupBudget(Base):
+    """사용자별 app-group advisory 예산(AICM).
+
+    gateway hot path enforcement 에는 쓰지 않는다 — 그룹 구성/예약 회계를 아직
+    게이트웨이가 모르므로, 이 테이블은 AICM·admin 의 제어plane 정책 저장소다.
+    """
+
+    __tablename__ = "user_app_group_budgets"
+    __table_args__ = {"schema": "budget"}
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("auth.users.id", ondelete="CASCADE"), primary_key=True
+    )
+    app_group: Mapped[str] = mapped_column(String(64), primary_key=True)
+    max_budget_usd: Mapped[Decimal] = mapped_column(Numeric(12, 4), nullable=False)
+    policy: Mapped[BudgetPolicy] = mapped_column(
+        Enum(BudgetPolicy, name="budget_policy", schema="budget", create_type=False),
+        nullable=False, default=BudgetPolicy.HARD_BLOCK,
+    )
+    alert_thresholds: Mapped[list[int]] = mapped_column(
+        ARRAY(Integer), nullable=False, default=lambda: [80, 90, 100]
+    )
+    allocated_by: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("auth.users.id"), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
 # ── BudgetUsage ──
 
 

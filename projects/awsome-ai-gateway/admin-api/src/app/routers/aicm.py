@@ -7,7 +7,7 @@
 email 사용자 조회, per-user allowed-clients, user/team 예산 한도. reactivation·spent seeding·
 app budget·managed lock 등 미결 질문에 달린 표면은 이 라우터에 없다.
 
-- 인증: ``itg-`` 통합 토큰 + scope(``core/integration_auth.py``). svc- 토큰·사람 JWT 는 401.
+- 인증: legacy lifecycle 표면은 ``itg-`` 통합 토큰 + scope(``core/integration_auth.py``). svc- 토큰·사람 JWT 는 401.
   예외는 토큰 발급(``POST /aicm/v1/service-tokens``) 하나 — 사람 admin(JWT) 전용.
 - 토큰 rotate/provision/deactivate: ``Idempotency-Key`` 필수, 감사 행에 ``_integration`` 태그.
 - 업무 로직은 기존 서비스 계층을 재사용한다 — 이 모듈은 인증·멱등·오류 매핑만 한다.
@@ -45,7 +45,9 @@ from app.services.integration_targets import (
     users_by_email_ci,
 )
 from app.services.integration_token_service import INTEGRATION_AICM, IntegrationTokenService
+from app.services.service_token_service import INTEGRATION_TOKEN_PREFIX, SERVICE_TOKEN_PREFIX
 from app.services.user_allowed_client_service import UserAllowedClientService
+
 
 router = APIRouter(prefix="/aicm/v1", tags=["AICM Integration"])
 
@@ -62,6 +64,10 @@ class AicmTokenIssueRequest(BaseModel):
     allowed_cidrs: list[str] | None = Field(None, max_length=16, description="호출 허용 원천 IP 대역. 생략 = 제한 없음")
     rate_limit_per_min: int | None = Field(None, ge=1, le=10000, description="write 등급 분당 상한 재정의")
     expiry_days: int | None = Field(None, ge=1, le=365)
+    legacy_lifecycle_token: bool = Field(
+        False,
+        description="true 면 legacy /aicm/v1 lifecycle 전용 itg- 토큰. 기본 false 는 admin mirror 용 svc-",
+    )
 
 
 class AicmTokenIssueResponse(BaseModel):
@@ -188,6 +194,7 @@ async def issue_integration_token(
         session, name=body.name, created_by=admin.user_id, scopes=body.scopes,
         allowed_cidrs=body.allowed_cidrs, rate_limit_per_min=body.rate_limit_per_min,
         expiry_days=body.expiry_days,
+        prefix=INTEGRATION_TOKEN_PREFIX if body.legacy_lifecycle_token else SERVICE_TOKEN_PREFIX,
     )
     await audit_logger.log(
         session,

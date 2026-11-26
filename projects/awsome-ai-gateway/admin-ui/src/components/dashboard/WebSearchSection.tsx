@@ -200,6 +200,14 @@ export function WebSearchSection({
                   <YAxis allowDecimals={false} tick={{ fontSize: 10 }} tickLine={false} axisLine={false} />
                   <Tooltip
                     cursor={{ fill: 'hsl(var(--muted))' }}
+                    contentStyle={{
+                      backgroundColor: 'hsl(var(--card))',
+                      border: '1px solid hsl(var(--border))',
+                      borderRadius: '12px',
+                      fontSize: '12px',
+                    }}
+                    labelStyle={{ color: 'hsl(var(--muted-foreground))' }}
+                    itemStyle={{ color: 'hsl(var(--foreground))' }}
                     formatter={(v) => [Number(v).toLocaleString('en-US'), t('dailyQueries')]}
                   />
                   {/* minPointSize — 검색 0회인 지난 날도 평평한 막대로 보인다(null=미래는 그리지 않음). */}

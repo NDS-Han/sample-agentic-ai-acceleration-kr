@@ -58,12 +58,12 @@ async def _call(total, by_client=(), daily=(), *, today=date(2026, 11, 24), depl
                                           _session(total, by_client, daily))
 
 
-def _total(queries, cost, requests, untracked=0):
+def _total(queries, cost, requests, untracked=0, cancelled=0):
     return SimpleNamespace(ws_queries=queries, ws_cost=cost, ws_untracked=untracked,
                            total_requests=requests, error_requests=0, total_cost=0,
                            active_users=0, input_tokens=0, output_tokens=0,
                            cache_creation_tokens=0, cache_read_tokens=0,
-                           cancelled_requests=0, billable_requests=requests,
+                           cancelled_requests=cancelled, billable_requests=requests,
                            success_cost=0, failed_cost=0, cancelled_cost=0)
 
 
@@ -103,6 +103,14 @@ async def test_small_per_request_ratio_is_not_rounded_to_zero():
     # dev 실측: 3 검색 / 1,818 성공 요청 — 소수 2자리로 자르면 0.0 이 되어 UI 가 '0.00' 을 보였다.
     p = await _call(_total(3, None, 1818))
     assert p["queries_per_request"] == round(3 / 1818, 8) and p["queries_per_request"] > 0
+
+
+@pytest.mark.asyncio
+async def test_per_request_denominator_is_success_plus_cancelled():
+    # 대시보드 요청 카드와 같은 모집단 — cancelled 도 프로바이더가 처리한 청구 요청이다.
+    p = await _call(_total(10, Decimal("0.07"), 3, cancelled=2), period="2026-10")
+    assert p["successful_requests"] == 5  # 하위 호환 필드명, 값은 성공+취소
+    assert p["queries_per_request"] == 2.0
 
 
 @pytest.mark.asyncio

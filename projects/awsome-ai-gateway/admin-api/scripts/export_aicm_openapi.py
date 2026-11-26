@@ -16,6 +16,11 @@ from pathlib import Path
 
 OUT = Path(__file__).resolve().parents[2] / "docs" / "NDS" / "aicm" / "aicm-v1-openapi.json"
 _HUMAN_ONLY = {("post", "/aicm/v1/service-tokens")}
+_LEGACY_IDEMPOTENT = {
+    ("post", "/aicm/v1/service-tokens/rotate"),
+    ("post", "/aicm/v1/users/provision"),
+    ("post", "/aicm/v1/users/{user_id}/deactivate"),
+}
 
 
 def _refs(node, out: set[str]) -> None:
@@ -47,8 +52,11 @@ def build_spec(full: dict) -> dict:
             if (method, path) in _HUMAN_ONLY:
                 op["security"] = [{"adminJwt": []}]
                 continue
-            op["security"] = [{"integrationToken": []}]
-            if method in ("post", "put", "delete"):
+            op["security"] = [
+                {"integrationTokenSvc": []} if path.startswith("/aicm/v1/admin/")
+                else {"integrationTokenLegacy": []}
+            ]
+            if (method, path) in _LEGACY_IDEMPOTENT:
                 op.setdefault("parameters", []).append({
                     "name": "Idempotency-Key", "in": "header", "required": True,
                     "schema": {"type": "string", "minLength": 1, "maxLength": 128},
@@ -61,8 +69,9 @@ def build_spec(full: dict) -> dict:
             "title": "LLM Gateway — AICM integration API",
             "version": "1.0.0",
             "description": (
-                "admin-api 의 /aicm/v1 라우터(AICM_API_ENABLED=true 일 때만 존재). "
-                "인증: Authorization: Bearer itg-<64 hex>(scope 지정 통합 토큰). "
+                "admin-api /aicm/v1 라우터(AICM_API_ENABLED=true 일 때만 존재). "
+                "/aicm/v1/admin mirror: Authorization: Bearer svc-<64 hex>(AICM scoped). "
+                "legacy lifecycle routes: Bearer itg-<64 hex>. "
                 "오류 봉투: {\"error\": {\"type\", \"code\", \"message\", \"details\"?}}. "
                 "안내서: docs/NDS/aicm/README.md"
             ),
@@ -71,7 +80,8 @@ def build_spec(full: dict) -> dict:
         "components": {
             "schemas": {k: schemas[k] for k in sorted(needed)},
             "securitySchemes": {
-                "integrationToken": {"type": "http", "scheme": "bearer", "bearerFormat": "itg-<64 hex>"},
+                "integrationTokenSvc": {"type": "http", "scheme": "bearer", "bearerFormat": "svc-<64 hex>, AICM scoped"},
+                "integrationTokenLegacy": {"type": "http", "scheme": "bearer", "bearerFormat": "itg-<64 hex>"},
                 "adminJwt": {"type": "http", "scheme": "bearer", "bearerFormat": "JWT (human admin)"},
             },
         },
