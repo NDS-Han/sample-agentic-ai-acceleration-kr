@@ -484,6 +484,7 @@ async def lifespan(app: FastAPI):
         session_factory=create_session_factory(hot_db_engine),
         degradation_manager=degradation_manager,
         cooldown_sec=settings.hot_db_breaker_cooldown_sec,
+        redis_cooldown_sec=settings.hot_redis_breaker_cooldown_sec,
     )
     _auth_caches = _auth_service.AuthLocalCaches(
         ttl=settings.auth_local_cache_ttl_sec,

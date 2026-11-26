@@ -31,6 +31,10 @@ def _reset_hot_path_state():
         budget_degraded.DEGRADED.grace.seconds = 300.0
         hot_path.DB_BREAKER.reset()
         hot_path.DB_BREAKER._dm = None
+        hot_path.REDIS_BREAKER.reset()
+        from app.services import rate_limit_config_loader
+
+        rate_limit_config_loader.reset_last_known_for_test()
         hot_path._HOT_SESSION_FACTORY = None
         auth_service.configure_auth_local_caches(None)
         web_search_quota._LAST_COUNTER.clear()

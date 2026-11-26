@@ -1059,12 +1059,21 @@ class CostRecorder:
         (wave 3b B3 — 예전에는 Redis 복구 전까지 메모리에만 있어 파드 종료와 함께 사라졌다).
         """
         published = False
-        if redis is not None:
+        from app.services.hot_path import REDIS_BREAKER, is_redis_infra_error
+
+        # 공용 Redis 브레이커가 열려 있으면(p1-hotpath-redis) XADD 를 시도하지 않고 바로 spool —
+        # Redis 열화(redis=None)와 같은 경로다. 행(hang) 중 이벤트마다 소켓 타임아웃×재시도를
+        # 기다리지 않는다(시작 이벤트는 첫 바이트 전에 나간다). spool 이 없으면 예전처럼
+        # XADD 를 시도한다.
+        if redis is not None and (REDIS_BREAKER.available() or self._spool is None):
             try:
                 # MAXLEN 없음 — 위 COST_STREAM_KEY 주석(B4).
                 await redis.xadd(COST_STREAM_KEY, {"payload": payload_json})
                 published = True
-            except Exception:
+                REDIS_BREAKER.record_success()
+            except Exception as e:
+                if is_redis_infra_error(e):
+                    REDIS_BREAKER.trip(f"cost_stream:{type(e).__name__}")
                 logger.exception("cost_stream_xadd_failed", request_id=request_id)
         if not published and self._spool is not None:
             # P0-②: don't lose the record — spool → DB fallback / re-publish on Redis recovery.

@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -64,15 +65,10 @@ def _cache_key(scope: str, scope_id: str | None, model_alias: str) -> str:
     return f"rl:config:{scope}:{sid}:{model_alias}"
 
 
-async def _load_scope_from_cache(
-    redis, scope: str, scope_id: str | None, model_alias: str
-) -> ScopeLimits | None:
-    if redis is None:
+def _parse_cached(raw, scope: str, scope_id: str | None) -> ScopeLimits | None:
+    if raw is None:
         return None
     try:
-        raw = await redis.get(_cache_key(scope, scope_id, model_alias))
-        if raw is None:
-            return None
         data = json.loads(raw)
         # rpm/tpm 은 bool 이 아닌 int 여야 한다 — 'abc' 는 소비부
         # `'abc' > 0` TypeError → 매 요청 500(TTL 300s), true 는
@@ -101,25 +97,129 @@ async def _load_scope_from_cache(
         return None
 
 
+def _guard_enabled() -> bool:
+    from app.config import get_settings
+
+    return bool(get_settings().rl_breaker_enabled)
+
+
+async def _load_scopes_from_cache(
+    redis, specs: list[tuple[str, str | None, str]], model_alias: str
+) -> list[ScopeLimits | None]:
+    """스코프별 캐시 GET 을 **동시에** 보낸다 — 순차 3 왕복 → 1 왕복(p1-hotpath-redis).
+
+    스코프 키는 hash tag 가 없어 cluster 에서 슬롯이 갈리므로 MGET 대신 GET 을 gather 한다.
+    공용 Redis 브레이커가 열려 있으면 읽지 않고(전부 미스 → DB), 타임아웃/연결 오류는 브레이커를
+    연다. 실패한 스코프는 미스로 처리(예전과 같다).
+    """
+    misses: list[ScopeLimits | None] = [None] * len(specs)
+    if redis is None:
+        return misses
+    from app.services.hot_path import REDIS_BREAKER, is_redis_infra_error, run_redis
+
+    async def _all():
+        return await asyncio.gather(
+            *(redis.get(_cache_key(sc, sid, model_alias)) for sc, sid, _attr in specs),
+            return_exceptions=True,
+        )
+
+    try:
+        if _guard_enabled():
+            from app.config import get_settings
+
+            raws = await run_redis(
+                _all, timeout=get_settings().hot_redis_timeout_sec, what="rl_config"
+            )
+        else:
+            raws = await _all()
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logger.warning("rl_config_cache_read_failed", error=type(e).__name__)
+        return misses
+    out: list[ScopeLimits | None] = []
+    for (sc, sid, _attr), raw in zip(specs, raws):
+        if isinstance(raw, BaseException):
+            if isinstance(raw, asyncio.CancelledError):
+                raise raw
+            if _guard_enabled() and is_redis_infra_error(raw):
+                REDIS_BREAKER.trip(f"rl_config:{type(raw).__name__}")
+            logger.warning("rl_config_cache_read_failed", scope=sc, scope_id=sid)
+            out.append(None)
+            continue
+        out.append(_parse_cached(raw, sc, sid))
+    return out
+
+
+# ── 마지막으로 알던 한도 (프로세스 로컬, p1-hotpath-redis) ─────────────────────────
+# Redis 가 답하지 못할 때 middleware/rate_limit.py 의 메모리 fallback 이 스코프의 실제 한도를
+# 쓰게 한다 — 예산 열화 모드(wave 1c)가 마지막으로 알던 정책을 쓰는 것과 같은 규칙.
+# budget_stale_max_seconds 까지 유효. 요청 경로의 판정은 여전히 Redis/DB 값이 먼저다.
+_LAST_KNOWN = None
+
+
+def _last_known_cache():
+    global _LAST_KNOWN
+    if _LAST_KNOWN is None:
+        from app.config import get_settings
+        from app.services.hot_path import LocalCache
+
+        s = get_settings()
+        _LAST_KNOWN = LocalCache(
+            ttl=s.budget_stale_max_seconds,
+            max_stale=s.budget_stale_max_seconds,
+            max_entries=s.budget_local_cache_max_entries,
+        )
+    return _LAST_KNOWN
+
+
+def remember_limits(scope: str, scope_id: str | None, model_alias: str,
+                    limits: ScopeLimits) -> None:
+    _last_known_cache().put((scope, scope_id, model_alias), limits)
+
+
+def last_known_limits(scope: str, scope_id: str | None, model_alias: str) -> ScopeLimits | None:
+    """마지막으로 Redis/DB 에서 읽은 이 스코프의 한도(없으면 None = 모름)."""
+    return _last_known_cache().get_stale((scope, scope_id, model_alias))
+
+
+def reset_last_known_for_test() -> None:
+    global _LAST_KNOWN
+    _LAST_KNOWN = None
+
+
 async def _save_scope_to_cache(
     redis, scope: str, scope_id: str | None, model_alias: str, limits: ScopeLimits
 ) -> None:
     if redis is None:
         return
-    try:
-        await redis.set(
-            _cache_key(scope, scope_id, model_alias),
-            json.dumps(
-                {
-                    "rpm": limits.rpm,
-                    "tpm": limits.tpm,
-                    "cpm": str(limits.cpm) if limits.cpm is not None else None,
-                    "cph": str(limits.cph) if limits.cph is not None else None,
-                    "agg": limits.model_agnostic,
-                }
-            ),
-            ex=_CONFIG_CACHE_TTL_SEC,
+    payload = json.dumps(
+        {
+            "rpm": limits.rpm,
+            "tpm": limits.tpm,
+            "cpm": str(limits.cpm) if limits.cpm is not None else None,
+            "cph": str(limits.cph) if limits.cph is not None else None,
+            "agg": limits.model_agnostic,
+        }
+    )
+
+    def _set():
+        return redis.set(
+            _cache_key(scope, scope_id, model_alias), payload, ex=_CONFIG_CACHE_TTL_SEC
         )
+
+    try:
+        if _guard_enabled():
+            from app.config import get_settings
+            from app.services.hot_path import run_redis
+
+            # 브레이커가 열려 있으면 쓰지 않는다(HotRedisUnavailable) — 다음 요청이 다시 채운다.
+            await run_redis(_set, timeout=get_settings().hot_redis_timeout_sec,
+                            what="rl_config_write")
+        else:
+            await _set()
+    except asyncio.CancelledError:
+        raise
     except Exception:
         logger.warning("rl_config_cache_write_failed", scope=scope, scope_id=scope_id)
 
@@ -191,10 +291,11 @@ async def load_all_scope_limits(
         scope_specs.append(("TEAM", team_id, "team"))
     scope_specs.append(("GLOBAL", None, "global_"))
 
-    for scope_name, scope_id, attr in scope_specs:
-        cached = await _load_scope_from_cache(redis, scope_name, scope_id, model_alias)
+    cached_all = await _load_scopes_from_cache(redis, scope_specs, model_alias)
+    for (scope_name, scope_id, attr), cached in zip(scope_specs, cached_all):
         if cached is not None:
             setattr(result, attr, cached)
+            remember_limits(scope_name, scope_id, model_alias, cached)
             continue
 
         if db is None:
@@ -222,6 +323,7 @@ async def load_all_scope_limits(
             continue
 
         setattr(result, attr, limits)
+        remember_limits(scope_name, scope_id, model_alias, limits)
         await _save_scope_to_cache(redis, scope_name, scope_id, model_alias, limits)
 
     return result

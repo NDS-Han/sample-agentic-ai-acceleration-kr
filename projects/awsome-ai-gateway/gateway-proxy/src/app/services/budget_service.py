@@ -21,7 +21,7 @@ from app.models.budget import BudgetConfig, BudgetScope, BudgetUsage
 from app.resilience.redis_retry import call_with_transient_retry
 from app.schemas.domain import BudgetPolicy, BudgetStatus
 from app.services import budget_degraded as _bd
-from app.services.hot_path import DB_BREAKER, HotDbUnavailable
+from app.services.hot_path import DB_BREAKER, HotDbUnavailable, is_redis_infra_error
 from app.services.lua_loader import LuaScriptLoader
 
 logger = structlog.get_logger(__name__)
@@ -643,17 +643,21 @@ class BudgetService:
             # 단절이 500 이 아니라 fallback 으로 간다.
             try:
                 async with asyncio.timeout(get_settings().budget_redis_timeout_sec):
-                    return await self._check_budget_redis(
+                    status = await self._check_budget_redis(
                         redis, dbx, user_id, team_id, period, client
                     )
+                # Redis 가 답했다 — 공용 브레이커의 half-open 프로브였다면 닫는다(p1-hotpath-redis).
+                deg.redis_breaker.record_success()
+                return status
             except PermissionError:
+                deg.redis_breaker.record_success()  # 거절도 Redis 가 답한 것이다
                 raise
             except _PolicyUnknown as e:
                 # Redis 는 살아 있고 DB 가 답하지 않는다 — DB 폴백은 같은 DB 라 건너뛴다.
                 return self._decide_last_known(user_id, team_id, period, client, cause=str(e))
             except Exception as e:
                 logger.exception("redis_budget_check_failed", user_id=user_id)
-                if isinstance(e, (RedisError, OSError, TimeoutError)):
+                if is_redis_infra_error(e):  # 풀 고갈·ResponseError 는 Redis 장애가 아니다
                     deg.redis_breaker.trip(f"budget:{type(e).__name__}")
                 # Redis 경로 안에서 실패한 DB 구문(hydrate/복원)이 세션을
                 # aborted 상태로 남겼을 수 있다 — 같은 세션으로 가는
@@ -701,10 +705,17 @@ class BudgetService:
         user_config_key = f"budget:config:user:{{{user_id}}}"
         team_key = f"budget:team:{{{team_id}}}:{period}"
         team_config_key = f"budget:config:team:{{{team_id}}}"
+        # 두 설정 키 존재 확인은 서로 독립인 읽기다 — 동시에 보내 왕복 1회(p1-hotpath-redis).
+        # 팀 설정 재수화(아래)는 팀 키만 쓰므로 사용자 키 확인을 앞당겨도 결과가 같다. 키마다
+        # hash tag 가 달라 cluster 에서는 슬롯이 갈린다 — EXISTS 두 개를 gather 한다.
+        team_config_exists, user_config_present = await asyncio.gather(
+            redis.exists(team_config_key), redis.exists(user_config_key)
+        )
+
         # TEAM config cold-cache fallback: init SQL / alembic backfill 로 DB에
         # 삽입된 TEAM 예산이 Redis에 없으면 DB에서 조회해 캐시 (admin-api startup
         # warmup 의 안전망).
-        if not await redis.exists(team_config_key):
+        if not team_config_exists:
             await self._resolve_missing_config(
                 redis, dbx,
                 pk=_bd.PolicyCache.team_key(team_id),
@@ -718,7 +729,6 @@ class BudgetService:
         # budget gate below would silently skip → budget bypass. Rehydrate from
         # DB on miss (ensure_config_cached rebuilds app_clients from active
         # per-app BudgetConfig rows) so the gate stays enforced.
-        user_config_present = await redis.exists(user_config_key)
         if not user_config_present:
             user_config_present = await self._resolve_missing_config(
                 redis, dbx,
@@ -752,6 +762,7 @@ class BudgetService:
         # rebuild.lua 는 플로어 방식이라(cur < db+live 일 때만 SET)
         # 정상 월 첫 쓰기의 센티넬 발화도 no-op 으로 수렴한다.
         _rebuild_needed = False
+        _team_vals = None
         if dbx.configured:
             # 같은 {uid} 슬롯이라 MGET 1회로 카운터+센티넬을 묶는다 —
             # 키별 GET/EXISTS 왕복을 요청마다 반복하지 않게(R22 r4 N3).
@@ -767,7 +778,11 @@ class BudgetService:
             )
             if _app_key:
                 _probe += [_app_key, f"{_app_key}:lost"]
-            _vals = await redis.mget(_probe)
+            # 팀 카운터 판독(아래)도 같이 보낸다 — 사용자 복원은 사용자 키만 쓰므로 팀 값은
+            # 같다(왕복 1회 절약, p1-hotpath-redis). 두 MGET 은 각자 한 슬롯이다.
+            _vals, _team_vals = await asyncio.gather(
+                redis.mget(_probe), redis.mget([team_key, f"{team_key}:lost"])
+            )
             _uk = _vals[0]
             _rebuild_needed = (
                 _counter_unhealthy(_uk)
@@ -924,7 +939,9 @@ class BudgetService:
         # 카운터 유실(축출/failover) 뒤 budget_check.lua 가 used=0 을 읽어
         # 팀 하드캡이 그 달 내내 사실상 해제된다(E2E S2-1). 사용자와 같은
         # 규칙: 이미 있는 키는 건드리지 않고, in-flight 예약 마커 합을 얹는다.
-        _tk, _tk_lost = await redis.mget([team_key, f"{team_key}:lost"])
+        if _team_vals is None:
+            _team_vals = await redis.mget([team_key, f"{team_key}:lost"])
+        _tk, _tk_lost = _team_vals
         if dbx.configured and (
             _counter_unhealthy(_tk)
             or _tk_lost is not None
@@ -1007,7 +1024,23 @@ class BudgetService:
         # user_budget_exceeded 가 team_budget_unset 을 이겨 DB 폴백과
         # 에러 코드가 갈린다. eval 순서만 바꾸고 block 판정은
         # §6-1 순서(1 unset → 2 user → 3 team)대로 적용한다.
-        team_raw = await redis.eval(script, 2, team_key, team_config_key, "team", "")
+        # 개인 config 가 없으면 D-3 합성용 팀 config GET(아래)도 팀 EVAL 과 같이 보낸다 — 서로
+        # 독립인 읽기라 왕복 1회 절약(p1-hotpath-redis). 판정 순서와 오류 처리는 예전 그대로:
+        # 팀 EVAL 결과(오류·미설정 거절)가 먼저, GET 오류는 그 다음에 드러난다.
+        if user_config_present:
+            team_raw = await redis.eval(script, 2, team_key, team_config_key, "team", "")
+            team_cfg_res = None
+        else:
+            team_raw, team_cfg_res = await asyncio.gather(
+                redis.eval(script, 2, team_key, team_config_key, "team", ""),
+                redis.get(team_config_key),
+                return_exceptions=True,
+            )
+            for _r in (team_raw, team_cfg_res):
+                if isinstance(_r, asyncio.CancelledError):
+                    raise _r
+            if isinstance(team_raw, BaseException):
+                raise team_raw
         team_result = json.loads(team_raw)
         # 마지막 판정 상태 — Redis·DB 가 둘 다 답하지 못할 때 이 값으로 다시 판정한다(1c).
         self._remember("team", (team_id,), period, team_result)
@@ -1022,7 +1055,9 @@ class BudgetService:
         # ARGV 로 주입한다 — D 유저의 policy/thresholds 는 팀 것을 따른다.
         user_fallback = ""
         if not user_config_present:
-            team_cfg_raw = await redis.get(team_config_key)
+            if isinstance(team_cfg_res, BaseException):
+                raise team_cfg_res
+            team_cfg_raw = team_cfg_res
             if team_cfg_raw:
                 try:
                     team_cfg = json.loads(
@@ -1479,14 +1514,14 @@ class BudgetService:
         user_fallback = ""
         try:
             async with asyncio.timeout(3.0):
-                cfg_exists = await call_with_transient_retry(
-                    redis.exists, user_config_key, idempotent=True
+                # 두 읽기를 동시에 — 팀 config 는 개인 config 가 없을 때만 쓰이지만 읽기는 멱등이라
+                # 미리 읽어도 결과가 같고 왕복 1회를 줄인다(p1-hotpath-redis).
+                cfg_exists, team_cfg_raw = await asyncio.gather(
+                    call_with_transient_retry(redis.exists, user_config_key, idempotent=True),
+                    call_with_transient_retry(redis.get, team_config_key, idempotent=True),
                 )
-                team_cfg_raw = None
-                if not cfg_exists:
-                    team_cfg_raw = await call_with_transient_retry(
-                        redis.get, team_config_key, idempotent=True
-                    )
+                if cfg_exists:
+                    team_cfg_raw = None
         except (TimeoutError, RedisError) as exc:
             # deadline 이든 Redis 자체 오류(재시도 소진)든 — 빈 fallback 으로
             # 진행해 eval 이 config 키를 직접 읽게 한다. 이 경로만 closed

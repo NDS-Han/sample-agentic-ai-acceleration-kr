@@ -1,17 +1,61 @@
 # Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
 
 
+import hashlib
+from functools import lru_cache
+
 import structlog
 from redis.asyncio import Redis
 from redis.asyncio.cluster import RedisCluster
 from redis.asyncio.retry import Retry
 from redis.backoff import ExponentialBackoff
 from redis.exceptions import ConnectionError as RedisConnectionError
+from redis.exceptions import NoScriptError
 from redis.exceptions import TimeoutError as RedisTimeoutError
 
 from app.config import Settings
 
 logger = structlog.get_logger(__name__)
+
+
+@lru_cache(maxsize=256)
+def _script_sha(script: str) -> str:
+    return hashlib.sha1(script.encode("utf-8")).hexdigest()
+
+
+class _EvalShaMixin:
+    """``eval(script, …)`` → ``EVALSHA sha1(script)`` (p1-hotpath-redis).
+
+    호출부는 지금처럼 스크립트 원문을 넘긴다. 예산·한도 Lua 는 4–17 KB 라 요청 하나가 EVAL 로
+    ~160 KB 를 Redis 에 보냈다(요청당 EVAL 17회). EVALSHA 는 40 바이트 해시만 보낸다.
+    서버 스크립트 캐시에 없으면(NOSCRIPT — 재시작·failover·새 노드) 원문 EVAL 로 한 번 더 보낸다.
+    EVAL 이 그 노드의 캐시를 채우므로 다음부터는 EVALSHA 로 끝난다. NOSCRIPT 는 스크립트가
+    실행되지 않았다는 뜻이라 재전송은 비멱등 스크립트에도 안전하다.
+    파이프라인(``pipeline()``)의 eval 은 이 경로를 타지 않는다(기존 EVAL 그대로).
+    """
+
+    evalsha_enabled = True
+
+    async def eval(self, script, numkeys, *keys_and_args):  # type: ignore[override]
+        if not self.evalsha_enabled or not isinstance(script, str):
+            return await super().eval(script, numkeys, *keys_and_args)
+        try:
+            return await super().evalsha(_script_sha(script), numkeys, *keys_and_args)
+        except NoScriptError:
+            return await super().eval(script, numkeys, *keys_and_args)
+
+
+class GatewayRedis(_EvalShaMixin, Redis):
+    """standalone 클라이언트 — EVALSHA 우선."""
+
+
+class GatewayRedisCluster(_EvalShaMixin, RedisCluster):
+    """cluster 클라이언트 — EVALSHA 우선(키 슬롯 노드로 라우팅, 노드별 NOSCRIPT 는 EVAL 로 채움)."""
+
+
+def _apply_evalsha(client, settings: Settings):
+    client.evalsha_enabled = bool(getattr(settings, "redis_evalsha", True))
+    return client
 
 
 def _redact_credentials(url: str) -> str:
@@ -88,11 +132,13 @@ async def create_redis_client(settings: Settings) -> Redis | RedisCluster:
 
     if settings.redis_cluster_mode is True:
         logger.info("redis_mode", mode="cluster", url=_redact_credentials(settings.redis_url))
-        return RedisCluster.from_url(settings.redis_url, **_cluster_kwargs(settings))
+        return _apply_evalsha(
+            GatewayRedisCluster.from_url(settings.redis_url, **_cluster_kwargs(settings)), settings
+        )
 
     if settings.redis_cluster_mode is False:
         logger.info("redis_mode", mode="standalone", url=_redact_credentials(settings.redis_url))
-        return Redis.from_url(settings.redis_url, **kwargs)
+        return _apply_evalsha(GatewayRedis.from_url(settings.redis_url, **kwargs), settings)
 
     # Auto-detect via Startup Probe — 프로브에도 connect/socket 타임아웃을 줘야
     # 느린 노드/TLS 핸드셰이크에서 pod 부팅이 무한 대기하지 않는다(과거엔 무타임아웃).
@@ -113,6 +159,8 @@ async def create_redis_client(settings: Settings) -> Redis | RedisCluster:
     logger.info("redis_mode_autodetect", mode=mode, url=_redact_credentials(settings.redis_url))
 
     if mode == "cluster":
-        return RedisCluster.from_url(settings.redis_url, **_cluster_kwargs(settings))
+        return _apply_evalsha(
+            GatewayRedisCluster.from_url(settings.redis_url, **_cluster_kwargs(settings)), settings
+        )
 
-    return Redis.from_url(settings.redis_url, **kwargs)
+    return _apply_evalsha(GatewayRedis.from_url(settings.redis_url, **kwargs), settings)

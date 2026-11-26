@@ -20,7 +20,7 @@ from app.models.auth import JwtPublicKey, User
 from app.models.model import TeamAllowedModel, UserAllowedModel
 from app.schemas.domain import AuthContext, AuthType, Role
 from app.services import recent_vk as _recent_vk
-from app.services.hot_path import HotDbUnavailable, run_db
+from app.services.hot_path import HotDbUnavailable, run_db, run_redis
 
 logger = structlog.get_logger(__name__)
 
@@ -407,10 +407,13 @@ class VKAuthStrategy:
             return out
 
         async def _redis_get(key: str):
-            # 로컬 폴백이 있으면 Redis 행(hang)을 오래 기다리지 않는다.
+            # 로컬 폴백이 있으면 Redis 행(hang)을 오래 기다리지 않는다 — 공용 Redis 브레이커가
+            # 열려 있으면 아예 묻지 않고(HotRedisUnavailable = RedisError → 로컬 값), 타임아웃은
+            # 브레이커를 연다(p1-hotpath-redis). 로컬 값이 없는 키는 Redis 가 유일한 답이라
+            # 그대로 묻는다.
             if caches is not None and caches.ctx.get_stale(key_hash) is not None:
-                async with asyncio.timeout(caches.redis_fallback_timeout):
-                    return await redis.get(key)
+                return await run_redis(lambda: redis.get(key),
+                                       timeout=caches.redis_fallback_timeout, what="auth")
             return await redis.get(key)
 
         # 0) Redis 열화(미들웨어가 redis=None 으로 넘김) — 아는 키면 로컬 캐시로.
@@ -420,9 +423,28 @@ class VKAuthStrategy:
                 return stale
             raise AuthBackendUnavailableError("redis unavailable, VK lookup impossible")
 
-        # 1) AuthContext 캐시 조회
+        # 1) AuthContext 캐시 조회 + 2) VK→user_id 매핑 — 어느 분기든 두 키를 다 읽으므로
+        #    (히트는 폐기 확인, 미스는 매핑 해소) 동시에 보내 왕복 1회로 끝낸다(p1-hotpath-redis).
+        #    두 키는 hash tag 가 없어 cluster 에서 슬롯이 갈리므로 MGET 대신 GET 두 개. 오류 처리는
+        #    예전과 같은 지점·같은 규칙으로 아래에서 한다.
+        cache_res, mapping_res = await asyncio.gather(
+            _redis_get(f"key:cache:vk:{key_hash}"),
+            _redis_get(f"key:vk:{key_hash}"),
+            return_exceptions=True,
+        )
+        for _r in (cache_res, mapping_res):
+            if isinstance(_r, asyncio.CancelledError):
+                raise _r
+
+        def _mapping():
+            if isinstance(mapping_res, BaseException):
+                raise mapping_res
+            return mapping_res
+
         try:
-            cached = await _redis_get(f"key:cache:vk:{key_hash}")
+            if isinstance(cache_res, BaseException):
+                raise cache_res
+            cached = cache_res
         except (TimeoutError, RedisError, OSError):
             stale = _serve_stale("redis_error")
             if stale is not None:
@@ -444,7 +466,7 @@ class VKAuthStrategy:
                 # 매핑 키 존재를 함께 확인한다. revoke 가 두 키를 같이 지우므로
                 # 매핑 부재 = 폐기됨.
                 try:
-                    vk_mapping = await _redis_get(f"key:vk:{key_hash}")
+                    vk_mapping = _mapping()
                 except (TimeoutError, RedisError, OSError):
                     stale = _serve_stale("redis_error")
                     if stale is not None:
@@ -484,7 +506,7 @@ class VKAuthStrategy:
         #    안 되고, 무효키 폭주가 DB 를 때리는 것을 막는 의도된 설계(§9).
         user_id = None
         try:
-            raw = await _redis_get(f"key:vk:{key_hash}")
+            raw = _mapping()
         except (TimeoutError, RedisError, OSError):
             stale = _serve_stale("redis_error")
             if stale is not None:
