@@ -1474,6 +1474,36 @@ CREATE TABLE IF NOT EXISTS usage.cost_pending_events (
 CREATE INDEX IF NOT EXISTS idx_cost_pending_events_request
     ON usage.cost_pending_events (request_id);
 
+-- migration 0064: 통합 토큰(itg-, AICM /aicm/v1) 권한 부속 행. 토큰 자체는 auth.service_tokens 를
+-- 그대로 쓴다(발급/rotate/계보 폐기 공용). 빈 테이블이면 동작 변화 없음.
+CREATE TABLE IF NOT EXISTS auth.integration_tokens (
+    token_id            UUID          PRIMARY KEY REFERENCES auth.service_tokens(id) ON DELETE CASCADE,
+    integration         VARCHAR(32)   NOT NULL,
+    scopes              TEXT[]        NOT NULL,
+    allowed_cidrs       CIDR[],
+    rate_limit_per_min  INTEGER,
+    lineage_id          UUID          NOT NULL,
+    created_at          TIMESTAMPTZ   NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_integration_tokens_lineage
+    ON auth.integration_tokens (lineage_id);
+
+-- migration 0065: /aicm/v1 mutation 의 Idempotency-Key 저장소(진행 중 = status_code NULL).
+CREATE TABLE IF NOT EXISTS auth.integration_idempotency_keys (
+    integration     VARCHAR(32)   NOT NULL,
+    idem_key        VARCHAR(128)  NOT NULL,
+    method          VARCHAR(8)    NOT NULL,
+    path            VARCHAR(512)  NOT NULL,
+    request_sha256  VARCHAR(64)   NOT NULL,
+    status_code     INTEGER,
+    response        JSONB,
+    created_at      TIMESTAMPTZ   NOT NULL DEFAULT now(),
+    completed_at    TIMESTAMPTZ,
+    PRIMARY KEY (integration, idem_key)
+);
+CREATE INDEX IF NOT EXISTS idx_integration_idempotency_created
+    ON auth.integration_idempotency_keys (created_at);
+
 -- migration 0045: (dept_id,name)/(org_id,name) 유니크 — check-then-act 경합으로
 -- 중복 행이 생기면 get_team_by_dept_and_name LIMIT 1 이 비결정이 된다.
 -- ⚠️ 중복이 이미 있는 설치본에서 여기서 unique_violation 으로 죽으면 alembic

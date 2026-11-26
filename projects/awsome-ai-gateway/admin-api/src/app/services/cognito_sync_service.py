@@ -977,12 +977,20 @@ class CognitoSyncService:
                 result.errors.append(f"Failed to ensure team {team_name}: {e}")
         return uuid.UUID(settings.DEFAULT_TEAM_ID)
 
-    async def sync_user(self, session, username: str) -> SyncResult:
+    async def sync_user(
+        self, session, username: str, *, commit: bool = True, deactivate_missing: bool = True
+    ) -> SyncResult:
         """단일 사용자만 동기화. DB 에 없어도 신규 생성(고객 명시 케이스).
 
         username = Cognito Username (이 풀에선 email-attribute 이므로 sub 와 별개일 수
         있으나 admin_get_user(Username) 로 조회되어 sub/attributes 를 정확히 가져온다).
         role/team 은 그룹 멤버십에서 나오므로 admin_list_groups_for_user 도 함께 호출.
+
+        ``commit=False`` 는 호출자가 이 변경을 더 큰 비즈니스 트랜잭션(감사·멱등키와
+        원자적으로)에 넣을 때만 쓴다. 그 경우 반환된 ``result.pending_*`` 의 커밋 후
+        부수효과는 호출자가 커밋 직후 ``_flush_pending_revocations`` 로 적용해야 한다.
+        ``deactivate_missing=False`` 는 provision 처럼 방금 만든/찾은 Cognito 사용자만
+        동기화하는 경로에서 offboarding 판정을 끈다. 기본값은 기존 동작 그대로다.
         """
         settings = get_settings()
         result = SyncResult()
@@ -998,6 +1006,9 @@ class CognitoSyncService:
             result.errors.append(f"Failed to get user {username}: {e}")
             return result
         if cu is None:
+            if not deactivate_missing:
+                result.errors.append(f"Cognito user {username} not found")
+                return result
             # Cognito 에 없음 = AI도구 미사용 전환으로 관리서비스가 삭제한 케이스.
             # 에러가 아니라 DB soft-delete(is_active=False). Cognito 삭제 후엔 sub 를
             # 알 수 없으므로 email(=username) 로 조회. email 충돌 사고 방지를 위해
@@ -1063,8 +1074,9 @@ class CognitoSyncService:
         except Exception as e:
             result.errors.append(f"Failed to upsert user {email or username}: {e}")
 
-        await session.commit()
-        await self._flush_pending_revocations(session, result)
+        if commit:
+            await session.commit()
+            await self._flush_pending_revocations(session, result)
         logger.info(
             "cognito_sync.user_synced", username=username,
             created=result.users_created, updated=result.users_updated,

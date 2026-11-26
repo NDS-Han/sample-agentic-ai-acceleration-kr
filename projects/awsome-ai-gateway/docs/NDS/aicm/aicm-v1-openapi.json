@@ -1,0 +1,806 @@
+{
+  "components": {
+    "schemas": {
+      "AicmDeactivateRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "global_sign_out": {
+            "default": true,
+            "title": "Global Sign Out",
+            "type": "boolean"
+          },
+          "reason": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason"
+        ],
+        "title": "AicmDeactivateRequest",
+        "type": "object"
+      },
+      "AicmDeactivateResponse": {
+        "properties": {
+          "cognito": {
+            "title": "Cognito",
+            "type": "string"
+          },
+          "revoked_key_count": {
+            "title": "Revoked Key Count",
+            "type": "integer"
+          },
+          "state": {
+            "description": "deactivated | already_inactive",
+            "title": "State",
+            "type": "string"
+          },
+          "user_id": {
+            "title": "User Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "user_id",
+          "state",
+          "cognito",
+          "revoked_key_count"
+        ],
+        "title": "AicmDeactivateResponse",
+        "type": "object"
+      },
+      "AicmLink": {
+        "additionalProperties": false,
+        "properties": {
+          "attribute": {
+            "default": "Cognito_Subject",
+            "description": "SAML 쪽 식별 속성. Cognito_Subject = NameID(권장) 또는 매핑된 속성 이름(예: email)",
+            "title": "Attribute",
+            "type": "string"
+          },
+          "value": {
+            "maxLength": 2048,
+            "minLength": 1,
+            "title": "Value",
+            "type": "string"
+          }
+        },
+        "required": [
+          "value"
+        ],
+        "title": "AicmLink",
+        "type": "object"
+      },
+      "AicmProvisionRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "display_name": {
+            "anyOf": [
+              {
+                "maxLength": 255,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Display Name"
+          },
+          "email": {
+            "maxLength": 320,
+            "minLength": 3,
+            "title": "Email",
+            "type": "string"
+          },
+          "groups": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 20,
+            "minItems": 1,
+            "title": "Groups",
+            "type": "array"
+          },
+          "link": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AicmLink"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "email",
+          "groups"
+        ],
+        "title": "AicmProvisionRequest",
+        "type": "object"
+      },
+      "AicmProvisionResponse": {
+        "properties": {
+          "cognito_username": {
+            "title": "Cognito Username",
+            "type": "string"
+          },
+          "is_active": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Is Active"
+          },
+          "role": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Role"
+          },
+          "state": {
+            "description": "created | created_unlinked | linked | existing | already_federated",
+            "title": "State",
+            "type": "string"
+          },
+          "sync_errors": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Sync Errors",
+            "type": "array"
+          },
+          "team_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Team Id"
+          },
+          "user_id": {
+            "title": "User Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "user_id",
+          "cognito_username",
+          "state"
+        ],
+        "title": "AicmProvisionResponse",
+        "type": "object"
+      },
+      "AicmRotateResponse": {
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "token": {
+            "title": "Token",
+            "type": "string"
+          },
+          "token_prefix": {
+            "title": "Token Prefix",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "token_prefix",
+          "created_at",
+          "expires_at",
+          "token"
+        ],
+        "title": "AicmRotateResponse",
+        "type": "object"
+      },
+      "AicmTokenIssueRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "allowed_cidrs": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 16,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "호출 허용 원천 IP 대역. 생략 = 제한 없음",
+            "title": "Allowed Cidrs"
+          },
+          "expiry_days": {
+            "anyOf": [
+              {
+                "maximum": 365.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expiry Days"
+          },
+          "name": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "rate_limit_per_min": {
+            "anyOf": [
+              {
+                "maximum": 10000.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "write 등급 분당 상한 재정의",
+            "title": "Rate Limit Per Min"
+          },
+          "scopes": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 8,
+            "minItems": 1,
+            "title": "Scopes",
+            "type": "array"
+          }
+        },
+        "required": [
+          "name",
+          "scopes"
+        ],
+        "title": "AicmTokenIssueRequest",
+        "type": "object"
+      },
+      "AicmTokenIssueResponse": {
+        "properties": {
+          "allowed_cidrs": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Allowed Cidrs"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "integration": {
+            "title": "Integration",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "rate_limit_per_min": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rate Limit Per Min"
+          },
+          "scopes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Scopes",
+            "type": "array"
+          },
+          "token": {
+            "description": "평문 토큰 — 발급/rotate 응답에서 1회만",
+            "title": "Token",
+            "type": "string"
+          },
+          "token_prefix": {
+            "title": "Token Prefix",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "token_prefix",
+          "created_at",
+          "expires_at",
+          "token",
+          "integration",
+          "scopes"
+        ],
+        "title": "AicmTokenIssueResponse",
+        "type": "object"
+      },
+      "AicmTokenItem": {
+        "properties": {
+          "allowed_cidrs": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Allowed Cidrs"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "integration": {
+            "title": "Integration",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "rate_limit_per_min": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rate Limit Per Min"
+          },
+          "revoked_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revoked At"
+          },
+          "rotated_from": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rotated From"
+          },
+          "scopes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Scopes",
+            "type": "array"
+          },
+          "token_prefix": {
+            "title": "Token Prefix",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "token_prefix",
+          "created_at",
+          "expires_at",
+          "integration",
+          "scopes"
+        ],
+        "title": "AicmTokenItem",
+        "type": "object"
+      },
+      "AicmTokenListResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/AicmTokenItem"
+            },
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "AicmTokenListResponse",
+        "type": "object"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "adminJwt": {
+        "bearerFormat": "JWT (human admin)",
+        "scheme": "bearer",
+        "type": "http"
+      },
+      "integrationToken": {
+        "bearerFormat": "itg-<64 hex>",
+        "scheme": "bearer",
+        "type": "http"
+      }
+    }
+  },
+  "info": {
+    "description": "admin-api 의 /aicm/v1 라우터(AICM_API_ENABLED=true 일 때만 존재). 인증: Authorization: Bearer itg-<64 hex>(scope 지정 통합 토큰). 오류 봉투: {\"error\": {\"type\", \"code\", \"message\", \"details\"?}}. 안내서: docs/NDS/aicm/README.md",
+    "title": "LLM Gateway — AICM integration API",
+    "version": "1.0.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/aicm/v1/service-tokens": {
+      "get": {
+        "description": "호출 토큰과 같은 rotate 계보의 토큰만(다른 통합/계보는 보이지 않는다).",
+        "operationId": "list_integration_tokens_aicm_v1_service_tokens_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AicmTokenListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "integrationToken": []
+          }
+        ],
+        "summary": "List Integration Tokens",
+        "tags": [
+          "AICM Integration"
+        ]
+      },
+      "post": {
+        "description": "통합 토큰 발급 — **사람 admin(JWT) 전용**. 평문은 이 응답에서 1회만. scope 는 발급 후 넓힐 수 없다.",
+        "operationId": "issue_integration_token_aicm_v1_service_tokens_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AicmTokenIssueRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AicmTokenIssueResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "adminJwt": []
+          }
+        ],
+        "summary": "Issue Integration Token",
+        "tags": [
+          "AICM Integration"
+        ]
+      }
+    },
+    "/aicm/v1/service-tokens/rotate": {
+      "post": {
+        "description": "Idempotency-Key 헤더 필수(1–128자). 같은 키+같은 요청 → 저장된 응답 재생.",
+        "operationId": "rotate_integration_token_aicm_v1_service_tokens_rotate_post",
+        "parameters": [
+          {
+            "description": "같은 키+같은 요청 → 저장된 응답 재생(Idempotent-Replayed: true). 다른 요청 → 422 idempotency_key_reused. 보존 7일.",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AicmRotateResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "integrationToken": []
+          }
+        ],
+        "summary": "Rotate Integration Token",
+        "tags": [
+          "AICM Integration"
+        ]
+      }
+    },
+    "/aicm/v1/users/provision": {
+      "post": {
+        "description": "Idempotency-Key 헤더 필수(1–128자). 같은 키+같은 요청 → 저장된 응답 재생.",
+        "operationId": "provision_user_aicm_v1_users_provision_post",
+        "parameters": [
+          {
+            "description": "같은 키+같은 요청 → 저장된 응답 재생(Idempotent-Replayed: true). 다른 요청 → 422 idempotency_key_reused. 보존 7일.",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AicmProvisionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AicmProvisionResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "integrationToken": []
+          }
+        ],
+        "summary": "Provision User",
+        "tags": [
+          "AICM Integration"
+        ]
+      }
+    },
+    "/aicm/v1/users/{user_id}/deactivate": {
+      "post": {
+        "description": "Idempotency-Key 헤더 필수(1–128자). 같은 키+같은 요청 → 저장된 응답 재생.",
+        "operationId": "deactivate_user_aicm_v1_users__user_id__deactivate_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "User Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "같은 키+같은 요청 → 저장된 응답 재생(Idempotent-Replayed: true). 다른 요청 → 422 idempotency_key_reused. 보존 7일.",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AicmDeactivateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AicmDeactivateResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "integrationToken": []
+          }
+        ],
+        "summary": "Deactivate User",
+        "tags": [
+          "AICM Integration"
+        ]
+      }
+    }
+  }
+}
