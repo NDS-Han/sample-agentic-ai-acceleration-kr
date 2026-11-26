@@ -35,7 +35,8 @@ export default async function UsersPage(props: UsersPageProps) {
   const fromRateLimits = searchParams?.from === 'rate-limits';
   // null = 조직 데이터 없음 / failed = 조회 실패 — 빈 트리와 실패를 구분한다.
   const orgTreeResult = await adminAPI
-    .get<OrgTreeNode>('/admin/users/tree')
+    // 축약형 — OrgTreeView 가 hydrateOrgTree 로 채운다(RSC payload 도 같이 준다).
+    .get<OrgTreeNode>('/admin/users/tree?slim=true')
     .then((v) => ({ ok: true as const, value: v }))
     .catch(() => ({ ok: false as const }));
   const orgTree = orgTreeResult.ok ? orgTreeResult.value : null;

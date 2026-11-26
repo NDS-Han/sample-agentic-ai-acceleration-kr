@@ -26,7 +26,6 @@ from app.repositories.model_repository import RateLimitConfigRepository
 from app.repositories.user_repository import UserRepository
 from app.schemas.users import (
     DepartmentResponse,
-    OrgNodeMeta,
     OrgTreeNode,
     TeamListItem,
     TeamResponse,
@@ -34,6 +33,7 @@ from app.schemas.users import (
     UserSearchItem,
 )
 from app.services.key_service import KeyService
+from app.services.rate_limit_service import RateLimitService
 
 logger = structlog.get_logger()
 
@@ -206,6 +206,13 @@ async def collect_team_transfer_side_effects(
                     await s3.commit()
 
             ops.append(_swap)
+
+    async def _clear_live_plans() -> None:
+        # USER 스코프 RL 행이 비활성화됐으므로 같은 파드의 live RPM 계획 캐시도
+        # 비운다 — 커밋 후 op 라 미커밋 재적재 창이 없다(표시 전용, 15s TTL).
+        RateLimitService.clear_live_plans()
+
+    ops.append(_clear_live_plans)
     return keys, patterns, ops
 
 
@@ -709,21 +716,10 @@ class UserTeamService:
             for user_id, email, display_name, role, team_id, team_name in rows
         ], truncated
 
-    async def get_org_tree(
-        self, session: AsyncSession, include_empty: bool = False
-    ) -> OrgTreeNode | None:
-        """조직 트리. ``include_empty`` 가 True 면 활성 멤버 0인 팀도 포함한다 —
-        신규 Cognito 팀에 멤버 배정 전 정책을 미리 설정할 진입점이 필요하기 때문.
-        팀이 하나도 없는 부서는 include_empty 에서도 제외한다(노이즈)."""
-        repo = UserRepository(session)
-        orgs = await repo.list_all_orgs()
-        if not orgs:
-            return None
-        org = orgs[0]
-
-        # 개별 정책(앱/모델 override)을 가진 사용자 id — 트리 노드별 점 표시용.
-        # 멤버당 N+1 조회 대신 DISTINCT union 1방으로 모은다(테이블이 작다).
-        custom_user_ids: set[uuid.UUID] = set(
+    async def _custom_user_ids(self, session: AsyncSession) -> set[uuid.UUID]:
+        """개별 정책(앱/모델 override)을 가진 사용자 id — 트리 노드별 점 표시용.
+        멤버당 N+1 조회 대신 DISTINCT union 1방으로 모은다(테이블이 작다)."""
+        return set(
             (
                 await session.execute(
                     select(UserAllowedClient.user_id).union(
@@ -733,13 +729,42 @@ class UserTeamService:
             ).scalars()
         )
 
+    async def get_org_tree(
+        self, session: AsyncSession, include_empty: bool = False, *, slim: bool = False
+    ) -> OrgTreeNode | dict | None:
+        """조직 트리. ``include_empty`` 가 True 면 활성 멤버 0인 팀도 포함한다 —
+        신규 Cognito 팀에 멤버 배정 전 정책을 미리 설정할 진입점이 필요하기 때문.
+        팀이 하나도 없는 부서는 include_empty 에서도 제외한다(노이즈).
+
+        데이터는 컬럼 전용 스냅샷(``list_org_tree_lite``)에서 온다 — ORM 엔티티 그래프를
+        만들지 않는다. ``slim=True`` 면 같은 트리를 dict 로 돌려준다: None 필드 생략, USER
+        노드의 빈 children·팀 이름(부모 TEAM 노드에 있다)·False 점 표시 생략. 6k 사용자
+        조직에서 payload 가 1/3 이하로 준다(admin-ui 가 받은 뒤 채운다 — orgTreeHydrate).
+        """
+        repo = UserRepository(session)
+        orgs = await repo.list_org_tree_lite()
+        if not orgs:
+            return None
+        org = orgs[0]
+        custom_user_ids = await self._custom_user_ids(session)
+
         # 팀 표시 이름 — 예산 관리(budget_service._team_display_name)와 같은 규칙:
         # 기본 부서가 아니면 "부서_팀". 트리에서도 같은 이름이 보여야 두 화면을 대조할 수 있다.
         default_dept_id = uuid.UUID(get_settings().DEFAULT_DEPT_ID)
 
-        dept_nodes: list[OrgTreeNode] = []
+        def meta(**kw) -> dict:
+            base = {
+                "member_count": None, "team_count": None, "leader_name": None,
+                "leader_user_id": None, "email": None, "role": None, "team_name": None,
+                "has_custom_policies": None, "custom_policy_count": None,
+                "team_display_name": None,
+            }
+            base.update(kw)
+            return base
+
+        dept_nodes: list[dict] = []
         for dept in sorted(org.departments, key=lambda d: (d.name or "").lower()):
-            team_nodes: list[OrgTreeNode] = []
+            team_nodes: list[dict] = []
             for team in sorted(dept.teams, key=lambda t: (t.name or "").lower()):
                 team_display = (
                     f"{dept.name}_{team.name}" if dept.id != default_dept_id else team.name
@@ -754,88 +779,112 @@ class UserTeamService:
                 )
                 if not active_members and not include_empty:
                     continue
-                member_nodes: list[OrgTreeNode] = []
-                for member in active_members:
-                    member_nodes.append(
-                        OrgTreeNode(
-                            id=str(member.id),
-                            name=member.display_name,
-                            type="USER",
-                            children=[],
-                            meta=OrgNodeMeta(
-                                member_count=None,
-                                team_count=None,
-                                leader_name=None,
-                                email=member.email,
-                                role=member.role.value,
-                                team_name=team.name,
-                                team_display_name=team_display,
-                                has_custom_policies=member.id in custom_user_ids,
-                            ),
-                        )
-                    )
+                member_nodes = [
+                    {
+                        "id": str(member.id),
+                        "name": member.display_name,
+                        "type": "USER",
+                        "children": [],
+                        "meta": meta(
+                            email=member.email,
+                            role=member.role.value,
+                            team_name=team.name,
+                            team_display_name=team_display,
+                            has_custom_policies=member.id in custom_user_ids,
+                        ),
+                    }
+                    for member in active_members
+                ]
                 team_nodes.append(
-                    OrgTreeNode(
-                        id=str(team.id),
-                        name=team.name,
-                        type="TEAM",
-                        children=member_nodes,
-                        meta=OrgNodeMeta(
+                    {
+                        "id": str(team.id),
+                        "name": team.name,
+                        "type": "TEAM",
+                        "children": member_nodes,
+                        "meta": meta(
                             member_count=len(active_members),
                             # TEAM 은 팀이 아니라 사람을 담는다 — 팀 수는 의미가 없다.
-                            team_count=None,
                             leader_name=leader.display_name if leader else None,
                             leader_user_id=str(team.leader_user_id) if team.leader_user_id else None,
                             email=leader.email if leader else None,
-                            role=None,
-                            team_name=None,
                             custom_policy_count=sum(
                                 1 for m in active_members if m.id in custom_user_ids
                             ),
                             team_display_name=team_display,
                         ),
-                    )
+                    }
                 )
             if not team_nodes:
                 continue
             dept_nodes.append(
-                OrgTreeNode(
-                    id=str(dept.id),
-                    name=dept.name,
-                    type="DEPARTMENT",
-                    children=team_nodes,
-                    meta=OrgNodeMeta(
-                        # 하위 팀들의 **활성 사용자** 합. 팀 수가 아니다(team_count 참조).
-                        member_count=sum(len(n.children) for n in team_nodes),
+                {
+                    "id": str(dept.id),
+                    "name": dept.name,
+                    "type": "DEPARTMENT",
+                    "children": team_nodes,
+                    # 하위 팀들의 **활성 사용자** 합. 팀 수가 아니다(team_count 참조).
+                    "meta": meta(
+                        member_count=sum(len(n["children"]) for n in team_nodes),
                         team_count=len(team_nodes),
-                        leader_name=None,
-                        email=None,
-                        role=None,
-                        team_name=None,
                     ),
-                )
+                }
             )
 
-        return OrgTreeNode(
-            id=str(org.id),
-            name=org.name,
-            type="ORGANIZATION",
-            children=dept_nodes,
-            meta=OrgNodeMeta(
-                # ⚠️ 예전엔 `sum(len(t.members) ...)` 였다 — ORM 의 **전체** 멤버라
-                #    비활성 사용자까지 셌다. 반면 팀/부서는 active_members 만 센다.
-                #    그래서 조직 합계가 부서 합계의 총합과 달라, 어느 쪽이 맞는지 화면에서
-                #    판단할 수 없었다. 이미 만들어 둔 노드에서 세면 계층이 일관된다.
-                member_count=sum(
-                    len(team.children) for dept in dept_nodes for team in dept.children
-                ),
-                team_count=sum(len(dept.children) for dept in dept_nodes),
-                leader_name=None,
-                email=None,
-                role=None,
-                team_name=None,
+        root = {
+            "id": str(org.id),
+            "name": org.name,
+            "type": "ORGANIZATION",
+            "children": dept_nodes,
+            # ⚠️ 예전엔 `sum(len(t.members) ...)` 였다 — ORM 의 **전체** 멤버라
+            #    비활성 사용자까지 셌다. 반면 팀/부서는 active_members 만 센다.
+            #    그래서 조직 합계가 부서 합계의 총합과 달라, 어느 쪽이 맞는지 화면에서
+            #    판단할 수 없었다. 이미 만들어 둔 노드에서 세면 계층이 일관된다.
+            "meta": meta(
+                member_count=sum(len(t["children"]) for d in dept_nodes for t in d["children"]),
+                team_count=sum(len(d["children"]) for d in dept_nodes),
             ),
-        )
+        }
+        if slim:
+            return _slim_tree(root)
+        return OrgTreeNode.model_validate(root)
+
+    async def get_org_tree_marks(self, session: AsyncSession, team_id: uuid.UUID) -> dict:
+        """저장 후 트리 패치용 — 한 팀의 팀장·멤버 역할·개별설정 점만(트리 전체 재조회 대신).
+
+        트리의 같은 필드와 같은 규칙: 활성 멤버만, 팀장은 비활성이어도 이름을 보인다.
+        팀이 없으면 NotFoundError.
+        """
+        team = (
+            await session.execute(
+                select(Team.id, Team.leader_user_id).where(Team.id == team_id)
+            )
+        ).first()
+        if team is None:
+            raise NotFoundError("Team", str(team_id))
+        rows = (
+            await session.execute(
+                select(User.id, User.display_name, User.email, User.is_active, User.role)
+                .where(User.team_id == team_id)
+            )
+        ).all()
+        custom = await self._custom_user_ids(session)
+        leader = next((r for r in rows if team.leader_user_id and r.id == team.leader_user_id), None)
+        active = [r for r in rows if r.is_active]
+        return {
+            "team_id": str(team_id),
+            "leader_user_id": str(team.leader_user_id) if team.leader_user_id else None,
+            "leader_name": leader.display_name if leader else None,
+            "leader_email": leader.email if leader else None,
+            "custom_policy_count": sum(1 for r in active if r.id in custom),
+            "members": [
+                {
+                    "id": str(r.id),
+                    "role": r.role.value,
+                    "has_custom_policies": r.id in custom,
+                }
+                for r in active
+            ],
+        }
 
     @staticmethod
     def _to_user_response(user: User) -> UserResponse:
@@ -850,3 +899,25 @@ class UserTeamService:
             is_service_account=user.is_service_account,
             created_at=user.created_at,
         )
+
+
+def _slim_tree(node: dict) -> dict:
+    """트리 dict → 와이어 축약형. None·False 점 표시·USER 의 빈 children/팀 이름을 뺀다.
+
+    USER 의 team_name/team_display_name 은 부모 TEAM 노드(name, meta.team_display_name)와
+    같은 값이라 클라이언트가 채운다. 의미가 있는 0(member_count=0 인 빈 팀 등)은 남긴다.
+    """
+    is_user = node["type"] == "USER"
+    m = {}
+    for k, v in node["meta"].items():
+        if v is None:
+            continue
+        if is_user and k in ("team_name", "team_display_name"):
+            continue
+        if k == "has_custom_policies" and v is False:
+            continue
+        m[k] = v
+    out = {"id": node["id"], "name": node["name"], "type": node["type"], "meta": m}
+    if not is_user:
+        out["children"] = [_slim_tree(c) for c in node["children"]]
+    return out

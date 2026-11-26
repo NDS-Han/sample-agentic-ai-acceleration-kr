@@ -57,6 +57,8 @@ export interface UserModelResponse {
   q: string;
   /** 모드별 범위 전체(모든 페이지)의 최대 top-모델 셀 — 히트 농도 분모. */
   max_cell: Record<TokenMode, number>;
+  /** 범위(검색 반영) 전체 합계 — 모든 페이지의 행 합. 구 admin-api 는 없다. */
+  scope_total?: UserModelCell;
   rows: UserModelRow[];
 }
 

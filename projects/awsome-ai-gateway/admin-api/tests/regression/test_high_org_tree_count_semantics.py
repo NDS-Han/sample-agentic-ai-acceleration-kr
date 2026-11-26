@@ -73,7 +73,7 @@ async def _build(org, *, include_empty: bool = False, custom_user_ids=()):
     """``get_org_tree`` 를 태워 트리 노드를 얻는다. 리포지토리만 대체한다.
 
     실제 시그니처는 ``UserTeamService(cache_mgr=..., key_service=...)`` 이고 트리는
-    ``UserRepository.list_all_orgs()`` 에서 온다 — 그 둘만 대체하고 노드 조립 로직은
+    ``UserRepository.list_org_tree_lite()`` (컬럼 전용 스냅샷)에서 온다 — 그 둘만 대체하고 노드 조립 로직은
     실물을 그대로 태운다(카운트 계산이 검증 대상이므로).
 
     ``custom_user_ids`` — 개별정책 DISTINCT union 쿼리(session.execute)가
@@ -90,7 +90,7 @@ async def _build(org, *, include_empty: bool = False, custom_user_ids=()):
     union_result.scalars.return_value = list(custom_user_ids)
     session.execute = AsyncMock(return_value=union_result)
     with patch("app.services.user_team_service.UserRepository") as MockRepo:
-        MockRepo.return_value.list_all_orgs = AsyncMock(return_value=[org])
+        MockRepo.return_value.list_org_tree_lite = AsyncMock(return_value=[org])
         return await svc.get_org_tree(session, include_empty=include_empty)
 
 

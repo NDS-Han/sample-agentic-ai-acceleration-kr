@@ -8,6 +8,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from types import SimpleNamespace
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -21,6 +22,9 @@ from app.services.body_log_store import (
     BodyLogLookupError,
     BodyLogNotConfigured,
 )
+
+if TYPE_CHECKING:
+    from fastapi.testclient import TestClient
 
 REQ = "023c673b-0686-4794-b8ac-8d1317118e7a"
 NOW = datetime(2026, 11, 5, 8, 0, 0, tzinfo=timezone.utc)
@@ -267,7 +271,6 @@ def _test_app() -> "tuple[TestClient, MagicMock, MagicMock]":
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
-    from app.core.auth import get_current_user
     from app.core.db import get_db_session
     from app.main import register_exception_handlers
     from app.routers.body_logs import router
@@ -406,12 +409,21 @@ def _agg_row(
         client=client,
         models=list(models),
         total_cost=None,
+        # 시간 창 걸음의 구간 집계 행도 같은 모양을 쓴다(구간 내 행 수).
+        slice_rows=call_count,
     )
 
 
-def _session_rows(rows, exact=None, call_rows=None, uid_rows=None) -> MagicMock:
-    """세 쿼리를 SQL 형태로 구분해 반환 — 집계(GROUP BY) / 호출(IN) / NULL 스캔."""
+def _session_rows(rows, exact=None, call_rows=None, uid_rows=None, later_rows=None) -> MagicMock:
+    """쿼리를 SQL 형태로 구분해 반환 — 집계(GROUP BY: 시간 창 구간 집계와 선택 세션 통계 둘 다
+    같은 exact 행) / 커서 뒤 행 확인(DISTINCT) / 최초 시각(MIN) / 호출(IN) / NULL 스캔."""
     session = MagicMock()
+    r_later = MagicMock()
+    r_later.all.return_value = later_rows or []
+    r_min = MagicMock()
+    r_min.scalar.return_value = NOW - timedelta(days=3)
+    r_newest = MagicMock()
+    r_newest.scalar.return_value = None
     r_exact = MagicMock()
     r_exact.all.return_value = exact or []
     r_calls = MagicMock()
@@ -428,6 +440,12 @@ def _session_rows(rows, exact=None, call_rows=None, uid_rows=None) -> MagicMock:
             return r_uids
         if "GROUP BY" in sql:
             return r_exact
+        if "AS EARLIEST" in sql:
+            return r_min
+        if "AS NEWEST" in sql:
+            return r_newest
+        if "DISTINCT" in sql:
+            return r_later
         if "IN (" in sql:
             return r_calls
         return r_null
