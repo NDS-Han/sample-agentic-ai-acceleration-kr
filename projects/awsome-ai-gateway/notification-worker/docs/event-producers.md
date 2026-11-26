@@ -14,6 +14,9 @@
 ```
 producer (gateway-proxy / admin-api / cost-recorder-worker)
     │  PUBLISH notifications:{channel}  <NotificationEvent JSON>
+    │
+    │  ※ business alert 3종은 pub/sub 이 아니라 worker 내부 BusinessAlertTask 가
+    │    usage 테이블을 주기 폴링해 만든다(§2 표 참조)
     ▼
 Redis Pub/Sub ──► worker/main.py ChannelListener
     │  parse_pubsub_message() — envelope 검증, 실패 시 폐기 + 로그
@@ -42,8 +45,12 @@ BaseHandler.handle()
 | `suspicious_usage` | `notifications:security` | **없음** — 동일 (enum만) | ⚠️ dead |
 | `provider_error` | `notifications:system` | **없음** — gateway 응답의 `"provider_error"` 문자열은 클라이언트용 error payload이지 notification 이벤트가 아님 | ⚠️ dead |
 | `service_health_change` | `notifications:system` | **없음** | ⚠️ dead |
+| `reconciliation_mismatch` | — (polling) | `notification-worker/src/worker/listeners/business_alert_task.py` | ✅ live, 기본 OFF |
+| `dead_letter_growth` | — (polling) | 같은 파일 — `usage.cost_dead_letters` bounded window | ✅ live, 기본 OFF |
+| `pricing_missing` | — (polling) | 같은 파일 — `usage.usage_logs.pricing_missing` partial index | ✅ live, 기본 OFF |
 
 **주의**: dead 타입도 `notification_configs.enabled`는 seed 기본값 `true`다.
+business alert 3종은 반대로 seed/migration 기본값이 **`false`** 이고 env master/per-check 스위치도 모두 기본 false 이다.
 즉 지금은 발행자가 없어 무해하지만, **누군가 producer를 추가하는 순간 알림이
 바로 발송되기 시작한다**. 특정 타입을 미리 꺼두려면:
 
@@ -62,15 +69,16 @@ producer는 반드시 이 JSON 구조로 publish해야 한다 (`src/worker/schem
   "event_id": "<uuid>",
   "type": "<event_type — 소문자 wire 값, 예: auth_failure_spike>",
   "timestamp": "<ISO8601, 예: 2026-05-01T12:00:00+00:00>",
-  "source": "gateway-proxy | admin-api | cost-recorder-worker",
+  "source": "gateway-proxy | admin-api | cost-recorder-worker | notification-worker",
   "payload": { "...": "핸들러/템플릿이 쓰는 자유 형식" }
 }
 ```
 
 - `type`은 **소문자 문자열**이어야 한다 — 대문자(`"AUTH_FAILURE_SPIKE"`)로 보내면
   pydantic 검증에서 폐기된다 (과거 실제 장애 사례: `test_high_notification_event_envelope`).
-- `source`는 `ServiceSource` enum 3값 중 하나. **새 서비스가 producer가 되면
-  `schemas/events.py`의 `ServiceSource`에도 값을 추가해야 한다.**
+- `source`는 `ServiceSource` enum 값 중 하나. **새 서비스가 producer가 되면
+  `schemas/events.py`의 `ServiceSource`에도 값을 추가해야 한다.** business alert 는
+  내부 producer 이므로 `notification-worker` 를 쓴다.
 - `payload` 키는 봉투 필수 — payload 없는 평탄한 이벤트는 거부된다.
 - 참고 구현: `gateway-proxy/schemas/domain.py` `SecurityEvent.to_envelope()`,
   `admin-api/services/key_service.py` `_publish_key_revoked()`의 event dict.
@@ -100,11 +108,43 @@ producer 외에 아래 4곳이 **모두** 갱신돼야 한다 — 하나라도 �
 | `notification-worker/src/worker/schemas/events.py` | `EventType` enum에 추가 |
 | `notification-worker/src/worker/main.py` | `_CHANNEL_EVENT_TYPES`의 적절한 채널에 추가 (새 채널이면 `main()`의 listener 등록도) |
 | `db/init/06_seed_notification_configs.sql` | seed 행 추가 (`recipient_roles`, `enabled`) + **운영 DB에는 별도 INSERT/UPDATE** |
-| `notification-worker/src/worker/templates/` | `{type}.html` + `{type}.subject.txt` (최소 fallback) |
+| `notification-worker/src/worker/templates/` | `{type}.html` + `{type}.subject.txt` (최소 fallback). **예외:** Slack-only business alert 는 이메일 템플릿 대신 payload 를 저장한다 |
 
 5. 계약 테스트: `gateway-proxy/tests/regression/test_high_notification_event_envelope.py`가
    `producer 발행 집합 ⊆ worker EventType`과 `seed == EventType`을 검증한다 —
    새 타입 추가 시 이 테스트가 어긋남을 잡아준다.
+
+## 4-3. Business Slack alert (내부 polling producer)
+
+`reconciliation_mismatch` / `dead_letter_growth` / `pricing_missing` 는 외부 producer 의 pub/sub 메시지를
+기다리지 않는다. `BusinessAlertTask` 가 주기적으로 usage 테이블을 읽고 활성 상태이면 같은
+`NotificationEvent` 봉투를 만들어 `BusinessAlertHandler` 로 보낸다.
+
+- 채널은 `slack` 이며 수신자는 사용자 이메일이 아니라 운영 Slack incoming webhook 하나다.
+  따라서 `recipient_roles` seed 는 `[]` 이고 HTML 템플릿은 없다. Slack 본문에 필요한 값은
+  `notification_logs.event_payload` 에 자급자족 형태로 저장되어 sweeper 재발송도 같은 메시지를 쓴다.
+- dedupe key 는 `(check, period)` 이다. deterministic event_id 는 그 key 의 stable hash 에
+  repeat ordinal(000000, 000001, …)을 붙인다. UTC 고정 epoch bucket 이 아니라 가장 최근 성공
+  발송 시각을 `last_sent` 로 보고 `now - last_sent` 가 repeat interval 이상일 때만 다음 ordinal 을
+  만든다(아직 성공이 없거나 진행/실패 row 가 더 최신이면 그 시도 시각을 backoff 기준으로 쓴다).
+  `notification_logs` 의 `(event_id,event_type,recipient_email)` unique 슬롯이 replica 동시 claim 중
+  1건만 통과시킨다. UTC 고정 epoch bucket 으로 경계 직후 다시 발송하지 않는다.
+- `notification_configs.enabled=false`(또는 행 없음)이면 해당 check 는 usage DB count 쿼리조차
+  실행하지 않는다. 최신 reconciliation run 이 `max_age_seconds`(기본 36h)보다 오래됐으면 알림을
+  만들지 않고 `worker_business_alerts_checked_total{result="stale"}` 과 `business_alert_reconciliation_stale`
+  로그만 남긴다.
+- threshold 는 env 기본값 위에 `notification_configs.config` JSON 의 키가 우선한다
+  (`{"min_count": 3}` 형태). `dead_letter_growth`/`pricing_missing` 은 `min_count`,
+  `reconciliation_mismatch` 는 `min_count`, `min_pct`, `max_age_seconds` 를 지원한다.
+  reconciliation 의 `min_pct` 는 checks JSON 에 총액 denominator 가 있는 검사(`raw_vs_daily` 의
+  `cost_diff/raw_cost`, `budget_vs_raw` 의 `ledger_minus_expected/raw_charged_total`) 중 가장 큰
+  절대 비용 drift 비율이다. count 또는 pct 둘 중 하나가 threshold 에 도달하면 알림이다.
+  DB config 에 키가 없으면 env 값, env 도 없으면 코드 기본값을 쓴다(즉 precedence 는
+  DB config JSON > env > code default). 잘못된 타입/범위는 한 번만 warning 하고 env/default 로 fallback 한다.
+- 모든 쿼리는 bounded/index-friendly 해야 하고 `request_id`, `user_id`, 원본 payload 는 Slack 이나
+  audit payload 에 복사하지 않는다(집계와 모델 alias 등 운영 메타데이터만).
+- infra alert(CPU, pod, Redis/DB 연결)는 계속 Alertmanager 담당이다. 이 3종은 비용/정산 correctness 의
+  business alert 다.
 
 ## 5. 안티패턴
 

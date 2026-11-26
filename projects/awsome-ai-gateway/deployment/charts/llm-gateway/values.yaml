@@ -1143,6 +1143,26 @@ notificationWorker:
     OTEL_SERVICE_NAME: "notification-worker"
     # REPORTING_TIMEZONE(이메일 발송시각 표시)은 공통 ConfigMap에서 주입됨.
 
+  # Business alerts to Slack (reconciliation mismatch / dead-letter growth / pricing_missing).
+  # 전부 기본 OFF. webhook URL 은 절대 values 에 넣지 않고 미리 만든 k8s Secret 을 참조한다.
+  businessAlerts:
+    enabled: false
+    pollIntervalSeconds: 300
+    repeatIntervalSeconds: 21600  # 같은 (check, period) 활성 상태의 반복 알림 간격(6시간)
+    reconciliationMismatchMaxAgeSeconds: 129600  # 최신 reconciliation run 이 이보다 오래되면 stale 로만 기록
+    thresholds:                  # notification_configs.config 의 min_count/min_pct/max_age_seconds 가 env보다 우선
+      reconciliationMismatchMinCount: 1
+      reconciliationMismatchMinPct: 0      # 비용 drift pct trigger; 0이면 절대 건수만 사용(기존 동작)
+      deadLetterMinCount: 1
+      pricingMissingMinCount: 1
+    checks:
+      reconciliationMismatch: false
+      deadLetterGrowth: false
+      pricingMissing: false
+    slack:
+      webhookSecretName: ""       # 예: alertmanager-slack-dev 처럼 env 별로 미리 생성
+      webhookSecretKey: "api_url"
+
   # 이메일 발송 설정 — 고객 내부 메일 API / SMTP / SES / mock
   email:
     # 기본값은 mock — internal_api 는 url 필수라 기본 상태로 기동하면 crashloop.

@@ -1423,6 +1423,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_cost_dead_letters_request
     ON usage.cost_dead_letters (request_id) WHERE request_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_cost_dead_letters_open
     ON usage.cost_dead_letters (created_at) WHERE replayed_at IS NULL;
+-- migration 0069: dead-letter growth 알림은 replayed 여부와 무관하게 최근 insert 를 본다.
+CREATE INDEX IF NOT EXISTS idx_cost_dead_letters_created
+    ON usage.cost_dead_letters (created_at DESC);
 
 -- migration 0062: 야간 비용 대조(B8) 결과 — raw vs 롤업 vs 월 누적 vs budget_usages,
 -- Redis 예산 카운터 vs DB, $0-with-tokens, 추정 행 비율. checks 는 검사별 {mismatches, …}.

@@ -4,8 +4,11 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from pydantic import SecretStr, field_validator
+import structlog
+from pydantic import SecretStr, ValidationInfo, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+logger = structlog.get_logger(__name__)
 
 # 흔히 쓰는 비-IANA 약어/레거시 alias → 정규 IANA 이름 힌트 (검증은 그대로 엄격하게
 # 유지하되, 실수했을 때 바로 고칠 수 있도록 에러 메시지에 제안을 붙인다).
@@ -109,6 +112,28 @@ class Settings(BaseSettings):
     # Internal API (optional)
     email_api_url: str | None = None
 
+    # Slack business alerts (all off by default). Webhook URL 은 k8s Secret 으로만 주입한다.
+    app_env: str = "dev"
+    slack_webhook_url: SecretStr | None = None
+    slack_send_timeout_seconds: float = 10.0
+    business_alerts_enabled: bool = False
+    business_alert_reconciliation_mismatch_enabled: bool = False
+    business_alert_dead_letter_growth_enabled: bool = False
+    business_alert_pricing_missing_enabled: bool = False
+    business_alert_poll_interval_seconds: int = 300
+    # 같은 (check, period) 활성 상태의 반복 알림 간격. notification_logs 의
+    # deterministic event_id 슬롯이 이 간격 안의 중복 발송을 막는다.
+    business_alert_repeat_interval_seconds: int = 6 * 3600
+    # Alert firing thresholds. notification_configs.config 의 같은 이름 키(min_count,
+    # min_pct, max_age_seconds)가 있으면 그 DB 값이 env 값보다 우선한다.
+    business_alert_dead_letter_min_count: int = 1
+    business_alert_pricing_missing_min_count: int = 1
+    business_alert_reconciliation_mismatch_min_count: int = 1
+    # pct 는 reconciliation checks JSON 에 총액이 있는 검사의 최대 절대 비용 drift 비율이다.
+    # 0 이면 pct trigger 를 끈다(기본은 절대 건수 1 이상이면 알림 — 기존 동작).
+    business_alert_reconciliation_mismatch_min_pct: float = 0.0
+    business_alert_reconciliation_mismatch_max_age_seconds: int = 36 * 3600
+
     # Reliability
     notification_buffer_max: int = 1_000
     health_check_interval: int = 60  # seconds
@@ -127,6 +152,36 @@ class Settings(BaseSettings):
 
     # 이메일 템플릿 언어 (ko | en)
     notification_locale: str = "ko"
+
+    @field_validator(
+        "business_alert_poll_interval_seconds",
+        "business_alert_repeat_interval_seconds",
+        "business_alert_reconciliation_mismatch_max_age_seconds",
+        "slack_send_timeout_seconds",
+    )
+    @classmethod
+    def _positive_seconds(cls, v: float, info: ValidationInfo) -> float:
+        if v <= 0:
+            return _warn_and_default(cls, info, v, "must be positive")
+        return v
+
+    @field_validator(
+        "business_alert_dead_letter_min_count",
+        "business_alert_pricing_missing_min_count",
+        "business_alert_reconciliation_mismatch_min_count",
+    )
+    @classmethod
+    def _positive_count(cls, v: int, info: ValidationInfo) -> int:
+        if v < 1:
+            return _warn_and_default(cls, info, v, "must be >= 1")
+        return v
+
+    @field_validator("business_alert_reconciliation_mismatch_min_pct")
+    @classmethod
+    def _pct_range(cls, v: float, info: ValidationInfo) -> float:
+        if not 0 <= v <= 100:
+            return _warn_and_default(cls, info, v, "must be between 0 and 100")
+        return v
 
     @field_validator("reporting_timezone")
     @classmethod
@@ -149,6 +204,23 @@ class Settings(BaseSettings):
     otel_exporter_otlp_endpoint: str = "http://otel-collector:4317"
     otel_service_name: str = "notification-worker"
     otel_traces_sampler_arg: float = 1.0
+
+
+def _warn_and_default(cls, info: ValidationInfo, value, rule: str):
+    """잘못된 BUSINESS_ALERT_*/Slack 설정값 — 기동 크래시 대신 경고 + 기본값 폴백.
+
+    알림 워커가 한 env 오타로 crashloop 하면 이메일(예산 알림)까지 멈춘다. 경고를
+    남기고 선언된 필드 기본값으로 계속 기동한다.
+    """
+    default = cls.model_fields[info.field_name].default
+    logger.warning(
+        "invalid_business_alert_config_fallback",
+        field=info.field_name,
+        value=repr(value),
+        rule=rule,
+        fallback=repr(default),
+    )
+    return default
 
 
 @lru_cache
