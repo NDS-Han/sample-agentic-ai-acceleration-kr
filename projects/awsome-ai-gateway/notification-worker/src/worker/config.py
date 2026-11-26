@@ -109,6 +109,19 @@ class Settings(BaseSettings):
     # Internal API (optional)
     email_api_url: str | None = None
 
+    # Slack business alerts (all off by default). Webhook URL 은 k8s Secret 으로만 주입한다.
+    app_env: str = "dev"
+    slack_webhook_url: SecretStr | None = None
+    slack_send_timeout_seconds: float = 10.0
+    business_alerts_enabled: bool = False
+    business_alert_reconciliation_mismatch_enabled: bool = False
+    business_alert_dead_letter_growth_enabled: bool = False
+    business_alert_pricing_missing_enabled: bool = False
+    business_alert_poll_interval_seconds: int = 300
+    # 같은 (check, period) 활성 상태의 반복 알림 간격. notification_logs 의
+    # deterministic event_id 슬롯이 이 창 안의 중복 발송을 막는다.
+    business_alert_repeat_interval_seconds: int = 6 * 3600
+
     # Reliability
     notification_buffer_max: int = 1_000
     health_check_interval: int = 60  # seconds
@@ -127,6 +140,17 @@ class Settings(BaseSettings):
 
     # 이메일 템플릿 언어 (ko | en)
     notification_locale: str = "ko"
+
+    @field_validator(
+        "business_alert_poll_interval_seconds",
+        "business_alert_repeat_interval_seconds",
+        "slack_send_timeout_seconds",
+    )
+    @classmethod
+    def _positive_seconds(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError("business alert/Slack timeout intervals must be positive")
+        return v
 
     @field_validator("reporting_timezone")
     @classmethod

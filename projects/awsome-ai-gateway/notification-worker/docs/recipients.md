@@ -42,6 +42,9 @@
 | `suspicious_usage` | | | ✅ | dead | producer 없음 — enum 값만 존재 |
 | `provider_error` | | | ✅ | dead | producer 없음 — 게이트웨이의 "provider_error"는 클라이언트용 error payload |
 | `service_health_change` | | | ✅ | dead | producer 없음 |
+| `reconciliation_mismatch` | | | — | live/off | Slack-only — `recipient_roles=[]`, webhook 수신 |
+| `dead_letter_growth` | | | — | live/off | Slack-only — `recipient_roles=[]`, webhook 수신 |
+| `pricing_missing` | | | — | live/off | Slack-only — `recipient_roles=[]`, webhook 수신 |
 
 패턴으로 보면:
 
@@ -93,6 +96,15 @@ redis-cli -u "$REDIS_URL" PUBLISH notifications:config_reload '{}'
 
 ⚠️ enabled는 수신자 on/off가 아니라 **이벤트 자체의 on/off**다. 수신자만
 바꾸려면 `recipient_roles`를 수정하고 `enabled`는 건드리지 않는다.
+
+## 4-1. Slack-only business alert 예외
+
+`reconciliation_mismatch`, `dead_letter_growth`, `pricing_missing` 는 사용자 메일 수신자가 없다.
+`recipient_roles` 는 의도적으로 `[]` 이며 `RecipientResolver` 를 거치지 않는다. 대신
+`BusinessAlertHandler` 가 `SLACK_WEBHOOK_URL` secret 으로 webhook 한 곳에 보내고,
+`notification_logs.recipient_email` 에는 감사/dedupe 슬롯 값 `slack-business-alerts` 를 기록한다.
+따라서 이 3종에 `admin` 역할을 추가해도 이메일은 발송되지 않는다 — 운영 Slack webhook secret 과
+notification_configs.enabled, env 스위치로 제어한다.
 
 ## 5. 안티패턴
 

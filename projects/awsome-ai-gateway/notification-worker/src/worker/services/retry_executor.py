@@ -26,7 +26,7 @@ class RetryExecutor:
 
     retryable 구분 (BR-RETRY-01):
     - 재시도 대상: 네트워크 오류, 타임아웃, 5xx
-    - 재시도 제외: EmailSendError(retryable=False) — 잘못된 주소, 인증 실패 (영구 오류)
+    - 재시도 제외: NotificationSendError(retryable=False) — 잘못된 주소/URL, 인증 실패 (영구 오류)
     """
 
     def __init__(self, retry_counter=None) -> None:
@@ -41,7 +41,7 @@ class RetryExecutor:
 
         모든 시도가 실패하면 마지막 예외를 re-raise한다.
         """
-        from worker.senders.base import EmailSendError
+        from worker.senders.base import NotificationSendError
         from worker.services.email_mask import mask_emails_in_text
 
         last_exc: BaseException | None = None
@@ -53,7 +53,8 @@ class RetryExecutor:
                     logger.info("retry_succeeded", attempt=attempt + 1, event_type=event_type)
                 return result
 
-            except EmailSendError as exc:
+            except NotificationSendError as exc:
+                # log event 이름은 기존 email_* 을 유지한다(로그 검색/알림 호환).
                 if not exc.retryable:
                     logger.warning(
                         "email_send_permanent_failure",

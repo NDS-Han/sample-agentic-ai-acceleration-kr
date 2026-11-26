@@ -24,9 +24,14 @@ from opentelemetry.metrics import Observation
 from worker.config import get_settings
 from worker.db import create_db_engine, create_session_factory, set_db_session_factory
 from worker.handlers.budget_handler import BudgetHandler
+from worker.handlers.business_alert_handler import (
+    BUSINESS_ALERT_EVENT_TYPES,
+    BusinessAlertHandler,
+)
 from worker.handlers.key_handler import KeyHandler
 from worker.handlers.security_handler import SecurityHandler
 from worker.handlers.system_handler import SystemHandler
+from worker.listeners.business_alert_task import BusinessAlertTask
 from worker.listeners.channel_listener import ChannelListener
 from worker.listeners.config_reload_task import ConfigReloadTask
 from worker.listeners.health_check_task import HealthCheckTask
@@ -35,6 +40,7 @@ from worker.observability import WorkerMetrics, init_otel, shutdown_otel
 from worker.redis_client import create_redis_client, set_redis_client
 from worker.schemas.events import EventType, NotificationEvent
 from worker.senders.factory import create_email_sender
+from worker.senders.slack_sender import create_slack_sender
 from worker.services.config_cache import get_config_cache, init_config_cache
 from worker.services.notification_buffer import (
     get_notification_buffer,
@@ -144,8 +150,11 @@ async def main() -> None:  # noqa: PLR0915  (복잡도 예외: lifespan 특성�
     notification_buffer = get_notification_buffer()
     notification_buffer.set_metrics(worker_metrics.errors_total)
 
-    # ── 8. EmailSender ────────────────────────────────────────────────────────
+    # ── 8. EmailSender / Slack sender ─────────────────────────────────────────
     email_sender = create_email_sender(settings)
+    # master off 면 webhook 값을 검증/해석하지 않는다 — 선택 기능의 잘못된 secret 이
+    # 기존 email notification worker 기동을 막지 않게 한다.
+    slack_sender = create_slack_sender(settings) if settings.business_alerts_enabled else None
 
     # ── 9. TemplateEngine ─────────────────────────────────────────────────────
     init_template_engine()
@@ -171,6 +180,14 @@ async def main() -> None:  # noqa: PLR0915  (복잡도 예외: lifespan 특성�
     key_handler = KeyHandler(**handler_kwargs)
     security_handler = SecurityHandler(**handler_kwargs)
     system_handler = SystemHandler(**handler_kwargs)
+    business_alert_handler = BusinessAlertHandler(
+        session_factory=session_factory,
+        config_cache=config_cache,
+        slack_sender=slack_sender,
+        retry_executor=retry_executor,
+        metrics=worker_metrics,
+        repeat_interval_seconds=settings.business_alert_repeat_interval_seconds,
+    )
 
     channel_handler_map = {
         "notifications:budget": budget_handler,
@@ -185,6 +202,9 @@ async def main() -> None:  # noqa: PLR0915  (복잡도 예외: lifespan 특성�
         h = channel_handler_map[channel]
         for et in event_types:
             event_type_handler_map[et.value] = h
+    # Business alert rows are generated internally, but pending sweeps use the same routing table.
+    for et in BUSINESS_ALERT_EVENT_TYPES:
+        event_type_handler_map[et.value] = business_alert_handler
 
     async def process_buffered_event(event: NotificationEvent) -> None:
         h = event_type_handler_map.get(event.type.value)
@@ -229,6 +249,17 @@ async def main() -> None:  # noqa: PLR0915  (복잡도 예외: lifespan 특성�
         metrics=worker_metrics,
     )
     supervisor.register("pending_sweeper", pending_sweeper.run)
+
+    # Business alerts are polling checks, not pub/sub events. The env master switch is false
+    # by default; when enabled, per-check env flags and notification_configs.enabled still apply.
+    if settings.business_alerts_enabled:
+        business_alert_task = BusinessAlertTask(
+            session_factory=session_factory,
+            handler=business_alert_handler,
+            settings=settings,
+            metrics=worker_metrics,
+        )
+        supervisor.register("business_alerts", business_alert_task)
 
     # ── 14. Signal 핸들러 ─────────────────────────────────────────────────────
     loop = asyncio.get_event_loop()

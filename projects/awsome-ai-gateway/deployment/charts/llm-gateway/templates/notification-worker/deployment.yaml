@@ -132,6 +132,28 @@ spec:
             - name: EMAIL_SENDER_NAME
               value: {{ .Values.notificationWorker.email.ses.fromName | quote }}
             {{- end }}
+            {{- if .Values.notificationWorker.businessAlerts.enabled }}
+            # Business Slack alerts — env master 가 false 인 기본 렌더와는 pod spec 이 같다.
+            - name: BUSINESS_ALERTS_ENABLED
+              value: "true"
+            - name: BUSINESS_ALERT_RECONCILIATION_MISMATCH_ENABLED
+              value: {{ .Values.notificationWorker.businessAlerts.checks.reconciliationMismatch | quote }}
+            - name: BUSINESS_ALERT_DEAD_LETTER_GROWTH_ENABLED
+              value: {{ .Values.notificationWorker.businessAlerts.checks.deadLetterGrowth | quote }}
+            - name: BUSINESS_ALERT_PRICING_MISSING_ENABLED
+              value: {{ .Values.notificationWorker.businessAlerts.checks.pricingMissing | quote }}
+            - name: BUSINESS_ALERT_POLL_INTERVAL_SECONDS
+              value: {{ .Values.notificationWorker.businessAlerts.pollIntervalSeconds | quote }}
+            - name: BUSINESS_ALERT_REPEAT_INTERVAL_SECONDS
+              value: {{ .Values.notificationWorker.businessAlerts.repeatIntervalSeconds | quote }}
+            {{- if .Values.notificationWorker.businessAlerts.slack.webhookSecretName }}
+            - name: SLACK_WEBHOOK_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.notificationWorker.businessAlerts.slack.webhookSecretName | quote }}
+                  key: {{ .Values.notificationWorker.businessAlerts.slack.webhookSecretKey | quote }}
+            {{- end }}
+            {{- end }}
             {{- include "llm-gateway.downwardApiEnv" . | nindent 12 }}
             {{- range $key, $value := .Values.notificationWorker.env }}
             - name: {{ $key }}

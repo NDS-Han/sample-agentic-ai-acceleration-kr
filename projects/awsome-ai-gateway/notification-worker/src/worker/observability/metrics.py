@@ -9,6 +9,23 @@ from opentelemetry.metrics import Counter, Histogram, ObservableGauge
 from worker.observability._setup import get_meter
 
 
+def _fanout(callbacks: list[Callable]) -> list[Callable]:
+    """관측 게이지에 넘길 콜백 — 등록 목록을 **수집 시점에** 읽는다.
+
+    OTel SDK 는 ``create_observable_gauge(callbacks=…)`` 에서 목록을 복사한다. 그래서 생성 뒤
+    ``register_*_callback`` 으로 붙인 콜백은 한 번도 불리지 않았고, 이 워커의 관측 게이지
+    (db_buffer_size·uptime_seconds)는 Prometheus 에 시리즈 자체가 없었다 — cost-recorder-worker
+    wave 3c 와 같은 버그다. 목록을 감싼 콜백 하나를 넘겨 늦은 등록도 보이게 한다.
+    """
+    def _observe(options):
+        out = []
+        for cb in list(callbacks):
+            out.extend(cb(options))
+        return out
+
+    return [_observe]
+
+
 class WorkerMetrics:
     """Notification Worker 커스텀 메트릭 (OBS-02).
 
@@ -51,6 +68,14 @@ class WorkerMetrics:
             "worker_errors_total",
             description="Total errors by category (labels: error_type)",
         )
+        self.business_alerts_checked_total: Counter = meter.create_counter(
+            "worker_business_alerts_checked_total",
+            description="Business alert checks by outcome (labels: check, result)",
+        )
+        self.business_alert_deliveries_total: Counter = meter.create_counter(
+            "worker_business_alert_deliveries_total",
+            description="Business Slack alert deliveries (labels: check, status)",
+        )
 
         # Observable gauges use callbacks registered after construction
         self._db_buffer_size_callbacks: list[Callable] = []
@@ -58,12 +83,12 @@ class WorkerMetrics:
 
         self.db_buffer_size: ObservableGauge = meter.create_observable_gauge(
             "worker_db_buffer_size",
-            callbacks=self._db_buffer_size_callbacks,
+            callbacks=_fanout(self._db_buffer_size_callbacks),
             description="Current size of the in-memory DB-failure event buffer",
         )
         self.uptime_seconds: ObservableGauge = meter.create_observable_gauge(
             "worker_uptime_seconds",
-            callbacks=self._uptime_callbacks,
+            callbacks=_fanout(self._uptime_callbacks),
             description="Worker process uptime in seconds",
             unit="s",
         )
