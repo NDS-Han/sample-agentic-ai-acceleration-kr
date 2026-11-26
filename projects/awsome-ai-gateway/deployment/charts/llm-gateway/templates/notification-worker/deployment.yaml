@@ -162,6 +162,7 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.notificationWorker.businessAlerts.slack.webhookSecretName | quote }}
                   key: {{ .Values.notificationWorker.businessAlerts.slack.webhookSecretKey | quote }}
+                  optional: true
             {{- end }}
             {{- end }}
             {{- include "llm-gateway.downwardApiEnv" . | nindent 12 }}
