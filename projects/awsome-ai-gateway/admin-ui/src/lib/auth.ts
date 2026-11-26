@@ -145,12 +145,17 @@ export function parseJWT(token: string): AdminSession {
 const CLOCK_SKEW_SECONDS = 30;
 
 /**
- * 세션이 만료됐는지. **만료를 확신할 수 없으면 false**(=만료 아님) 를 돌려준다.
+ * 세션이 만료됐는지. 만료 값이 **없는** 경우와 값이 있지만 **해석 불가**인 경우를 구분한다.
  *
- * ⚠️ 이 관용이 핵심이다. dev-login 이 발급하는 토큰(`dev.<payload>.sig`)에는 숫자
- *    `exp` 클레임이 아예 없고 ISO 문자열 `expires_at` 만 있어서, parseJWT 를 통과하면
- *    session.expires_at 이 빈 문자열이 된다. 여기서 "값이 없으면 만료"로 판정하면
- *    dev 사용자가 로그인하는 순간 다시 로그인 화면으로 튕겨 무한 리다이렉트가 된다.
+ * - 값이 없으면 false: 일부 IdP 토큰은 `exp` 를 싣지 않는다(콜백은 이 경우 쿠키
+ *   Max-Age 를 `expires_in` 또는 1시간 폴백으로 제한한다). 없음을 만료로 보면 정상
+ *   로그인 직후 다시 로그인으로 튕겨 무한 리다이렉트가 된다.
+ * - 값이 있지만 해석 불가면 true: 이 코드가 받는 정상 형식은 NumericDate 또는 ISO 8601
+ *   이므로, 해석 불가는 손상/비표준 토큰이다. 서명 검증이 없는 페이지 게이트에서는
+ *   만료 쪽으로 보수적으로 판정한다.
+ *
+ * dev-login 토큰은 숫자 `exp` 대신 ISO `expires_at` 을 쓰지만, parseJWT 가 같은
+ * 필드로 폴백하므로 여기서는 파싱 가능한 값이 들어온다.
  *
  * 배경: 예전엔 만료 검사 자체가 없어서, 만료된 admin_jwt 로도 페이지가 그대로 열리고
  * 서버 컴포넌트의 모든 API 호출만 401 이 됐다 — 화면에는 '—' 와 fetchFailed 만 깔리고
@@ -158,20 +163,20 @@ const CLOCK_SKEW_SECONDS = 30;
  */
 export function isSessionExpired(session: AdminSession, nowMs: number = Date.now()): boolean {
   const raw = session.expires_at?.trim();
-  if (!raw) return false; // exp 클레임 없음(dev 토큰) → 만료로 취급하지 않는다
+  if (!raw) return false; // 만료 값 없음(일부 IdP 토큰) → 무한 로그인 리다이렉트 방지
 
-  // JWT 표준: NumericDate = epoch **초**. 밀리초로 넣는 발급자도 있어 자릿수로 구분한다.
+  // JWT 표준: NumericDate = epoch **초**(RFC 7519 는 비정수도 허용). 밀리초로 넣는
+  // 발급자도 있어 자릿수로 구분한다.
   let expiresAtMs: number;
-  if (/^\d+$/.test(raw)) {
+  if (/^\d+(?:\.\d+)?$/.test(raw)) {
     const n = Number(raw);
     expiresAtMs = n > 1e11 ? n : n * 1000;
   } else {
     expiresAtMs = Date.parse(raw); // ISO 8601 도 받아준다
   }
 
-  // 해석 불가는 만료로 본다 — dev 토큰은 expires_at(ISO)이 항상 파싱되므로 이
-  // 분기를 타는 건 위조/손상 토큰뿐이다. 서명 검증이 없는 만큼 판정 보류는
-  // fail-open 이라 위조 쿠키가 페이지 게이트를 통과한다.
+  // 해석 불가는 만료로 본다 — 정상 형식은 NumericDate/ISO 8601 뿐이다. 서명 검증이
+  // 없는 페이지 게이트에서 손상/비표준 토큰을 통과시키지 않기 위한 보수적 판정이다.
   if (!Number.isFinite(expiresAtMs)) return true;
 
   return expiresAtMs - CLOCK_SKEW_SECONDS * 1000 <= nowMs;

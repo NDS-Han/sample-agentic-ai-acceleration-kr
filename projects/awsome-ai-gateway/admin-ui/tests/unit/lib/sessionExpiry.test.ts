@@ -8,9 +8,11 @@
  *     보지 않았다. 만료된 쿠키로도 페이지가 그대로 열리고, 서버 컴포넌트가 admin-api 를
  *     호출하는 시점에야 전부 401 → 화면은 '—' 와 fetchFailed 로 덮이는데 로그인으로
  *     돌아가는 길이 없었다(쿠키가 '존재'하므로 미인증 분기도 안 탄다).
- *   * 반대 방향 함정: dev-login 이 발급하는 `dev.<payload>.sig` 에는 숫자 exp 클레임이
- *     아예 없다(ISO 문자열 expires_at 만 있다). "exp 없으면 만료"로 구현하면 dev 로그인이
- *     성공한 직후 다시 로그인으로 튕겨 무한 리다이렉트가 된다.
+ *   * 반대 방향 함정: 일부 IdP 토큰에는 `exp` 가 없을 수 있고, dev-login 이 발급하는
+ *     `dev.<payload>.sig` 는 숫자 exp 대신 ISO 문자열 expires_at 을 쓴다. "만료 값이
+ *     없으면 만료"로 구현하면 정상 토큰이 로그인 직후 다시 로그인으로 튕겨 무한
+ *     리다이렉트가 된다. 반대로 값이 있는데 해석할 수 없으면 정상 발급 형식이 아니므로
+ *     만료로 본다.
  */
 
 import { describe, it, expect } from 'vitest';
@@ -47,18 +49,27 @@ describe('isSessionExpired', () => {
     expect(isSessionExpired(session(String(inOneHour)), NOW)).toBe(false);
   });
 
-  it('does NOT expire a token with no exp claim — dev tokens have none', () => {
+  it('does NOT expire a token with no expiry value — exp-less IdP tokens must not loop', () => {
     expect(isSessionExpired(session(''), NOW)).toBe(false);
     expect(isSessionExpired(session('   '), NOW)).toBe(false);
   });
 
-  it('does not expire on an unparseable exp — 판정 보류', () => {
-    expect(isSessionExpired(session('not-a-date'), NOW)).toBe(false);
+  it('treats an unparseable expiry as expired — malformed input is fail-closed', () => {
+    // 값이 아예 없는 경우와 구분한다. 값이 있는데 NumericDate/ISO 8601 로 해석되지 않으면
+    // 정상 발급자가 만든 형태가 아니므로, 페이지 게이트는 손상/비표준 토큰을 통과시키지 않는다.
+    expect(isSessionExpired(session('not-a-date'), NOW)).toBe(true);
   });
 
   it('accepts epoch milliseconds as well as seconds', () => {
     expect(isSessionExpired(session(String(NOW - 3_600_000)), NOW)).toBe(true);
     expect(isSessionExpired(session(String(NOW + 3_600_000)), NOW)).toBe(false);
+  });
+
+  it('accepts a fractional NumericDate — RFC 7519 permits non-integer values', () => {
+    const inTenMinutes = Math.floor(NOW / 1000) + 600.5;
+    const tenMinutesAgo = Math.floor(NOW / 1000) - 600.5;
+    expect(isSessionExpired(session(String(inTenMinutes)), NOW)).toBe(false);
+    expect(isSessionExpired(session(String(tenMinutesAgo)), NOW)).toBe(true);
   });
 
   it('accepts an ISO 8601 exp', () => {
