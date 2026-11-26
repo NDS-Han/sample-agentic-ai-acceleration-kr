@@ -239,7 +239,11 @@ async def env(owned_dsn, monkeypatch, cognito):
 
 
 HUMAN = {"Authorization": "Bearer human-admin"}
-ALL_SCOPES = ["tokens:read", "tokens:rotate", "users:provision", "users:lifecycle"]
+ALL_SCOPES = [
+    "tokens:read", "tokens:rotate", "users:provision", "users:lifecycle",
+    "users:read", "users:sync", "policy:read", "policy:write",
+    "budgets:read", "budgets:limits:write",
+]
 
 
 def _h(tok: str, key: str | None = None) -> dict:
@@ -1020,3 +1024,199 @@ async def test_idempotency_rows_expire(env):
     r = await c.post(f"/aicm/v1/users/{uid}/deactivate", json={"reason": "x"}, headers=_h(t["token"], "new-1"))
     assert r.status_code == 200
     assert not await _q(sm, "SELECT 1 FROM auth.integration_idempotency_keys WHERE idem_key='old-1'")
+
+
+# ── phase 0a2: lookup / sync / policy / budget limits ───────────────────────
+
+
+async def test_lookup_user_by_email_exact_case_insensitive_and_protected_targets(env):
+    c, sm = env["client"], env["sm"]
+    t = await _issue(c, scopes=["users:read"])
+    team = await _mk_team(sm, f"Look{uuid.uuid4().hex[:6]}")
+    email = f"Mixed.Case-{uuid.uuid4().hex[:6]}@Corp.Example"
+    uid, _ = await _mk_user(sm, team_id=team, email=email)
+
+    r = await c.get("/aicm/v1/users", params={"email": email.lower()}, headers=_h(t["token"]))
+    assert r.status_code == 200, r.text
+    assert [i["id"] for i in r.json()["items"]] == [str(uid)]
+    assert r.json()["pagination"]["limit"] == 50
+
+    # 보호 대상은 조회도 403 + 실패 감사다(운영 권한/합성 계정 열거 방지).
+    admin_uid, _ = await _mk_user(sm, team_id=team, role="ADMIN", email=f"adm-{uuid.uuid4().hex[:6]}@corp.example")
+    r = await c.get(
+        "/aicm/v1/users",
+        params={"email": (await _q(sm, "SELECT email FROM auth.users WHERE id=:i", i=admin_uid))[0][0]},
+        headers=_h(t["token"]),
+    )
+    assert r.status_code == 403 and r.json()["error"]["code"] == "target_is_admin"
+    assert await _q(sm, "SELECT 1 FROM audit.audit_logs WHERE action='AICM_TARGET_REFUSED' AND resource_id=:r", r=str(admin_uid))
+
+    # users:read 없는 통합 토큰은 공통 인증 계층에서 403.
+    narrow = await _issue(c, scopes=["tokens:read"])
+    r = await c.get("/aicm/v1/users", params={"email": email.lower()}, headers=_h(narrow["token"]))
+    assert r.status_code == 403
+    r = await c.get("/aicm/v1/users", params={"email": email.lower()})
+    assert r.status_code == 401
+
+
+async def test_sync_cognito_user_happy_audit_idempotent_replay(env):
+    c, sm, stub = env["client"], env["sm"], env["stub"]
+    t = await _issue(c, scopes=["users:sync"])
+    team_name = f"Sync{uuid.uuid4().hex[:6]}"
+    team = await _mk_team(sm, team_name)
+    email = f"sync-{uuid.uuid4().hex[:6]}@corp.example"
+    uid, sub = await _mk_user(sm, team_id=team, email=email)
+    username = f"ADFS_{uuid.uuid4().hex[:8]}"
+    group = f"Claude_{team_name}"
+    # preflight(admin_get/groups) + 실제 sync(admin_get/groups) — 같은 순서로 두 벌.
+    _stub_sync(stub, username, sub, email, groups=group)
+    _stub_sync(stub, username, sub, email, groups=group)
+
+    r = await c.post(f"/aicm/v1/users/sync-cognito/user/{username}", headers=_h(t["token"], "sync-1"))
+    assert r.status_code == 200, r.text
+    assert r.json()["username"] == username and r.json()["user_id"] == str(uid)
+    assert not r.json()["errors"]
+    aud = await _q(sm, "SELECT changes::text FROM audit.audit_logs WHERE action='COGNITO_SYNC_USER' AND resource_id=:r", r=username)
+    assert aud
+    ch0 = json.loads(aud[0][0])
+    assert ch0["_integration"] == "aicm" and ch0["_service_token_id"] == t["id"]
+    stub.assert_no_pending_responses()
+
+    before = len(await _q(sm, "SELECT 1 FROM audit.audit_logs WHERE action='COGNITO_SYNC_USER' AND resource_id=:r", r=username))
+    r2 = await c.post(f"/aicm/v1/users/sync-cognito/user/{username}", headers=_h(t["token"], "sync-1"))
+    assert r2.status_code == 200 and r2.headers["Idempotent-Replayed"] == "true"
+    assert r2.json() == r.json()
+    assert len(await _q(sm, "SELECT 1 FROM audit.audit_logs WHERE action='COGNITO_SYNC_USER' AND resource_id=:r", r=username)) == before
+    stub.assert_no_pending_responses()
+
+
+async def test_sync_cognito_user_refuses_protected_targets_before_write(env):
+    c, sm, stub = env["client"], env["sm"], env["stub"]
+    t = await _issue(c, scopes=["users:sync"])
+    team = await _mk_team(sm, f"Prot{uuid.uuid4().hex[:6]}")
+    cases = []
+    for label, kw, code in (
+        ("admin", {"role": "ADMIN"}, "target_is_admin"),
+        ("svcacct", {"service_account": True}, "target_is_service_account"),
+    ):
+        email = f"{label}-{uuid.uuid4().hex[:5]}@corp.example"
+        uid, sub = await _mk_user(sm, team_id=team, email=email, **kw)
+        username = f"ADFS_{label}_{uuid.uuid4().hex[:5]}"
+        _stub_sync(stub, username, sub, email, groups="Claude_P")
+        cases.append((uid, username, code))
+    with ExitStack() as stack:
+        writes = _spy_cognito_writes(env["cognito_client"], stack)
+        for uid, username, code in cases:
+            r = await c.post(f"/aicm/v1/users/sync-cognito/user/{username}", headers=_h(t["token"], f"sync-ref-{username}"))
+            assert r.status_code == 403, r.text
+            assert r.json()["error"]["code"] == code
+            assert await _q(sm, "SELECT 1 FROM audit.audit_logs WHERE action='AICM_TARGET_REFUSED' AND resource_id=:r", r=str(uid))
+        _assert_no_cognito_writes(writes)
+    stub.assert_no_pending_responses()
+
+
+async def test_user_allowed_clients_crud_audit_replay_and_vk_cache_invalidation(env):
+    c, sm = env["client"], env["sm"]
+    redis = env["redis"]
+    t = await _issue(c, scopes=["policy:read", "policy:write"])
+    uid, _ = await _mk_user(sm, keys=1)
+    key_hash = (await _q(sm, "SELECT key_hash FROM auth.virtual_keys WHERE user_id=:u", u=uid))[0][0]
+
+    r = await c.put(
+        f"/aicm/v1/users/{uid}/allowed-clients", json={"clients": ["claude-code", "codex"]},
+        headers=_h(t["token"], "acl-set-1"),
+    )
+    assert r.status_code == 200, r.text
+    assert r.json() == {"user_id": str(uid), "clients": ["claude-code", "codex"]}
+    assert f"key:cache:vk:{key_hash}" in redis.deleted
+    aud = await _q(sm, "SELECT changes::text FROM audit.audit_logs WHERE action='SET_USER_ALLOWED_CLIENTS' AND resource_id=:r", r=str(uid))
+    ch = json.loads(aud[0][0])
+    assert ch["_integration"] == "aicm" and ch["before"] == {"clients": []} and ch["after"] == {"clients": ["claude-code", "codex"]}
+
+    n_aud = len(await _q(sm, "SELECT 1 FROM audit.audit_logs WHERE action='SET_USER_ALLOWED_CLIENTS' AND resource_id=:r", r=str(uid)))
+    r2 = await c.put(
+        f"/aicm/v1/users/{uid}/allowed-clients", json={"clients": ["claude-code", "codex"]},
+        headers=_h(t["token"], "acl-set-1"),
+    )
+    assert r2.status_code == 200 and r2.headers["Idempotent-Replayed"] == "true"
+    assert len(await _q(sm, "SELECT 1 FROM audit.audit_logs WHERE action='SET_USER_ALLOWED_CLIENTS' AND resource_id=:r", r=str(uid))) == n_aud
+
+    r = await c.get(f"/aicm/v1/users/{uid}/allowed-clients", headers=_h(t["token"]))
+    assert r.status_code == 200 and r.json()["clients"] == ["claude-code", "codex"]
+    r = await c.delete(f"/aicm/v1/users/{uid}/allowed-clients", headers=_h(t["token"], "acl-del-1"))
+    assert r.status_code == 204, r.text
+    r = await c.get(f"/aicm/v1/users/{uid}/allowed-clients", headers=_h(t["token"]))
+    assert r.json()["clients"] == []
+
+
+async def test_budget_user_team_crud_audit_and_gateway_cache_keys(env):
+    c, sm = env["client"], env["sm"]
+    redis = env["redis"]
+    t = await _issue(c, scopes=["budgets:read", "budgets:limits:write"])
+    team = await _mk_team(sm, f"Bud{uuid.uuid4().hex[:6]}")
+    uid, _ = await _mk_user(sm, team_id=team)
+
+    r = await c.put(
+        f"/aicm/v1/budgets/team/{team}", json={"max_budget_usd": "100.00", "confirm": True},
+        headers=_h(t["token"], "bud-team-1"),
+    )
+    assert r.status_code == 200, r.text
+    team_key = f"budget:config:team:{{{team}}}"
+    assert team_key in redis.deleted and team_key in redis.kv
+    payload = json.loads(redis.kv[team_key])
+    assert payload["limit_usd"] == "100.00" and payload["policy"] == "hard_block"
+    aud = await _q(sm, "SELECT changes::text FROM audit.audit_logs WHERE action='SET_TEAM_BUDGET_CONFIRMED' ORDER BY timestamp DESC LIMIT 1")
+    ch = json.loads(aud[0][0])
+    assert ch["_integration"] == "aicm" and ch["before"] == {"configured": False}
+    assert ch["after"]["max_budget_usd"] == "100.00"
+
+    r = await c.put(
+        f"/aicm/v1/budgets/team/{team}/default-cap", json={"value": "10.00", "confirm": True},
+        headers=_h(t["token"], "bud-cap-1"),
+    )
+    assert r.status_code == 200 and r.json()["default_user_cap_usd"] == "10.00"
+
+    r = await c.put(
+        f"/aicm/v1/budgets/user/{uid}", json={"max_budget_usd": "5.00", "confirm": True},
+        headers=_h(t["token"], "bud-user-1"),
+    )
+    assert r.status_code == 200, r.text
+    assert f"budget:config:user:{{{uid}}}" in redis.deleted
+    aud = await _q(sm, "SELECT changes::text FROM audit.audit_logs WHERE action='SET_USER_BUDGET_CONFIRMED' ORDER BY timestamp DESC LIMIT 1")
+    ch = json.loads(aud[0][0])
+    assert ch["_integration"] == "aicm" and ch["before"] == {"configured": False}
+
+    r = await c.get(f"/aicm/v1/budgets/user/{uid}", headers=_h(t["token"]))
+    assert r.status_code == 200 and r.json()["configured"] is True and r.json()["max_budget_usd"].startswith("5.00")
+    r = await c.get(f"/aicm/v1/budgets/team/{team}", headers=_h(t["token"]))
+    assert r.status_code == 200 and r.json()["configured"] is True and r.json()["max_budget_usd"].startswith("100.00")
+
+    r = await c.delete(f"/aicm/v1/budgets/user/{uid}?confirm=true", headers=_h(t["token"], "bud-user-del"))
+    assert r.status_code == 204, r.text
+    r = await c.delete(f"/aicm/v1/budgets/team/{team}?confirm=true", headers=_h(t["token"], "bud-team-del"))
+    assert r.status_code == 204, r.text
+    r = await c.get(f"/aicm/v1/budgets/user/{uid}", headers=_h(t["token"]))
+    assert r.json()["configured"] is False
+
+
+async def test_user_budget_and_policy_refuse_admin_service_and_system_targets(env):
+    c, sm = env["client"], env["sm"]
+    t = await _issue(c, scopes=["policy:write", "budgets:limits:write"])
+    team = await _mk_team(sm, f"Tgt{uuid.uuid4().hex[:6]}")
+    admin_uid, _ = await _mk_user(sm, team_id=team, role="ADMIN")
+    svc_uid, _ = await _mk_user(sm, team_id=team, service_account=True)
+    system_uid = uuid.UUID("00000000-0000-4000-a000-000000000011")
+    cases = [
+        (admin_uid, "target_is_admin"), (svc_uid, "target_is_service_account"),
+        (system_uid, "target_is_system_user"),
+    ]
+    for uid, code in cases:
+        for path, key in (
+            (f"/aicm/v1/users/{uid}/allowed-clients", f"acl-ref-{uid}"),
+            (f"/aicm/v1/budgets/user/{uid}", f"bud-ref-{uid}"),
+        ):
+            body = {"clients": ["claude-code"]} if "allowed-clients" in path else {"max_budget_usd": "1.00", "confirm": True}
+            r = await c.put(path, json=body, headers=_h(t["token"], key))
+            assert r.status_code == 403, (path, r.text)
+            assert r.json()["error"]["code"] == code
+        assert len(await _q(sm, "SELECT 1 FROM audit.audit_logs WHERE action='AICM_TARGET_REFUSED' AND resource_id=:r", r=str(uid))) >= 2

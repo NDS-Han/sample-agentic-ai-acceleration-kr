@@ -22,6 +22,7 @@ import structlog
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.audit import audit_logger
 from app.core.config import get_settings
 from app.models.auth import Department, Team, User, UserRole
 from app.repositories.user_repository import UserRepository
@@ -1013,7 +1014,7 @@ class CognitoSyncService:
             # 에러가 아니라 DB soft-delete(is_active=False). Cognito 삭제 후엔 sub 를
             # 알 수 없으므로 email(=username) 로 조회. email 충돌 사고 방지를 위해
             # OIDC provider 유저에 한해 비활성화(sync_all 비활성화 원칙과 동일).
-            await self._deactivate_missing_user(repo, session, username, result)
+            await self._deactivate_missing_user(repo, session, username, result, commit=commit)
             return result
 
         sub = self._get_attr_admin(cu, "sub") or cu.get("Username") or username
@@ -1084,8 +1085,55 @@ class CognitoSyncService:
         )
         return result
 
+    async def sync_user_audited(
+        self,
+        session,
+        username: str,
+        *,
+        actor,
+        ip_address: str,
+        request_id: str,
+        commit: bool = True,
+        deactivate_missing: bool = True,
+    ) -> tuple[SyncResult, dict]:
+        """단일 사용자 sync + ``COGNITO_SYNC_USER`` 감사.
+
+        ``/admin`` 호출자는 기본값(``commit=True``)으로 기존 순서를 그대로 쓴다 —
+        sync 가 커밋된 뒤 감사 행이 다음 커밋에 들어간다. AICM 처럼 감사·멱등키와
+        원자성이 필요한 호출자만 ``commit=False`` 를 넘긴다.
+        """
+        result = await self.sync_user(
+            session, username, commit=commit, deactivate_missing=deactivate_missing
+        )
+        await audit_logger.log(
+            session,
+            actor_user_id=actor.user_id,
+            actor_role=actor.role.value,
+            service_token_id=getattr(actor, "service_token_id", None),
+            action="COGNITO_SYNC_USER",
+            resource_type="CognitoSync",
+            resource_id=username,
+            changes={"result": {
+                "user_id": result.user_id,
+                "users_created": result.users_created,
+                "users_updated": result.users_updated,
+                "users_deactivated": result.users_deactivated,
+            }},
+            ip_address=ip_address,
+            request_id=request_id,
+        )
+        return result, {
+            "username": username,
+            "user_id": result.user_id,
+            "users_created": result.users_created,
+            "users_updated": result.users_updated,
+            "users_deactivated": result.users_deactivated,
+            "errors": result.errors,
+        }
+
     async def _deactivate_missing_user(
         self, repo: UserRepository, session, username: str, result: SyncResult,
+        *, commit: bool = True,
     ) -> None:
         """Cognito 에 없는 사용자를 DB 에서 email(=username) 로 찾아 soft-delete.
 
@@ -1175,8 +1223,11 @@ class CognitoSyncService:
                     user_id=str(uid),
                     exc_info=True,
                 )
-            await session.commit()
-            await self._finalize_revoked_keys(session, hashed, result)
+            if commit:
+                await session.commit()
+                await self._finalize_revoked_keys(session, hashed, result)
+            else:
+                result.pending_key_revocations.extend(hashed)
             logger.info(
                 "cognito_sync.user_deactivated",
                 username=username, user_id=result.user_id,
@@ -1547,3 +1598,19 @@ class CognitoSyncService:
         """
         from app.core.oidc_identity import derive_role
         return derive_role(email, user_groups, email_verified=email_verified)
+
+
+def build_cognito_sync_service(key_service=None, cache_mgr=None) -> CognitoSyncService:
+    """설정된 Cognito 풀 클라이언트로 ``CognitoSyncService`` 를 만든다.
+
+    라우터가 갖고 있던 팩토리를 서비스 계층으로 옮긴 것이다. 풀 미설정은
+    ``ValueError("COGNITO_USER_POOL_ID not configured")`` — ``/admin`` 라우터는
+    이를 기존과 같은 400 detail 로 매핑한다.
+    """
+    settings = get_settings()
+    if not settings.COGNITO_USER_POOL_ID:
+        raise ValueError("COGNITO_USER_POOL_ID not configured")
+    import boto3
+
+    client = boto3.client("cognito-idp", region_name=settings.COGNITO_REGION)
+    return CognitoSyncService(client, key_service=key_service, cache_mgr=cache_mgr)

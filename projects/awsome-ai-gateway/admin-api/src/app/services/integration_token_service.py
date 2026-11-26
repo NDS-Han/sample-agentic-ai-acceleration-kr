@@ -28,13 +28,19 @@ from app.services.service_token_service import (
 INTEGRATION_AICM = "aicm"
 
 #: phase 0a scope — 발급 시 이 목록 밖의 값은 거부한다(오타가 조용히 무권한 토큰이 되지 않게).
-#: 정책/예산/조회/sync/reactivation 은 AICM 미결 질문에 달려 있어 발급하지 않는다.
+#: reactivation·spent seeding·app budget·managed lock 은 AICM 미결 질문에 달려 있어 발급하지 않는다.
 SCOPES: frozenset[str] = frozenset(
     {
         "tokens:read",
         "tokens:rotate",
         "users:provision",
         "users:lifecycle",
+        "users:read",
+        "users:sync",
+        "policy:read",
+        "policy:write",
+        "budgets:read",
+        "budgets:limits:write",
     }
 )
 

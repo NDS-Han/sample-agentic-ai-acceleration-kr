@@ -89,7 +89,7 @@ def test_flag_on_routes_commit_before_response(monkeypatch):
 
     app = _app(monkeypatch, True)
     aicm = [r for r in app.routes if isinstance(r, APIRoute) and r.path.startswith("/aicm/v1")]
-    assert len(aicm) == 5
+    assert len(aicm) == 17
     assert all(isinstance(r, CommittingRoute) for r in aicm)
 
 
@@ -118,6 +118,12 @@ def test_committed_openapi_spec_is_current(monkeypatch):
 @pytest.mark.parametrize("method,path", [
     ("post", "/aicm/v1/users/provision"), ("post", "/aicm/v1/users/{user_id}/deactivate"),
     ("post", "/aicm/v1/service-tokens/rotate"),
+    ("post", "/aicm/v1/users/sync-cognito/user/{username}"),
+    ("put", "/aicm/v1/users/{user_id}/allowed-clients"),
+    ("delete", "/aicm/v1/users/{user_id}/allowed-clients"),
+    ("put", "/aicm/v1/budgets/user/{user_id}"), ("delete", "/aicm/v1/budgets/user/{user_id}"),
+    ("put", "/aicm/v1/budgets/team/{team_id}"), ("delete", "/aicm/v1/budgets/team/{team_id}"),
+    ("put", "/aicm/v1/budgets/team/{team_id}/default-cap"),
 ])
 def test_spec_documents_idempotency_header(method, path):
     data = json.loads(_SPEC.read_text(encoding="utf-8"))

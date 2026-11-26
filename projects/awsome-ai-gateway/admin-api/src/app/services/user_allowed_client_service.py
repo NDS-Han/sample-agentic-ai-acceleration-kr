@@ -5,6 +5,7 @@ import uuid
 
 import structlog
 
+from app.core.audit import audit_logger
 from app.core.clients import VALID_CLIENTS
 from app.repositories.user_allowed_client_repository import UserAllowedClientRepository
 from app.repositories.user_repository import UserRepository
@@ -55,6 +56,102 @@ class UserAllowedClientService:
             "admin.clear_user_allowed_clients",
             user_id=str(user_id), admin_id=str(admin_id),
         )
+
+    async def _audit(
+        self,
+        *,
+        actor,
+        action: str,
+        user_id: uuid.UUID,
+        changes: dict | None,
+        ip_address: str,
+        request_id: str,
+    ) -> None:
+        await audit_logger.log(
+            self._session,
+            actor_user_id=actor.user_id,
+            actor_role=actor.role.value,
+            service_token_id=getattr(actor, "service_token_id", None),
+            action=action,
+            resource_type="UserAllowedClients",
+            resource_id=str(user_id),
+            changes=changes,
+            ip_address=ip_address,
+            request_id=request_id,
+        )
+
+    async def _finish_apply(self, user_id: uuid.UUID, commit: bool):
+        """커밋 후 캐시 무효화 순서를 한 곳에 둔다.
+
+        ``commit=True`` 는 /admin 라우터의 기존 순서(commit → invalidate)를 그대로
+        수행한다. ``commit=False`` 는 AICM 멱등성 트랜잭션이 커밋을 소유하도록 하고,
+        호출자에게 커밋 뒤 실행할 콜백을 돌려준다.
+        """
+        async def invalidate() -> None:
+            await self.invalidate_user_vk_cache(user_id)
+
+        if not commit:
+            return invalidate
+        await self._session.commit()
+        await invalidate()
+        return None
+
+    async def apply_set(
+        self,
+        user_id: uuid.UUID,
+        clients: list[str],
+        actor,
+        *,
+        ip_address: str,
+        request_id: str,
+        commit: bool = True,
+        audit_in_transaction: bool = False,
+    ):
+        """set + commit/cache/audit 절차. 기본값은 /admin 의 기존 동작과 같다."""
+        before = await self.get(user_id) if audit_in_transaction else None
+        clients = await self.set(user_id, clients, actor.user_id)
+        if audit_in_transaction:
+            await self._audit(
+                actor=actor, action="SET_USER_ALLOWED_CLIENTS", user_id=user_id,
+                changes={"before": {"clients": before}, "after": {"clients": clients}},
+                ip_address=ip_address, request_id=request_id,
+            )
+        after_commit = await self._finish_apply(user_id, commit)
+        if commit and not audit_in_transaction:
+            await self._audit(
+                actor=actor, action="SET_USER_ALLOWED_CLIENTS", user_id=user_id,
+                changes={"after": {"clients": clients}},
+                ip_address=ip_address, request_id=request_id,
+            )
+        return clients, after_commit
+
+    async def apply_clear(
+        self,
+        user_id: uuid.UUID,
+        actor,
+        *,
+        ip_address: str,
+        request_id: str,
+        commit: bool = True,
+        audit_in_transaction: bool = False,
+    ):
+        """clear + commit/cache/audit 절차. 기본값은 /admin 의 기존 동작과 같다."""
+        before = await self.get(user_id) if audit_in_transaction else None
+        await self.clear(user_id, actor.user_id)
+        if audit_in_transaction:
+            await self._audit(
+                actor=actor, action="CLEAR_USER_ALLOWED_CLIENTS", user_id=user_id,
+                changes={"before": {"clients": before}, "after": {"clients": []}},
+                ip_address=ip_address, request_id=request_id,
+            )
+        after_commit = await self._finish_apply(user_id, commit)
+        if commit and not audit_in_transaction:
+            await self._audit(
+                actor=actor, action="CLEAR_USER_ALLOWED_CLIENTS", user_id=user_id,
+                changes=None,
+                ip_address=ip_address, request_id=request_id,
+            )
+        return after_commit
 
     async def invalidate_user_vk_cache(self, user_id: uuid.UUID) -> None:
         """VK 인증 캐시 무효화. **``session.commit()`` 뒤에** 호출한다.
