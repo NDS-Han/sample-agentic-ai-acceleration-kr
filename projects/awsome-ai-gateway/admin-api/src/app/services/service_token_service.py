@@ -21,6 +21,9 @@ from app.schemas.service_tokens import (
 logger = structlog.get_logger()
 
 SERVICE_TOKEN_PREFIX = "svc-"
+#: 외부 통합(/aicm/v1) 토큰 접두사. 같은 auth.service_tokens 테이블을 쓰지만 get_current_user 는
+#: svc- 만 서비스 토큰으로 보므로 itg- 토큰은 /admin/* 에서 JWT 경로를 타고 401 이 된다.
+INTEGRATION_TOKEN_PREFIX = "itg-"
 SERVICE_TOKEN_RANDOM_BYTES = 32  # 32 bytes = 64 hex chars → total 67 chars with prefix
 SERVICE_TOKEN_DEFAULT_EXPIRY_DAYS = 90
 SERVICE_TOKEN_ROTATE_GRACE_HOURS = 24
@@ -47,9 +50,10 @@ class ServiceTokenService:
         expiry_days: int | None = None,
         rotated_from: uuid.UUID | None = None,
         expires_at: datetime | None = None,
+        prefix: str = SERVICE_TOKEN_PREFIX,
     ) -> ServiceTokenCreateResponse:
-        raw = SERVICE_TOKEN_PREFIX + secrets.token_hex(SERVICE_TOKEN_RANDOM_BYTES)
-        token_prefix = raw[:12]  # "svc-a3b9c1d2"
+        raw = prefix + secrets.token_hex(SERVICE_TOKEN_RANDOM_BYTES)
+        token_prefix = raw[:12]  # "svc-a3b9c1d2" / "itg-a3b9c1d2"
         now = datetime.now(timezone.utc)
         if expires_at is None:
             days = expiry_days if expiry_days is not None else SERVICE_TOKEN_DEFAULT_EXPIRY_DAYS
@@ -152,10 +156,36 @@ class ServiceTokenService:
         # is the synthetic service-token id which does NOT exist in auth.users and
         # would violate the service_tokens.created_by FK. old.created_by was a real
         # human admin from the original issue, so it is always FK-safe.
+        # 접두사(svc-/itg-)는 계보를 따라 유지한다 — 통합 토큰이 rotate 로 svc- 가 되면
+        # /admin 의 서비스 토큰 표면을 얻는다.
+        prefix = (
+            INTEGRATION_TOKEN_PREFIX
+            if isinstance(old.token_prefix, str)
+            and old.token_prefix.startswith(INTEGRATION_TOKEN_PREFIX)
+            else SERVICE_TOKEN_PREFIX
+        )
         resp = await self.issue(
             session, name=old.name, created_by=old.created_by, rotated_from=old.id,
-            expires_at=new_expires_at,
+            expires_at=new_expires_at, prefix=prefix,
         )
+        # integration grant(auth.integration_tokens)도 rotate 계보를 따라간다.
+        # 한 곳(여기)에서 복사해야 `/admin/service-tokens/rotate` mirror 와
+        # `/aicm/v1/service-tokens/rotate` legacy 경로가 같은 결과를 만든다.
+        from app.models.integration import IntegrationToken
+
+        grant = await session.get(IntegrationToken, old.id)
+        if grant is not None:
+            session.add(
+                IntegrationToken(
+                    token_id=uuid.UUID(resp.id),
+                    integration=grant.integration,
+                    scopes=list(grant.scopes or ()),
+                    allowed_cidrs=[str(c) for c in grant.allowed_cidrs] if grant.allowed_cidrs else None,
+                    rate_limit_per_min=grant.rate_limit_per_min,
+                    lineage_id=grant.lineage_id,
+                )
+            )
+            await session.flush()
         # grace — 구 토큰은 24h 간 진행 중 호출이 끊기지 않게 유효를 유지.
         # revoked_at != None 인 토큰은 위에서 이미 거부했으므로 이 값은 최초
         # 1회만 쓰인다(재rotate 불가 → grace 연장 루프 없음).

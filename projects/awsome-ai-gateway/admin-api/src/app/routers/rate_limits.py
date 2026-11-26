@@ -37,17 +37,19 @@ async def get_rate_limit_usage(
     scope: str,
     scope_id: uuid.UUID,
     admin: CurrentUser = Depends(require_admin),
-    session: AsyncSession = Depends(get_db_session),
 ):
     """실시간 RPM 사용량(§60.9) — gateway-proxy 가 Redis 에 적재하는 sliding-window
     카운터를 읽어 현재 사용/모델별 분해 반환. 설정값(tree)과 별개의 라이브 상태.
-    fail-soft: 조회 실패 시 {available:false}(화면 막지 않음)."""
+    fail-soft: 조회 실패 시 {available:false}(화면 막지 않음).
+
+    요청 범위 DB 세션을 받지 않는다 — 카드가 10초마다 폴링하는데, 세션을 응답 끝까지 쥐면
+    Redis 왕복 동안 기본 풀 연결이 묶인다. 서비스가 설정 행만 짧은 세션으로 읽는다(15초 캐시)."""
     from app.services.rate_limit_service import RateLimitService
 
     svc: RateLimitService = request.app.state.rate_limit_service
     # 서비스 계약은 str — UUID 객체를 넘기면 내부의 uuid.UUID(scope_id) 변환이
     # AttributeError 를 내 tracked 플래그가 항상 None 이 된다(R21 r3 S3).
-    return await svc.get_live_usage(session, scope, str(scope_id))
+    return await svc.get_live_usage(None, scope, str(scope_id))
 
 
 @router.get("/usage-trend/{scope}/{scope_id}")

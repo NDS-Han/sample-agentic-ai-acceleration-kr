@@ -45,6 +45,7 @@ def _request(payload: dict) -> MagicMock:
     여기서 고정하는 것은 **검증을 통과한 클레임을 어떤 신원으로 바꾸는가** 다.
     """
     request = MagicMock()
+    request.url.path = "/admin/test"
     request.headers = {"Authorization": "Bearer sometoken"}
     verifier = MagicMock()
     verifier.verify = MagicMock(return_value=payload)

@@ -17,7 +17,8 @@ from opentelemetry import metrics
 
 #: 비용 대조 검사 이름 — 카운터 시리즈를 기동 시 0 으로 만들어 둔다(increase() 가 첫 증가를 본다).
 RECONCILIATION_CHECKS = ("raw_vs_daily", "monthly_vs_daily", "budget_vs_raw", "redis_vs_db",
-                         "pricing", "dirty_stale", "dead_letters_open")
+                         "pricing", "dirty_stale", "dead_letters_open", "retro_not_charged",
+                         "web_search_cost_gap")
 
 
 def _fanout(callbacks: list[Callable]) -> list[Callable]:

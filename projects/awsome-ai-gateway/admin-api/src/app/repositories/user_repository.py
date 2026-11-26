@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from types import SimpleNamespace
 
 from sqlalchemy import String, all_, and_, any_, bindparam, func, or_, select, update
 from sqlalchemy.dialects.postgresql import ARRAY
@@ -175,6 +176,77 @@ class UserRepository:
         result = await self._session.execute(stmt)
         return list(result.scalars().unique().all())
 
+    async def list_org_tree_lite(self) -> list[SimpleNamespace]:
+        """조직 트리용 **컬럼 전용** 스냅샷 — ``list_all_orgs`` 와 같은 모양(org.departments
+        → dept.teams → team.members)을 ORM 엔티티 없이 만든다.
+
+        ``list_all_orgs`` 는 selectin 연쇄(부서→팀→멤버)에 더해 모델 레벨 selectin 인
+        ``User.team`` · (예전엔) ``User.virtual_keys`` 까지 끌어와 6k 사용자 조직에서 VK
+        테이블 전체와 엔티티 수만 개를 메모리에 올렸다. 트리는 id·이름·이메일·역할·활성
+        여부만 쓴다 — 첫 조직(이름순) 하나에 대해 4개의 컬럼 SELECT 로 끝낸다.
+        """
+        orgs = (
+            await self._session.execute(
+                select(Organization.id, Organization.name).order_by(Organization.name).limit(1)
+            )
+        ).all()
+        out: list[SimpleNamespace] = []
+        if not orgs:
+            return out
+        org = orgs[0]
+        depts = (
+            await self._session.execute(
+                select(Department.id, Department.name).where(Department.org_id == org.id)
+            )
+        ).all()
+        dept_ids = [d.id for d in depts]
+        teams = (
+            await self._session.execute(
+                select(Team.id, Team.name, Team.dept_id, Team.leader_user_id).where(
+                    Team.dept_id.in_(dept_ids)
+                )
+            )
+        ).all() if dept_ids else []
+        members = (
+            await self._session.execute(
+                select(
+                    User.id, User.display_name, User.email, User.is_active, User.role,
+                    User.team_id,
+                )
+                .join(Team, User.team_id == Team.id)
+                .join(Department, Team.dept_id == Department.id)
+                .where(Department.org_id == org.id)
+            )
+        ).all() if teams else []
+
+        by_team: dict = {}
+        for m in members:
+            by_team.setdefault(m.team_id, []).append(
+                SimpleNamespace(
+                    id=m.id, display_name=m.display_name, email=m.email,
+                    is_active=m.is_active, role=m.role,
+                )
+            )
+        by_dept: dict = {}
+        for t in teams:
+            by_dept.setdefault(t.dept_id, []).append(
+                SimpleNamespace(
+                    id=t.id, name=t.name, leader_user_id=t.leader_user_id,
+                    members=by_team.get(t.id, []),
+                )
+            )
+        out.append(
+            SimpleNamespace(
+                id=org.id,
+                name=org.name,
+                departments=[
+                    SimpleNamespace(id=d.id, name=d.name, teams=by_dept.get(d.id, []))
+                    for d in depts
+                ],
+            )
+        )
+        return out
+
     async def list_all_teams(self) -> list[Team]:
         stmt = (
             select(Team)
@@ -225,10 +297,9 @@ class UserRepository:
         """이메일/이름 부분 일치 검색. admin UI 조직 트리의 검색창 전용.
 
         ``list_users`` 를 재사용하지 않는 이유: ``select(User)`` 는 ORM 엔티티를
-        만들면서 ``User.team`` 과 ``User.virtual_keys`` 를 eager-load 한다(둘 다
-        모델 레벨 ``lazy="selectin"``, app/models/auth.py:127,129). 검색은 타이핑
-        **한 글자마다** 호출되는 경로라, 결과 20건에 대해 팀과 VK 를 끌어오는 추가
-        쿼리가 매번 붙는다. 그래서 필요한 컬럼만 SELECT 하고 팀명은 LEFT JOIN 으로
+        만들면서 모델 레벨 ``lazy="selectin"`` 인 ``User.team`` 을 eager-load 한다.
+        검색은 타이핑 **한 글자마다** 호출되는 경로라, 결과 20건에 대해 팀을 끌어오는
+        추가 쿼리가 매번 붙는다. 그래서 필요한 컬럼만 SELECT 하고 팀명은 LEFT JOIN 으로
         한 번에 가져온다.
 
         반환: ``(id, email, display_name, role, team_id, team_name)`` 튜플.
@@ -302,14 +373,49 @@ class UserRepository:
                 }
         return result
 
-    async def deactivate_missing_oidc_users(
+    async def find_missing_oidc_users(
         self, seen_subjects: set[str], provider: str
+    ) -> list:
+        """sync_all reconcile 비활성화 후보의 경량 조회 — bulk UPDATE 전에 ADMIN
+        보호 가드가 후보를 분류할 수 있게 한다. 반환 행은 id/role/is_service_account/
+        sso_subject/email/team_id 만 담은 SimpleNamespace(ORM 로드 없음)."""
+        if seen_subjects:
+            subject_filter = User.sso_subject != all_(
+                bindparam("seen", value=list(seen_subjects), type_=ARRAY(String))
+            )
+        else:
+            subject_filter = User.sso_subject.isnot(None)
+        stmt = (
+            select(
+                User.id, User.role, User.is_service_account,
+                User.sso_subject, User.email, User.team_id, User.is_active,
+            )
+            .where(User.provider == provider)
+            .where(User.is_active.is_(True))
+            .where(subject_filter)
+        )
+        result = await self._session.execute(stmt)
+        return [
+            SimpleNamespace(
+                id=r.id, role=r.role, is_service_account=r.is_service_account,
+                sso_subject=r.sso_subject, email=r.email, team_id=r.team_id,
+                is_active=r.is_active,
+            )
+            for r in result.all()
+        ]
+
+    async def deactivate_missing_oidc_users(
+        self, seen_subjects: set[str], provider: str,
+        exclude_ids: set[uuid.UUID] | None = None,
     ) -> list[uuid.UUID]:
         """provider 유저 중 seen_subjects 에 없고 현재 활성인 유저를 bulk 비활성화.
 
         sync_all reconcile 전용. ORM 객체를 로드하지 않고 단일 UPDATE 로 처리해
         1만+ 유저 로드 시의 메모리 폭발을 회피한다. 비활성화된 user id 목록을
         반환한다 — 호출자가 이 id 로 VK 폐기(R3-3)를 이어서 수행한다.
+
+        ``exclude_ids`` — ADMIN 보호 가드가 skip 을 결정한 유저. 보호 대상은
+        이 UPDATE 에서 빼야 감사 행의 skip 과 실제 DB 상태가 어긋나지 않는다.
         """
         if seen_subjects:
             subject_filter = User.sso_subject != all_(
@@ -326,6 +432,8 @@ class UserRepository:
             .returning(User.id)
             .execution_options(synchronize_session=False)
         )
+        if exclude_ids:
+            stmt = stmt.where(User.id.notin_(list(exclude_ids)))
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
 

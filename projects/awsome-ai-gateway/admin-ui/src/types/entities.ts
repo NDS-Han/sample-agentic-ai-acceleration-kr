@@ -83,6 +83,12 @@ export interface IssueServiceKeyResponse {
 
 // ─── Budgets ──────────────────────────────────────────────────────────────────
 
+export interface ManagedByInfo {
+  source: string;
+  since: string;
+  field: string;
+}
+
 export interface BudgetSummaryItem {
   target_id: string;
   target_type: BudgetScope;
@@ -105,6 +111,8 @@ export interface BudgetSummaryItem {
   // 항상 [80,90,100] 으로 초기화됐다 — 50% 를 저장한 뒤 다시 열면 저장한 값이 사라진
   // 것처럼 보였다. null = 예산 미설정, [] = "알림 없음"(유효한 설정).
   alert_thresholds?: number[] | null;
+  managed_by?: ManagedByInfo;
+  default_cap_managed_by?: ManagedByInfo;
 }
 
 // ─── Models ───────────────────────────────────────────────────────────────────
@@ -181,6 +189,8 @@ export interface BudgetConfigDetail {
   /** null = 서버값 불명(Redis 키 미스) — PUT 생략으로 보존해야 한다. */
   alert_thresholds: number[] | null;
   default_user_cap_usd: string | null;
+  managed_by?: ManagedByInfo;
+  default_cap_managed_by?: ManagedByInfo;
 }
 
 // ─── Rate Limits ──────────────────────────────────────────────────────────────
@@ -314,6 +324,7 @@ export interface AllocationEntry {
   cap_source?: 'individual' | 'team_default' | null;
   /** USER 행만: 실효 cap = A_u ?? D. 개인 cap 없으면 null(팀 한도만). */
   effective_cap_usd?: number | null;
+  managed_by?: ManagedByInfo;
 }
 
 export interface TeamBudgetAllocation {

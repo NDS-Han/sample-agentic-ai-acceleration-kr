@@ -200,6 +200,12 @@ def configure(settings) -> None:
         redis_breaker_cooldown_sec=settings.hot_db_breaker_cooldown_sec,
         refresh_retry_sec=settings.budget_policy_refresh_retry_sec,
     )
+    # p1-hotpath-redis: 예산의 Redis 브레이커는 프로세스 공용 Redis 브레이커다 — rate-limit·모델
+    # 캐시·비용 이벤트가 본 Redis 타임아웃도 예산 경로를 같은 쿨다운 동안 DB/마지막 값으로 보낸다
+    # (판정 규칙은 그대로, 들어가는 시점만 공유).
+    from app.services.hot_path import REDIS_BREAKER
+
+    DEGRADED.redis_breaker = REDIS_BREAKER
     DEGRADED.set_metric(counter)
 
 

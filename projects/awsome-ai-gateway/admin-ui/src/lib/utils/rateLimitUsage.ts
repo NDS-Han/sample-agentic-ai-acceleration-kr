@@ -16,12 +16,23 @@ export interface RateLimitUsage {
   rpm_used_total: number;
   by_model: { model_alias: string; rpm_used: number }[];
   reason?: string;
+  /** 세션 만료(프록시 401) — 폴링을 멈추고 로그인으로 보내야 한다. */
+  unauthorized?: boolean;
 }
 
-export async function fetchRateLimitUsage(scope: string, scopeId: string): Promise<RateLimitUsage> {
+export async function fetchRateLimitUsage(
+  scope: string,
+  scopeId: string,
+  signal?: AbortSignal,
+): Promise<RateLimitUsage> {
   const params = new URLSearchParams({ scope, scope_id: scopeId });
   try {
-    const res = await fetch(`/api/rate-limits/usage?${params}`, { cache: 'no-store' });
+    const res = await fetch(`/api/rate-limits/usage?${params}`, { cache: 'no-store', signal });
+    // ⚠️ 예전엔 상태를 보지 않고 본문만 읽어 401 도 available:false 로 뭉갰다 — 세션이 죽은
+    //    탭이 10초마다 조용히 실패하는 폴링을 영원히 돌렸다.
+    if (res.status === 401) {
+      return { available: false, window_sec: 60, rpm_used_total: 0, by_model: [], reason: 'unauthorized', unauthorized: true };
+    }
     const data = await res.json();
     return {
       available: !!data.available,

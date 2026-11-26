@@ -327,6 +327,43 @@ class Settings(BaseSettings):
     # Cognito 에 없는 OIDC 사용자를 비활성화할지 여부
     COGNITO_SYNC_DEACTIVATE_MISSING: bool = False
 
+    # ── AICM integration (/aicm/v1) ──
+    # 기본 OFF. false 면 /aicm/v1 라우터를 **마운트하지 않는다** — 라우트·OpenAPI·동작이
+    # 이 기능이 없던 때와 같다(tests/unit/test_aicm_flag_off.py). 켜면 itg- 통합 토큰만
+    # /aicm/v1 에서 통한다(svc- 토큰·사람 JWT 는 401, 토큰 발급 라우트만 사람 admin).
+    AICM_API_ENABLED: bool = False
+    # 토큰 계보(lineage)당 분당 상한 — read(GET) / write(그 외 mutation) / lifecycle
+    # (provision·deactivate). 토큰의 rate_limit_per_min 이 write 를 덮는다.
+    AICM_RL_READ_PER_MIN: int = 600
+    AICM_RL_WRITE_PER_MIN: int = 120
+    AICM_RL_LIFECYCLE_PER_MIN: int = 30
+    # sync-cognito 는 오래 걸리는 제어면 배치다 — read/write 와 분리해 sync 폭주가
+    # 일반 예산/정책 쓰기 예산을 소진하지 않게 한다.
+    AICM_RL_SYNC_PER_MIN: int = 10
+    # 통합이 쓰는 Cognito 호출 몫(초당, 전 replica 합산 — Redis 공유 버킷). Cognito 쿼터는
+    # 계정·리전 단위라 로그인 보강·sync 와 공유한다(UserUpdate 25 RPS, UserList 30 RPS 는
+    # 조정 불가). Redis 장애 시 프로세스 로컬 버킷 cap // DIVISOR(=replica 수 가정).
+    AICM_COGNITO_RPS_USER_UPDATE: int = 10
+    AICM_COGNITO_RPS_USER_LIST: int = 10
+    AICM_COGNITO_RPS_USER_CREATION: int = 10
+    AICM_COGNITO_RPS_USER_READ: int = 30
+    AICM_COGNITO_FALLBACK_DIVISOR: int = 3
+    # boto3 Cognito 호출 타임아웃(초)과 재시도 상한(standard 모드, 최초 시도 포함).
+    AICM_COGNITO_CONNECT_TIMEOUT_S: float = 3.0
+    AICM_COGNITO_READ_TIMEOUT_S: float = 5.0
+    AICM_COGNITO_MAX_ATTEMPTS: int = 3
+    # 고객 풀의 SAML IdP 이름(예: ADFS). 비우면 provision 은 연결 없이 네이티브 프로필만
+    # 만든다(state=created_unlinked) — link 필드를 주면 400.
+    COGNITO_FEDERATED_PROVIDER_NAME: str = ""
+    # provision 이 그룹을 쓰는 사용자 속성. 게이트웨이 팀/역할 해석은 OIDC_GROUPS_CLAIM 을
+    # 읽으므로 두 값이 다르면 provision 한 그룹이 팀에 반영되지 않는다(HANDOFF 참고).
+    AICM_PROVISION_GROUPS_ATTRIBUTE: str = "custom:groups"
+    # Idempotency-Key 보존 기간(일). 오래된 행은 같은 통합의 새 키 기록 때 조금씩 지운다.
+    AICM_IDEMPOTENCY_RETENTION_DAYS: int = 7
+    # AICM 이 마지막으로 쓴 필드를 사람 admin 쓰기에서 409 로 잠근다. 기본 OFF —
+    # OFF 에서는 기존 응답 바이트/상태코드가 그대로고, 기록만 조용히 남는다.
+    AICM_MANAGED_LOCK_ENABLED: bool = False
+
     # AWS Price List API 리전(GetProducts). Price List 는 us-east-1/ap-south-1/
     # eu-central-1 엔드포인트만 지원 — 우리 홈리전 ap-northeast-2 가 아니어도 정상.
     # 가격 동기화(모델관리 화면 버튼)용. IAM: admin-api 역할에 pricing:GetProducts.

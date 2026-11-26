@@ -24,6 +24,7 @@ from app.core.config import get_settings
 from app.core.db import AsyncSessionLocal, create_engine, install_commit_before_response
 from app.core.encryption import AESEncryptionService
 from app.core.exceptions import (
+    ManagedFieldLockedError,
     AppError,
     BudgetExceededError,
     BudgetRuleError,
@@ -31,6 +32,7 @@ from app.core.exceptions import (
     ConflictError,
     DateRangeTooLongError,
     ForbiddenError,
+    IntegrationError,
     NotFoundError,
     RateLimitedError,
     STSVerificationError,
@@ -448,6 +450,19 @@ def register_exception_handlers(app: FastAPI) -> None:
             headers=headers,
         )
 
+    @app.exception_handler(IntegrationError)
+    async def integration_error_handler(request: Request, exc: IntegrationError):
+        # /aicm/v1 전용(플래그 off 면 발생하지 않음). type 은 상태코드 어휘를 그대로 쓴다.
+        error: dict = {
+            "type": _HTTP_STATUS_ERROR_TYPES.get(exc.status_code, "internal_error"),
+            "message": exc.message,
+            "code": exc.code,
+        }
+        if exc.details:
+            error["details"] = exc.details
+        headers = {"Retry-After": str(exc.retry_after)} if exc.retry_after else None
+        return JSONResponse(status_code=exc.status_code, content={"error": error}, headers=headers)
+
     @app.exception_handler(BudgetExceededError)
     async def budget_handler(request: Request, exc: BudgetExceededError):
         return JSONResponse(
@@ -484,6 +499,20 @@ def register_exception_handlers(app: FastAPI) -> None:
         return JSONResponse(
             status_code=401,
             content={"error": {"type": "sts_verification_error", "message": exc.message, "code": exc.code}},
+        )
+
+    @app.exception_handler(ManagedFieldLockedError)
+    async def managed_field_locked_handler(request: Request, exc: ManagedFieldLockedError):
+        return JSONResponse(
+            status_code=409,
+            content={
+                "error": {
+                    "type": "conflict",
+                    "message": exc.message,
+                    "code": exc.code,
+                    "details": exc.details,
+                }
+            },
         )
 
     @app.exception_handler(AppError)
@@ -696,7 +725,7 @@ def create_app() -> FastAPI:
     register_exception_handlers(app)
 
     # ── Register routers ──
-    from app.routers import analytics, apps, body_logs, budgets, cli, dashboard, internal, keys, models, monitoring, my, productivity, rate_limits, routing, service_accounts, service_tokens, settings as settings_router, users, web_search_quota
+    from app.routers import analytics, apps, body_logs, budgets, cli, dashboard, internal, keys, managed_fields, models, monitoring, my, productivity, rate_limits, routing, service_accounts, service_tokens, settings as settings_router, users, web_search_quota
 
     app.include_router(keys.router)
     app.include_router(budgets.router)
@@ -716,11 +745,23 @@ def create_app() -> FastAPI:
     app.include_router(internal.router)
     app.include_router(service_tokens.router)
     app.include_router(service_accounts.router)
+    app.include_router(managed_fields.router)
     from app.routers import auth_oidc
     app.include_router(auth_oidc.router)
 
     from app.routers import chat_agent  # admin-chat-agent BI assistant (Phase 2)
     app.include_router(chat_agent.router)
+
+    # AICM 통합(/aicm/v1) — 플래그가 켜졌을 때만 마운트한다. 꺼져 있으면 import 조차 하지
+    # 않아 라우트·OpenAPI 가 이 기능이 없던 때와 바이트 단위로 같다
+    # (tests/unit/test_aicm_flag_off.py).
+    if settings.AICM_API_ENABLED:
+        from app.routers.aicm import router as aicm_router
+        from app.routers.aicm_admin import router as aicm_admin_router
+
+        app.include_router(aicm_router)
+        app.include_router(aicm_admin_router)
+        logger.info("aicm.router_mounted", prefix="/aicm/v1", admin_mirror=True)
 
     # Bedrock invocation log ↔ usage_logs 대조(runtime plane 본문 감사). 설정이 비어 있으면
     # 엔드포인트는 존재하되 503 으로 "미설정" 을 알린다 — 라우터를 조건부로 빼면 UI 가

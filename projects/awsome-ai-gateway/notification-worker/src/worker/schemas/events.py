@@ -31,16 +31,22 @@ class EventType(str, Enum):
     DEGRADATION_MODE = "degradation_mode"
     PROVIDER_ERROR = "provider_error"
     SERVICE_HEALTH_CHANGE = "service_health_change"
+    # business Slack alerts — 외부 producer 가 아니라 notification-worker 의 주기 검사가 만든다.
+    RECONCILIATION_MISMATCH = "reconciliation_mismatch"
+    DEAD_LETTER_GROWTH = "dead_letter_growth"
+    PRICING_MISSING = "pricing_missing"
 
 
 class Channel(str, Enum):
     EMAIL = "email"
+    SLACK = "slack"
 
 
 class ServiceSource(str, Enum):
     GATEWAY_PROXY = "gateway-proxy"
     ADMIN_API = "admin-api"
     COST_RECORDER_WORKER = "cost-recorder-worker"
+    NOTIFICATION_WORKER = "notification-worker"
 
 
 class NotificationEvent(BaseModel):

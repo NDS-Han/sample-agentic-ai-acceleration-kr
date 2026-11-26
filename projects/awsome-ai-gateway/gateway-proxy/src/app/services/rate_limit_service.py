@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import math
 import time
@@ -75,61 +76,42 @@ def _on_eval_failure(scope: str, limit_type: str) -> RateLimitResult | None:
     return None
 
 
-# 회로 차단기(deepdive Q50) — Redis eval 연속 실패 시 회로를 열어 후속 호출을
-# socket_timeout 대기 없이 즉시 fast-fail(→ fallback). lazy 싱글톤(설정 1회 로드).
-# rl_breaker_enabled=false 면 None → 게이팅 비활성(과거 동작).
-_breaker = None
-_breaker_init = False
-
-
-def _get_breaker():
-    global _breaker, _breaker_init
-    if not _breaker_init:
-        _breaker_init = True
-        from app.config import get_settings
-
-        s = get_settings()
-        if s.rl_breaker_enabled:
-            from app.degradation.circuit_breaker import CircuitBreaker
-
-            _breaker = CircuitBreaker(
-                fail_threshold=s.rl_breaker_fail_threshold,
-                recovery_timeout=s.rl_breaker_recovery_timeout,
-                name="rate_limit_redis",
-            )
-    return _breaker
+# 회로 차단기(deepdive Q50 → p1-hotpath-redis) — rate-limit eval 은 프로세스 공용 Redis 브레이커
+# (hot_path.REDIS_BREAKER)를 쓴다. 예산 체크·모델 캐시·비용 이벤트·VK 인증과 같은 것이라 어느 한
+# 경로가 본 Redis 타임아웃/연결 오류도 쿨다운(hot_redis_breaker_cooldown_sec) 동안 전 경로를
+# fallback 으로 보낸다. 예전 전용 브레이커(연속 5회 실패, 5 s)는 Redis 행에서 열리기까지 요청마다
+# 소켓 타임아웃(2 s × 재시도)을 기다렸다. eval 하나에는 hot_redis_timeout_sec 상한도 둔다.
+# rl_breaker_enabled=false 면 브레이커·상한 없이 그냥 eval(과거 동작).
 
 
 def reset_breaker_for_test() -> None:
-    """테스트 격리용 — breaker 싱글톤 재초기화."""
-    global _breaker, _breaker_init
-    _breaker = None
-    _breaker_init = False
+    """테스트 격리용 — 공용 Redis 브레이커를 닫는다."""
+    from app.services.hot_path import REDIS_BREAKER
+
+    REDIS_BREAKER.reset()
 
 
 async def _guarded_eval(redis, *args):
-    """breaker 를 통과시키는 redis.eval 래퍼.
+    """공용 Redis 브레이커 + 호출 상한을 거치는 redis.eval 래퍼.
 
-    회로가 OPEN(allow()=False)이면 eval 을 **호출하지 않고** CircuitOpenError 를
-    던진다 → 호출자의 except 가 fail-open(다음 scope/fallback)으로 처리(소켓 타임아웃
-    대기 없음). 호출 성공/실패는 breaker 에 보고해 상태를 전이한다. breaker 비활성이면
-    그냥 eval(과거 동작).
+    브레이커가 열려 있으면 eval 을 **호출하지 않고** ``CircuitOpenError`` 를 던진다 → 호출자의
+    except 가 정책(rl_fail_mode)대로 처리한다(소켓 타임아웃 대기 없음). 타임아웃·연결 오류는
+    브레이커를 연다. 스크립트 오류(ResponseError)는 Redis 장애가 아니라 열지 않는다.
     """
-    breaker = _get_breaker()
-    if breaker is None:
+    from app.config import get_settings
+
+    s = get_settings()
+    if not s.rl_breaker_enabled:
         return await redis.eval(*args)
 
     from app.degradation.circuit_breaker import CircuitOpenError
+    from app.services.hot_path import HotRedisUnavailable, run_redis
 
-    if not breaker.allow():
-        raise CircuitOpenError("rate_limit redis circuit open")
     try:
-        out = await redis.eval(*args)
-    except Exception:
-        breaker.record_failure()
-        raise
-    breaker.record_success()
-    return out
+        return await run_redis(lambda: redis.eval(*args), timeout=s.hot_redis_timeout_sec,
+                               what="rate_limit")
+    except HotRedisUnavailable as e:
+        raise CircuitOpenError("rate_limit redis circuit open") from e
 
 
 class RateLimitService:
@@ -471,14 +453,25 @@ class RateLimitService:
 
             # 버킷 마커 판독 → 예약 버킷이 아직 cur 이면 cur, 한 칸 밀렸으면 prev.
             targets: list[tuple[str, str]] = []  # (key, scope_label) 로깅용
-            for d in effective:
-                cur, prev, win = build_tpm_key_group(d.scope, d.scope_id, d.model_alias)
+            groups = [
+                build_tpm_key_group(d.scope, d.scope_id, d.model_alias) for d in effective
+            ]
+            # 스코프별 win 마커 GET 은 서로 독립인 읽기다 — 순차 await(왕복 N) 대신 동시에
+            # 보내 왕복 1회로 끝낸다(p1-hotpath-redis). 스코프마다 hash tag 가 달라 MGET 은
+            # cluster 에서 CROSSSLOT 이므로 개별 GET 을 gather 한다. 실패는 스코프별로 '마커 없음'.
+            marker_raws = await asyncio.gather(
+                *(redis.get(win) for _cur, _prev, win in groups), return_exceptions=True
+            )
+            for d, (cur, prev, _win), marker_raw in zip(effective, groups, marker_raws):
+                if isinstance(marker_raw, asyncio.CancelledError):
+                    raise marker_raw
                 try:
-                    marker_raw = await redis.get(win)
-                    marker = int(marker_raw) if marker_raw is not None else None
+                    marker = (
+                        None
+                        if marker_raw is None or isinstance(marker_raw, BaseException)
+                        else int(marker_raw)
+                    )
                 except (TypeError, ValueError):
-                    marker = None
-                except Exception:
                     marker = None
                 if marker is None:
                     # win 키는 예약 성공 시 반드시 SET+EXPIRE 된다 — 없다는 건

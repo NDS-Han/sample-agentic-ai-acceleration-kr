@@ -8,7 +8,7 @@ import uuid
 from typing import Literal
 
 from fastapi import APIRouter, Depends, Query, Request
-from fastapi.responses import Response
+from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import CurrentUser, require_admin, require_admin_or_team_leader
@@ -165,9 +165,21 @@ async def export_analytics(
     user: CurrentUser = Depends(require_admin_or_team_leader),
     session: AsyncSession = Depends(get_analytics_session),
 ):
+    """CSV/JSON 내보내기 — **응답 헤더를 먼저** 보내고 본문을 스트리밍한다.
+
+    ⚠️ 예전엔 전체 결과를 메모리에서 만든 뒤 한 번에 응답했다 — 큰 범위(6k 사용자 × 모델,
+    366일)는 헤더가 나가기까지 수십 초가 걸려 admin-ui 프록시의 헤더 타임아웃(15 s,
+    lib/utils/upstream.ts)에 504 로 끊겼다. 이제 검증(기간·스코프 403)만 먼저 끝내고
+    StreamingResponse 로 헤더를 바로 보낸다. 쿼리는 본문 생성기 안에서 자기 분석 세션으로
+    돌고(요청 세션은 스트리밍 전에 반납), 사용자×모델 행은 서버 측 커서로 묶음 단위로 낸다.
+    본문 도중 실패하면 연결이 끊겨 다운로드가 실패로 보인다(잘린 파일을 성공으로 주지 않는다).
+    """
+    from app.core.db import AnalyticsSessionLocal
+    from app.services import usage_rollup as ur
+    from app.services.analytics_service import _resolve_scope
+
     if view == "user_model":
         from app.services import user_model_usage as umu
-        from app.services.analytics_service import _resolve_scope
 
         if format != "csv":
             from app.core.exceptions import ValidationError
@@ -175,37 +187,70 @@ async def export_analytics(
             raise ValidationError("view=user_model supports format=csv only")
         rng = umu.resolve_range(period, start_date, end_date)
         _, scope_ids = await _resolve_scope(user, scope, session)
-        content = await umu.export_csv(session, rng, scope_ids, client)
+        await session.close()  # 검증용 연결 반납 — 본문은 자기 세션으로 돈다
+
+        async def user_model_body():
+            async with AnalyticsSessionLocal() as s:
+                try:
+                    async for chunk in umu.export_csv_chunks(s, rng, scope_ids, client):
+                        yield chunk.encode()
+                finally:
+                    await s.rollback()
+
         stamp = rng.label.replace("~", "_")
-        return Response(
-            content=content,
+        return StreamingResponse(
+            user_model_body(),
             media_type="text/csv",
             headers={
-                "Content-Disposition": f'attachment; filename="analytics_user_model_{stamp}.csv"'
+                "Content-Disposition": f'attachment; filename="analytics_user_model_{stamp}.csv"',
+                "Cache-Control": "no-store",
             },
         )
+
+    # 기간 검증(400/422)과 스코프 해석(403)은 헤더 전에 — 스트리밍 뒤엔 상태 코드를 못 바꾼다.
+    ur.resolve_range(period, start_date, end_date)
+    _, scope_ids = await _resolve_scope(user, scope, session)
+    await session.close()
     svc: AnalyticsService = request.app.state.analytics_service
-    content, content_type = await svc.export_analytics(
-        session,
-        format=format,
-        period=period,
-        group_by=group_by,
-        scope=scope,
-        client=client,
-        actor=user,
-        start_date=start_date,
-        end_date=end_date,
-    )
+
+    async def body():
+        # 집계 응답만 세션에서 읽고 세션은 바로 반납 — 본문 직렬화·전송 동안 분석 풀
+        # 연결과 열린 트랜잭션을 붙잡지 않는다(느린 클라이언트 대비).
+        async with AnalyticsSessionLocal() as s:
+            try:
+                response = await svc.get_analytics(
+                    s,
+                    period=period,
+                    group_by=group_by,
+                    scope=scope,
+                    client=client,
+                    actor=user,
+                    start_date=start_date,
+                    end_date=end_date,
+                    scope_ids=scope_ids,
+                )
+            finally:
+                await s.rollback()
+        if format == "csv":
+            for chunk in svc._iter_csv(response, group_by):
+                yield chunk.encode()
+        else:
+            text = response.model_dump_json(indent=2)
+            for i in range(0, len(text), 65536):
+                yield text[i : i + 65536].encode()
 
     filename = (
         f"analytics_{start_date}_{end_date}.{format}"
         if start_date and end_date
         else f"analytics_{period}.{format}"
     )
-    return Response(
-        content=content,
-        media_type=content_type,
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    return StreamingResponse(
+        body(),
+        media_type="text/csv" if format == "csv" else "application/json",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "no-store",
+        },
     )
 
 
@@ -251,7 +296,8 @@ async def get_user_models(
                       description="total|input|output|cache|cost|name|other|model:<alias>"),
     dir: Literal["asc", "desc"] = Query("desc"),
     page: int = Query(1, ge=1, le=100_000),
-    page_size: int = Query(10, ge=1, le=50),
+    # 상한 500 — /users 팀 상세가 팀 전원(≤500)을 한 요청으로 받는다(예전 50 × 순차 페이지).
+    page_size: int = Query(10, ge=1, le=500),
     q: str | None = Query(default=None, max_length=100, description="이름·이메일·팀 부분 일치"),
     user: CurrentUser = Depends(require_admin_or_team_leader),
     session: AsyncSession = Depends(get_analytics_session),

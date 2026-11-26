@@ -4,7 +4,8 @@
 
 /**
  * 실시간 RPM 카드 — "최근 60초 요청 수"(§60.9). 예전 ScopeRateLimitPanel 안의 표시를 그대로
- * 떼어 낸 것(같은 메시지·같은 규칙): 10초마다 /api/rate-limits/usage 폴링.
+ * 떼어 낸 것(같은 메시지·같은 규칙): 10초마다 /api/rate-limits/usage 폴링 — 탭이 보일 때만,
+ * 401 이면 멈추고 로그인으로.
  *
  * tracked=false(RPM 한도 미설정)면 proxy 가 카운터를 적재하지 않는다 — 0 을 "요청 없음"으로
  * 오독하지 않게 '—' + 설명. 한도가 있으면 막대.
@@ -14,6 +15,10 @@ import { useEffect, useState } from 'react';
 import { useTranslations } from 'next-intl';
 
 import { fetchRateLimitUsage, type RateLimitUsage } from '@/lib/utils/rateLimitUsage';
+import { redirectToLoginIfUnauthorized } from '@/lib/utils/unauthorized';
+
+/** 폴링 주기. 탭이 숨겨져 있으면 멈추고, 다시 보이면 즉시 한 번 읽고 재개한다. */
+export const LIVE_RPM_POLL_MS = 10_000;
 
 export function LiveRpmCard({
   scope,
@@ -33,19 +38,56 @@ export function LiveRpmCard({
 
   useEffect(() => {
     let alive = true;
-    const load = () =>
-      fetchRateLimitUsage(scope, scopeId)
+    let stopped = false;
+    let timer: ReturnType<typeof setInterval> | null = null;
+    let ctrl: AbortController | null = null;
+    const stop = () => {
+      if (timer) clearInterval(timer);
+      timer = null;
+    };
+    const load = () => {
+      // 직전 요청이 아직이면 끊고 새로 — 느린 응답이 쌓이지 않게.
+      ctrl?.abort();
+      const c = new AbortController();
+      ctrl = c;
+      fetchRateLimitUsage(scope, scopeId, c.signal)
         .then((u) => {
-          if (alive) setUsage(u);
+          if (!alive || c.signal.aborted) return;
+          if (u.unauthorized) {
+            // 세션 만료 — 폴링을 영구 중단하고 로그인으로.
+            stopped = true;
+            stop();
+            redirectToLoginIfUnauthorized({ status: 401 });
+            return;
+          }
+          setUsage(u);
         })
         .catch(() => {
-          if (alive) setUsage(null);
+          if (alive && !c.signal.aborted) setUsage(null);
         });
-    load();
-    const interval = setInterval(load, 10_000);
+    };
+    const start = () => {
+      if (stopped || timer) return;
+      load();
+      timer = setInterval(load, LIVE_RPM_POLL_MS);
+    };
+    // 숨겨진 탭에서는 폴링하지 않는다 — 열어 둔 /users 탭들이 10초마다 admin-api·Redis 를
+    // 치던 부하를 없앤다. 다시 보이면 즉시 갱신.
+    const onVisibility = () => {
+      if (document.visibilityState === 'hidden') {
+        stop();
+        ctrl?.abort();
+      } else {
+        start();
+      }
+    };
+    if (document.visibilityState !== 'hidden') start();
+    document.addEventListener('visibilitychange', onVisibility);
     return () => {
       alive = false;
-      clearInterval(interval);
+      stop();
+      ctrl?.abort();
+      document.removeEventListener('visibilitychange', onVisibility);
     };
   }, [scope, scopeId]);
 

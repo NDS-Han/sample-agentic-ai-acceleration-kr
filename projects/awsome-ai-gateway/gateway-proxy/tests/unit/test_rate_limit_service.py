@@ -340,33 +340,89 @@ async def test_fail_mode_closed_blocks_on_eval_error(mock_redis, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_circuit_breaker_fast_fails_after_threshold(mock_redis):
-    """eval 연속 실패가 임계 넘으면 회로 OPEN → 이후 eval 호출 안 하고 fast-fail(fail-open).
+async def test_circuit_breaker_fast_fails_after_infra_failure(mock_redis):
+    """eval 연결 오류 → 공용 Redis 브레이커 열림 → 이후 eval 호출 없이 fast-fail(fail-open).
 
-    deepdive Q50: Redis 죽었을 때 매 요청 socket_timeout 대기 누적 방지.
+    deepdive Q50 / p1-hotpath-redis: Redis 죽었을 때 매 요청 socket_timeout 대기 누적 방지.
+    예산 열화 모드와 같은 규칙 — 인프라 실패 한 번이면 쿨다운 동안 연다.
     """
+    from redis.exceptions import ConnectionError as RedisConnectionError
+
     from app.services import rate_limit_service as rls
+    from app.services.hot_path import REDIS_BREAKER
     from app.services.lua_loader import LuaScriptLoader
 
-    rls.reset_breaker_for_test()  # 깨끗한 breaker(기본 fail_threshold=5)
+    rls.reset_breaker_for_test()
     LuaScriptLoader._scripts["rate_limit_check"] = "-- mock"
-    mock_redis.eval = AsyncMock(side_effect=Exception("redis down"))
+    mock_redis.eval = AsyncMock(side_effect=RedisConnectionError("redis down"))
 
-    # USER 한 scope만 — scope당 1 eval. fail_threshold(5)를 넘기려면 5+ 요청.
     desc = [
         ScopeDescriptor(scope=RateLimitScope.USER, scope_id="u1", model_alias="m1", rpm_limit=60),
     ]
     svc = rls.RateLimitService()
-    for _ in range(5):
-        r = await svc.check_multi_scope_rpm(mock_redis, desc)
-        assert r.allowed is True  # 매번 fail-open
+    r = await svc.check_multi_scope_rpm(mock_redis, desc)
+    assert r.allowed is True  # fail-open
+    assert mock_redis.eval.await_count == 1
+    assert not REDIS_BREAKER.available()
 
-    eval_calls_before = mock_redis.eval.await_count
     # 회로가 열렸으니 다음 호출은 eval 을 더 부르지 않아야 한다(fast-fail).
     r = await svc.check_multi_scope_rpm(mock_redis, desc)
     assert r.allowed is True  # 여전히 fail-open(통과)
-    assert mock_redis.eval.await_count == eval_calls_before  # eval 추가 호출 0
+    assert mock_redis.eval.await_count == 1  # eval 추가 호출 0
     rls.reset_breaker_for_test()
+
+
+@pytest.mark.asyncio
+async def test_script_error_does_not_open_breaker(mock_redis):
+    """스크립트 오류(ResponseError)는 Redis 장애가 아니다 — 브레이커를 열지 않는다."""
+    from redis.exceptions import ResponseError
+
+    from app.services import rate_limit_service as rls
+    from app.services.hot_path import REDIS_BREAKER
+    from app.services.lua_loader import LuaScriptLoader
+
+    LuaScriptLoader._scripts["rate_limit_check"] = "-- mock"
+    mock_redis.eval = AsyncMock(side_effect=ResponseError("ERR user_script:1"))
+    desc = [
+        ScopeDescriptor(scope=RateLimitScope.USER, scope_id="u1", model_alias="m1", rpm_limit=60),
+    ]
+    svc = rls.RateLimitService()
+    for _ in range(3):
+        assert (await svc.check_multi_scope_rpm(mock_redis, desc)).allowed is True
+    assert mock_redis.eval.await_count == 3
+    assert REDIS_BREAKER.available()
+
+
+@pytest.mark.asyncio
+async def test_eval_deadline_trips_breaker(mock_redis, monkeypatch):
+    """hot_redis_timeout_sec 를 넘긴 eval(행)은 실패로 끝나고 브레이커를 연다."""
+    import asyncio
+
+    from app.config import get_settings
+    from app.services import rate_limit_service as rls
+    from app.services.hot_path import REDIS_BREAKER
+    from app.services.lua_loader import LuaScriptLoader
+
+    get_settings.cache_clear()
+    monkeypatch.setenv("HOT_REDIS_TIMEOUT_SEC", "0.05")
+    LuaScriptLoader._scripts["rate_limit_check"] = "-- mock"
+
+    async def _hang(*_a, **_k):
+        await asyncio.sleep(5)
+
+    mock_redis.eval = AsyncMock(side_effect=_hang)
+    desc = [
+        ScopeDescriptor(scope=RateLimitScope.USER, scope_id="u1", model_alias="m1", rpm_limit=60),
+    ]
+    try:
+        loop = asyncio.get_running_loop()
+        t0 = loop.time()
+        r = await rls.RateLimitService().check_multi_scope_rpm(mock_redis, desc)
+        assert r.allowed is True  # fail-open
+        assert loop.time() - t0 < 1.0
+        assert not REDIS_BREAKER.available()
+    finally:
+        get_settings.cache_clear()
 
 
 @pytest.mark.asyncio

@@ -15,6 +15,7 @@ import { adminAPI } from '@/lib/api-client';
 import { withRetry } from '@/lib/utils/retry';
 import { APIError } from '@/lib/utils/retry';
 import type { OrgTreeNode, UserSearchItem } from '@/types/entities';
+import type { OrgTreeMarks } from '@/lib/utils/orgTreeHydrate';
 import type { ActionResult } from './types';
 
 // ─── setTeamLeaderAction ──────────────────────────────────────────────────────
@@ -252,11 +253,11 @@ export async function setUserAllowedModelsAction(
 
 export async function getUserClientBudgetsAction(
   userId: string,
-): Promise<ActionResult<{ apps: Array<{ client: string; max_budget_usd: string; policy: string }> }>> {
+): Promise<ActionResult<{ apps: Array<{ client: string; max_budget_usd: string; policy: string; managed_by?: import('@/types/entities').ManagedByInfo }> }>> {
   if (!userId) return { success: false, error: 'User ID is required' };
   try {
     const res = await withRetry(() =>
-      adminAPI.get<{ user_id: string; apps: Array<{ client: string; max_budget_usd: string; policy: string }> }>(
+      adminAPI.get<{ user_id: string; apps: Array<{ client: string; max_budget_usd: string; policy: string; managed_by?: import('@/types/entities').ManagedByInfo }> }>(
         `/admin/budgets/user/${encodeURIComponent(String(userId))}/apps`,
       ),
     );
@@ -401,13 +402,32 @@ export async function getTeamEffectivePolicyAction(
 // /users 의 "빈 팀 표시" 토글이 클라이언트에서 트리를 재조회할 때 쓴다.
 // page.tsx 의 최초 fetch 는 include_empty=false — 토글 ON 일 때만 true 로
 // 다시 가져온다(라우트 네비게이션 없이 root state 만 교체해 dirty 보존).
+// slim=true — 축약형(None·false·USER 팀 이름 생략). 클라이언트가 hydrateOrgTree 로 채운다
+// (6k 사용자 ≈ 2.2 MB → 1/3 이하). 서버 액션 반환값도 직렬화돼 브라우저로 가므로 같은 이득.
 export async function getOrgTreeAction(
   includeEmpty: boolean
 ): Promise<ActionResult<OrgTreeNode | null>> {
   try {
     const data = await withRetry(() =>
       adminAPI.get<OrgTreeNode | null>(
-        `/admin/users/tree${includeEmpty ? '?include_empty=true' : ''}`
+        `/admin/users/tree?slim=true${includeEmpty ? '&include_empty=true' : ''}`
+      )
+    );
+    return { success: true, data };
+  } catch (err) {
+    return { success: false, error: toErrorMessage(err) };
+  }
+}
+
+// 저장 후 트리 패치용 — 한 팀의 팀장·멤버 역할·개별설정 점(트리 전체 재조회 대신).
+export async function getOrgTreeMarksAction(
+  teamId: string
+): Promise<ActionResult<OrgTreeMarks>> {
+  if (!teamId) return { success: false, error: 'Team ID is required' };
+  try {
+    const data = await withRetry(() =>
+      adminAPI.get<OrgTreeMarks>(
+        `/admin/users/tree/marks?team_id=${encodeURIComponent(teamId)}`
       )
     );
     return { success: true, data };

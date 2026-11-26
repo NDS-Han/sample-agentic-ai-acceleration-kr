@@ -32,6 +32,9 @@ class CurrentUser:
     team_id: uuid.UUID | None
     is_service_token: bool = False
     service_token_id: uuid.UUID | None = None
+    # /aicm/v1 mirror principal 만 채운다 — 사람/일반 svc- 는 None.
+    integration: str | None = None
+    integration_lineage_id: uuid.UUID | None = None
 
 
 # 공개키 테이블(admin_jwt_configs)에는 비대칭 알고리즘만 등록돼야 한다 —
@@ -164,6 +167,13 @@ def _parse_dev_token(token: str) -> dict | None:
 async def get_current_user(request: Request) -> CurrentUser:
     token = _extract_token(request)
 
+    # /aicm/v1/admin mirror — 사람 JWT/일반 svc-/dev token 경로로 절대 내려보내지 않는다.
+    # scope·rate-limit 은 route-level require_integration 이 추가로 강제한다.
+    if request.url.path.startswith("/aicm/v1/admin/"):
+        from app.core.integration_auth import authenticate_mirror_actor
+
+        return await authenticate_mirror_actor(request)
+
     # Dev token shortcut (DEV_LOGIN_ENABLED=true only)
     dev_payload = _parse_dev_token(token)
     if dev_payload is not None:
@@ -191,6 +201,13 @@ async def get_current_user(request: Request) -> CurrentUser:
             svc_tok = await svc_service.verify(session, hash_token(token))
         if svc_tok is None:
             raise HTTPException(status_code=401, detail="Invalid or expired service token")
+        # integration grant 가 있는 svc- 는 AICM mirror 전용이다. 유출돼도 real /admin
+        # 사람 관리 표면(모든 scoped mutation)에 쓸 수 없게 여기서 닫는다.
+        from app.models.integration import IntegrationToken
+
+        async with AsyncSessionLocal() as session:
+            if await session.get(IntegrationToken, svc_tok.id) is not None:
+                raise HTTPException(status_code=401, detail="Invalid or expired service token")
         return CurrentUser(
             user_id=uuid.UUID("00000000-0000-4000-a000-000000000011"),
             email="service-token@admin.local",
@@ -461,6 +478,7 @@ async def require_admin_or_team_leader(user: CurrentUser = Depends(get_current_u
 
 
 async def require_human_admin(
+    request: Request,
     admin: CurrentUser = Depends(require_admin),
 ) -> CurrentUser:
     """사람 admin(JWT) 전용 — svc 토큰 차단.
@@ -472,11 +490,18 @@ async def require_human_admin(
     audit/settings 의 forbid_service_token_reader 와 같은 이유.
     """
     if admin.is_service_token:
+        # mirror 에서는 route-level require_integration 이 scoped svc 신원·scope·
+        # rate-limit 을 이미 강제했다. real /admin 의 svc- 차단 규칙은 그대로다.
+        if request is not None and request.url.path.startswith("/aicm/v1/admin/") and getattr(
+            request.state, "integration_principal", None
+        ) is not None:
+            return admin
         raise ForbiddenError("Service tokens cannot perform this action")
     return admin
 
 
 async def require_human_admin_or_team_leader(
+    request: Request,
     user: CurrentUser = Depends(require_admin_or_team_leader),
 ) -> CurrentUser:
     """사람 admin 또는 team leader(JWT) 전용 — svc 토큰 차단.
@@ -488,6 +513,10 @@ async def require_human_admin_or_team_leader(
     팀 스코프 예산 변경은 자동화 용도가 없는 표면이라 차단한다.
     """
     if user.is_service_token:
+        if request is not None and request.url.path.startswith("/aicm/v1/admin/") and getattr(
+            request.state, "integration_principal", None
+        ) is not None:
+            return user
         raise ForbiddenError("Service tokens cannot perform this action")
     return user
 

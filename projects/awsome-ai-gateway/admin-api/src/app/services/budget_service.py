@@ -29,12 +29,23 @@ from app.core.exceptions import (
     ValidationError,
 )
 from app.core.usage_filters import current_kst_period
-from app.models.auth import Team, UserRole
-from app.models.budget import BudgetConfig, BudgetPolicy, BudgetScope, BudgetUsage, DowngradePolicy, PeriodType
+from app.models.auth import Team, User, UserRole
+from app.models.budget import BudgetConfig, BudgetPolicy, BudgetScope, BudgetUsage, DowngradePolicy, PeriodType, UserAppGroupBudget
 
 from app.repositories._locks import advisory_xact_lock
 from app.repositories.budget_repository import BudgetRepository, DowngradePolicyRepository
 from app.repositories.user_repository import UserRepository
+from app.services.protected_targets import protected_user_target_code
+from app.services.managed_fields import (
+    FIELD_BUDGET,
+    FIELD_DEFAULT_CAP,
+    RESOURCE_TEAM,
+    RESOURCE_USER,
+    app_budget_facet,
+    app_group_budget_facet,
+    assert_writable,
+    record_aicm_write,
+)
 from app.schemas.budgets import (
     AllocationEntry,
     AllocateBudgetRequest,
@@ -55,7 +66,8 @@ logger = structlog.get_logger()
 
 BUDGET_CONFIG_CACHE_TTL = 300  # 5 min; matches VK_AUTH_CACHE_TTL in key_service
 
-_CENT = Decimal("0.01")
+_BUDGET_AMOUNT_QUANTUM = Decimal("0.0001")
+_CENT = Decimal("0.01")  # equal-split 은 UI/계약상 센트 단위로 버림
 
 # SetBudgetRequest.alert_thresholds 의 기본값과 동일 — 새 config 행을 만들 때
 # 쓰는 표준 임계값. 명명 상수로 두는 이유: AST 회귀 가드가 리터럴 리스트를
@@ -83,20 +95,29 @@ def _require_admin_actor(actor: CurrentUser) -> None:
 
 
 def _check_cent_precision(amount: Decimal) -> None:
-    """D-17/§0-3: 예산 입력은 센트(2자리)까지. 초과 정밀도는 거부한다.
+    """예산 입력은 NUMERIC(12,4) 저장 정밀도와 같은 4자리까지 허용한다.
 
-    저장은 NUMERIC(12,4) 가 허용하지만 입력 계약은 2자리다 — 소수 3~4자리를
-    조용히 받아주면 UI 표시(센트 반올림)와 enforcement(정밀 비교)가 어긋난다.
+    함수 이름은 legacy 다 — AICM 계약이 ``max_budget_usd`` 를 4-decimal string 으로
+    보내므로 센트 강제는 계약 위반이다. enforcement 비교도 Decimal 이라 4자리가 안전하다.
     """
     try:
-        ok = amount == amount.quantize(_CENT)
+        ok = amount == amount.quantize(_BUDGET_AMOUNT_QUANTUM)
     except InvalidOperation:
         ok = False
     if not ok:
         raise BudgetRuleError(
-            f"Budget amounts are limited to cents (2 decimal places): {amount}",
+            f"Budget amounts are limited to 4 decimal places: {amount}",
             "invalid_amount_precision",
         )
+
+
+def _reject_unlimited_outside_team(amount: Decimal) -> None:
+    # 스키마는 문자열 "unlimited" 를 Numeric 최대 sentinel 로 바꾼다. 팀 총액 외의
+    # 개인/app/기본 cap 에는 무제한 개념이 없으므로 sentinel 값 자체를 거부한다.
+    from app.schemas.budgets import UNLIMITED_TEAM_BUDGET_USD
+
+    if amount == UNLIMITED_TEAM_BUDGET_USD:
+        raise ValidationError("'unlimited' is only valid for a team total budget")
 
 
 async def _lock_user_budget_key(session: AsyncSession, user_id: uuid.UUID) -> None:
@@ -218,6 +239,77 @@ class BudgetService:
         """
     )
 
+    async def _refuse_protected_seed_targets(
+        self,
+        session: AsyncSession,
+        *,
+        items: list[SeedSpentItem],
+        actor: CurrentUser,
+        ip_address: str,
+        request_id: str,
+    ) -> None:
+        """USER scope 시드 대상이 ADMIN/system/service-account 면 전체 요청을 거부.
+
+        ``PUT /admin/budgets/spent`` 는 item 단위 partial failure 를 허용하지만 보호
+        대상 거부는 예외다 — 보호 대상이 하나라도 섞인 배치의 정상 item 까지 쓰면
+        호출자가 거부 사실을 놓친 채 예산 상태를 바꿀 수 있다. 따라서 어떤 budget
+        행이나 Redis 키도 만지기 전에 대상 USER 행을 먼저 잠그고 분류한다.
+        분류 순서는 ``aicm_admin.guard_user_target`` 과 같다(system → service
+        account → ADMIN). 거부 감사는 요청 rollback 과 함께 사라지면 안 되므로
+        queue_only 다.
+        """
+        user_ids: set[uuid.UUID] = set()
+        for item in items:
+            if item.scope.upper() != "USER":
+                continue
+            try:
+                user_ids.add(uuid.UUID(item.scope_id))
+            except (TypeError, ValueError):
+                # malformed UUID 는 기존처럼 item error 로 처리한다 — 보호 판정을
+                # 위해 전체 요청을 바꾸지 않는다.
+                continue
+        if not user_ids:
+            return
+
+        rows = (
+            await session.execute(
+                sa_select(User.id, User.role, User.is_service_account)
+                .where(User.id.in_(sorted(user_ids)))
+                .order_by(User.id)
+                .with_for_update()
+            )
+        ).all()
+        users = {r.id: r for r in rows}
+        for user_id in sorted(user_ids):
+            target = users.get(user_id)
+            code = protected_user_target_code(user_id, target)
+            if code is None:
+                continue
+            await audit_logger.log(
+                session,
+                actor_user_id=actor.user_id,
+                actor_role=actor.role.value,
+                service_token_id=getattr(actor, "service_token_id", None),
+                action="AICM_ADMIN_TARGET_REFUSED",
+                resource_type="User",
+                resource_id=str(user_id),
+                result="FAILURE",
+                changes={"after": {
+                    "code": code,
+                    "operation": "SEED_BUDGET_SPENT",
+                    "scope": "USER",
+                    "scope_id": str(user_id),
+                }},
+                ip_address=ip_address,
+                request_id=request_id,
+                queue_only=True,
+            )
+            raise BudgetRuleError(
+                f"{code}: cannot seed budget spent for gateway admins, system users, or service accounts",
+                code,
+                403,
+            )
+
     async def seed_spent(
         self,
         session: AsyncSession,
@@ -236,6 +328,9 @@ class BudgetService:
         others proceed.
         """
         _require_admin_actor(actor)
+        await self._refuse_protected_seed_targets(
+            session, items=items, actor=actor, ip_address=ip_address, request_id=request_id
+        )
         results: list[SeedSpentResult] = []
         user_repo = UserRepository(session)
         # 성공한 item 의 (redis_key, value) — outer commit 까지 지연한다.
@@ -461,12 +556,18 @@ class BudgetService:
         if team is None:
             raise NotFoundError("Team", str(team_id))
 
+        managed_specs = [(RESOURCE_TEAM, team_id, FIELD_BUDGET)]
+        writes_default_cap = "default_user_cap_usd" in data.model_fields_set
+        if writes_default_cap:
+            managed_specs.append((RESOURCE_TEAM, team_id, FIELD_DEFAULT_CAP))
+        await assert_writable(session, managed_specs, actor=actor)
+
         repo = BudgetRepository(session)
 
         # §3-1: T 편집은 D 를 건드리지 않는다 — 키가 안 오면 직전 행(비활성 포함,
         # 예산 해제 후 재설정 경로)의 D 를 그대로 이어 쓴다.
         latest = await repo.get_latest_config(BudgetScope.TEAM, team_id)
-        if "default_user_cap_usd" in data.model_fields_set:
+        if writes_default_cap:
             new_cap = data.default_user_cap_usd
         else:
             new_cap = latest.default_user_cap_usd if latest else None
@@ -529,6 +630,15 @@ class BudgetService:
             is_active=True,
         )
         await repo.upsert_config(config)
+        await record_aicm_write(
+            session, resource_type=RESOURCE_TEAM, resource_id=team_id, facet=FIELD_BUDGET,
+            actor=actor, request_id=request_id,
+        )
+        if writes_default_cap:
+            await record_aicm_write(
+                session, resource_type=RESOURCE_TEAM, resource_id=team_id, facet=FIELD_DEFAULT_CAP,
+                actor=actor, request_id=request_id, cleared=new_cap is None,
+            )
 
         await invalidate_after_commit(
             session, self._cache_mgr, [f"budget:config:team:{{{team_id}}}"]
@@ -586,10 +696,18 @@ class BudgetService:
         if team is None:
             raise NotFoundError("Team", str(team_id))
 
+        await assert_writable(
+            session, [(RESOURCE_TEAM, team_id, FIELD_DEFAULT_CAP)], actor=actor
+        )
+
         repo = BudgetRepository(session)
         cfg = await repo.get_active_config(BudgetScope.TEAM, team_id)
         old_cap = cfg.default_user_cap_usd if cfg else None
         if old_cap == value:
+            await record_aicm_write(
+                session, resource_type=RESOURCE_TEAM, resource_id=team_id, facet=FIELD_DEFAULT_CAP,
+                actor=actor, request_id=request_id, cleared=value is None,
+            )
             # no-op 이어도 팀 캐시를 갱신 — stale/유실된 D 를 즉시 자가치유한다.
             await invalidate_after_commit(
                 session, self._cache_mgr, [f"budget:config:team:{{{team_id}}}"]
@@ -636,6 +754,11 @@ class BudgetService:
             cfg.default_user_cap_usd = value
             await session.flush()
 
+        await record_aicm_write(
+            session, resource_type=RESOURCE_TEAM, resource_id=team_id, facet=FIELD_DEFAULT_CAP,
+            actor=actor, request_id=request_id, cleared=value is None,
+        )
+
         # 캐시는 DEL 만 — commit 전 SET 은 미커밋 D 를 광고하고(§6-6 위반),
         # T=NULL 행의 limit_usd:null 을 미리 쓰면 gateway 가 unset 판정을 하기
         # 전에 위험하다. miss 시 gateway 가 커밋된 DB 행(D 포함)으로 재수화한다.
@@ -678,7 +801,14 @@ class BudgetService:
         _require_admin_actor(actor)
         repo = BudgetRepository(session)
         cfg = await repo.get_active_config(BudgetScope.TEAM, team_id)
+        await assert_writable(
+            session, [(RESOURCE_TEAM, team_id, FIELD_BUDGET)], actor=actor
+        )
         if cfg is None:
+            await record_aicm_write(
+                session, resource_type=RESOURCE_TEAM, resource_id=team_id, facet=FIELD_BUDGET,
+                actor=actor, request_id=request_id, cleared=True,
+            )
             return
 
         if not confirm:
@@ -695,6 +825,10 @@ class BudgetService:
 
         cfg.is_active = False
         await session.flush()
+        await record_aicm_write(
+            session, resource_type=RESOURCE_TEAM, resource_id=team_id, facet=FIELD_BUDGET,
+            actor=actor, request_id=request_id, cleared=True,
+        )
 
         await invalidate_after_commit(
             session, self._cache_mgr, [f"budget:config:team:{{{team_id}}}"]
@@ -757,6 +891,15 @@ class BudgetService:
                 "no team budget is set (equal_split_nothing_to_allocate).",
                 "equal_split_nothing_to_allocate",
             )
+
+        managed_specs = [(RESOURCE_TEAM, team_id, FIELD_DEFAULT_CAP)]
+        if clear_individual:
+            for m in members:
+                managed_specs.append((RESOURCE_USER, m.id, FIELD_BUDGET))
+                managed_specs.extend(
+                    (RESOURCE_USER, m.id, app_budget_facet(c)) for c in _ALLOWED_CLIENTS
+                )
+        await assert_writable(session, managed_specs, actor=actor)
 
         period = current_kst_period()
         warnings: list[dict] = []
@@ -869,6 +1012,7 @@ class BudgetService:
         request_id: str = "",
     ) -> None:
         _check_cent_precision(data.max_budget_usd)
+        _reject_unlimited_outside_team(data.max_budget_usd)
 
         user_repo = UserRepository(session)
         user = await user_repo.get_user(user_id)
@@ -906,6 +1050,10 @@ class BudgetService:
                     "leader_target_forbidden",
                     403,
                 )
+
+        await assert_writable(
+            session, [(RESOURCE_USER, user_id, FIELD_BUDGET)], actor=actor
+        )
 
         # 유저 단위 직렬화 — 총액·앱별 쓰기가 엇갈려 I-2(app_c ≤ A_u)가 깨지는 것을 막는다.
         await _lock_user_budget_key(session, user_id)
@@ -966,6 +1114,10 @@ class BudgetService:
             is_active=True,
         )
         await repo.upsert_config(config)
+        await record_aicm_write(
+            session, resource_type=RESOURCE_USER, resource_id=user_id, facet=FIELD_BUDGET,
+            actor=actor, request_id=request_id,
+        )
 
         # H3: 이 키는 DEL-only 다 — 커밋 후 SET 으로 데우지 않는다.
         # ``budget:config:user:{uid}`` 는 총액 필드와 ``app_clients`` 게이트가
@@ -1031,11 +1183,20 @@ class BudgetService:
                     403,
                 )
 
+        delete_specs = [(RESOURCE_USER, user_id, FIELD_BUDGET)] + [
+            (RESOURCE_USER, user_id, app_budget_facet(c)) for c in _ALLOWED_CLIENTS
+        ]
+        await assert_writable(session, delete_specs, actor=actor)
+
         await _lock_user_budget_key(session, user_id)
 
         repo = BudgetRepository(session)
         existing = await repo.get_active_config(BudgetScope.USER, user_id)
         if existing is None:
+            await record_aicm_write(
+                session, resource_type=RESOURCE_USER, resource_id=user_id, facet=FIELD_BUDGET,
+                actor=actor, request_id=request_id, cleared=True,
+            )
             return
 
         # I-3 cascade 대상 — 확인 다이얼로그에 목록으로 보여준다.
@@ -1069,6 +1230,15 @@ class BudgetService:
         existing.is_active = False
         cascaded = await repo.deactivate_app_configs_for_user(user_id)
         await session.flush()
+        await record_aicm_write(
+            session, resource_type=RESOURCE_USER, resource_id=user_id, facet=FIELD_BUDGET,
+            actor=actor, request_id=request_id, cleared=True,
+        )
+        for client in cascaded:
+            await record_aicm_write(
+                session, resource_type=RESOURCE_USER, resource_id=user_id,
+                facet=app_budget_facet(client), actor=actor, request_id=request_id, cleared=True,
+            )
 
         invalidate_keys = [f"budget:config:user:{{{user_id}}}"]
         invalidate_keys += [f"budget:config:user:{{{user_id}}}:{c}" for c in cascaded]
@@ -1118,6 +1288,7 @@ class BudgetService:
           - I-2: app_c <= A_u (부모 유저 총예산을 넘는 앱 cap 은 모순)
         """
         _check_cent_precision(data.max_budget_usd)
+        _reject_unlimited_outside_team(data.max_budget_usd)
 
         if client not in _ALLOWED_CLIENTS:
             raise ValueError("invalid client")
@@ -1158,6 +1329,10 @@ class BudgetService:
                     "leader_target_forbidden",
                     403,
                 )
+
+        await assert_writable(
+            session, [(RESOURCE_USER, user_id, app_budget_facet(client))], actor=actor
+        )
 
         from app.services.user_allowed_client_service import UserAllowedClientService
 
@@ -1235,6 +1410,10 @@ class BudgetService:
             is_active=True,
         )
         await repo.upsert_config(config)
+        await record_aicm_write(
+            session, resource_type=RESOURCE_USER, resource_id=user_id,
+            facet=app_budget_facet(client), actor=actor, request_id=request_id,
+        )
 
         # P0-③ durability + H3: 두 키 모두 DEL-only — 커밋 후 SET/refresh 로
         # 데우지 않는다. per-app SET 이나 app_clients refresh 가 다른 요청의
@@ -1313,13 +1492,25 @@ class BudgetService:
                     403,
                 )
 
+        await assert_writable(
+            session, [(RESOURCE_USER, user_id, app_budget_facet(client))], actor=actor
+        )
+
         repo = BudgetRepository(session)
         existing = await repo.get_active_app_config(BudgetScope.USER, user_id, client)
         if existing is None:
+            await record_aicm_write(
+                session, resource_type=RESOURCE_USER, resource_id=user_id,
+                facet=app_budget_facet(client), actor=actor, request_id=request_id, cleared=True,
+            )
             return
 
         existing.is_active = False
         await session.flush()
+        await record_aicm_write(
+            session, resource_type=RESOURCE_USER, resource_id=user_id,
+            facet=app_budget_facet(client), actor=actor, request_id=request_id, cleared=True,
+        )
 
         # P0-③ durability + H3: durably DEL both the per-app key and the parent
         # user-config key (app_clients list shrank). DEL-only — 게이트웨이가
@@ -1417,6 +1608,7 @@ class BudgetService:
         member_ids = {m.id for m in team.members}
         for alloc in data.allocations:
             _check_cent_precision(alloc.allocated_usd)
+            _reject_unlimited_outside_team(alloc.allocated_usd)
             uid = alloc.user_id
             if uid not in member_ids:
                 raise BudgetRuleError(
@@ -1447,6 +1639,12 @@ class BudgetService:
                     )
 
         # D-1: ΣA_u ≤ T 합계 검증은 없다 — CAP 모델은 초과 약정을 허용한다.
+
+        await assert_writable(
+            session,
+            [(RESOURCE_USER, alloc.user_id, FIELD_BUDGET) for alloc in data.allocations],
+            actor=actor,
+        )
 
         # 데드락 방지: 유저 키를 정렬된 순서로 잠근다.
         sorted_allocs = sorted(data.allocations, key=lambda a: a.user_id)
@@ -2344,6 +2542,153 @@ class BudgetService:
             resource_type="DowngradePolicy",
             resource_id=str(scope_id),
             changes={"after": {"disabled": True}},
+            ip_address=ip_address,
+            request_id=request_id,
+        )
+
+
+    # ── AICM app-group advisory budgets ─────────────────────────────────────
+
+    async def has_user_total_budget(self, session, *, user_id: uuid.UUID) -> bool:
+        cfg = await BudgetRepository(session).get_active_config(BudgetScope.USER, user_id)
+        return cfg is not None and cfg.max_budget_usd is not None
+
+    @staticmethod
+    def _validate_app_group(group: str) -> str:
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}", group or ""):
+            raise ValidationError("invalid app group name")
+        return group
+
+    async def set_user_app_group_budget(
+        self,
+        session: AsyncSession,
+        *,
+        user_id: uuid.UUID,
+        group: str,
+        data: SetBudgetRequest,
+        actor: CurrentUser,
+        ip_address: str = "0.0.0.0",
+        request_id: str = "",
+    ) -> None:
+        """advisory app-group cap upsert — gateway enforcement·spend reservation 미적용."""
+        group = self._validate_app_group(group)
+        _check_cent_precision(data.max_budget_usd)
+        _reject_unlimited_outside_team(data.max_budget_usd)
+        user = await UserRepository(session).get_user(user_id)
+        if user is None:
+            raise NotFoundError("User", str(user_id))
+        await assert_writable(
+            session, [(RESOURCE_USER, user_id, app_group_budget_facet(group))], actor=actor
+        )
+        await _lock_user_budget_key(session, user_id)
+        row = await session.get(UserAppGroupBudget, (user_id, group))
+        before = None if row is None else {
+            "max_budget_usd": str(row.max_budget_usd),
+            "policy": row.policy.value,
+            "alert_thresholds": list(row.alert_thresholds or []),
+        }
+        policy, alert_thresholds = await self._resolve_policy_thresholds(data, latest=None)
+        if row is None:
+            row = UserAppGroupBudget(
+                user_id=user_id,
+                app_group=group,
+                max_budget_usd=data.max_budget_usd,
+                policy=policy,
+                alert_thresholds=sorted(set(alert_thresholds)),
+                allocated_by=actor.user_id,
+            )
+            session.add(row)
+        else:
+            row.max_budget_usd = data.max_budget_usd
+            row.policy = policy
+            row.alert_thresholds = sorted(set(alert_thresholds))
+            row.allocated_by = actor.user_id
+        await session.flush()
+        await record_aicm_write(
+            session, resource_type=RESOURCE_USER, resource_id=user_id,
+            facet=app_group_budget_facet(group), actor=actor, request_id=request_id,
+        )
+        await audit_logger.log(
+            session,
+            actor_user_id=actor.user_id,
+            actor_role=actor.role.value,
+            service_token_id=getattr(actor, "service_token_id", None),
+            action="SET_USER_APP_GROUP_BUDGET",
+            resource_type="UserAppGroupBudget",
+            resource_id=f"{user_id}:{group}",
+            changes={"before": before, "after": {
+                "user_id": str(user_id), "group": group,
+                "max_budget_usd": str(data.max_budget_usd),
+                "policy": policy.value,
+                "alert_thresholds": sorted(set(alert_thresholds)),
+                "advisory_only": True,
+            }},
+            ip_address=ip_address,
+            request_id=request_id,
+        )
+
+    async def list_user_app_group_budgets(
+        self, session: AsyncSession, *, user_id: uuid.UUID, actor: CurrentUser
+    ) -> list[UserAppGroupBudget]:
+        user = await UserRepository(session).get_user(user_id)
+        if user is None:
+            raise NotFoundError("User", str(user_id))
+        if actor.role == UserRole.TEAM_LEADER and (
+            actor.team_id is None or user.team_id != actor.team_id
+        ):
+            raise ForbiddenError("Team leaders can only read budgets for their own team members")
+        rows = await session.execute(
+            sa_select(UserAppGroupBudget)
+            .where(UserAppGroupBudget.user_id == user_id)
+            .order_by(UserAppGroupBudget.app_group)
+        )
+        return list(rows.scalars().all())
+
+    async def clear_user_app_group_budget(
+        self,
+        session: AsyncSession,
+        *,
+        user_id: uuid.UUID,
+        group: str,
+        actor: CurrentUser,
+        ip_address: str = "0.0.0.0",
+        request_id: str = "",
+    ) -> None:
+        group = self._validate_app_group(group)
+        user = await UserRepository(session).get_user(user_id)
+        if user is None:
+            raise NotFoundError("User", str(user_id))
+        await assert_writable(
+            session, [(RESOURCE_USER, user_id, app_group_budget_facet(group))], actor=actor
+        )
+        await _lock_user_budget_key(session, user_id)
+        row = await session.get(UserAppGroupBudget, (user_id, group))
+        if row is None:
+            await record_aicm_write(
+                session, resource_type=RESOURCE_USER, resource_id=user_id,
+                facet=app_group_budget_facet(group), actor=actor, request_id=request_id, cleared=True,
+            )
+            return
+        before = {
+            "max_budget_usd": str(row.max_budget_usd),
+            "policy": row.policy.value,
+            "alert_thresholds": list(row.alert_thresholds or []),
+        }
+        await session.delete(row)
+        await session.flush()
+        await record_aicm_write(
+            session, resource_type=RESOURCE_USER, resource_id=user_id,
+            facet=app_group_budget_facet(group), actor=actor, request_id=request_id, cleared=True,
+        )
+        await audit_logger.log(
+            session,
+            actor_user_id=actor.user_id,
+            actor_role=actor.role.value,
+            service_token_id=getattr(actor, "service_token_id", None),
+            action="CLEAR_USER_APP_GROUP_BUDGET",
+            resource_type="UserAppGroupBudget",
+            resource_id=f"{user_id}:{group}",
+            changes={"before": before, "after": None},
             ip_address=ip_address,
             request_id=request_id,
         )

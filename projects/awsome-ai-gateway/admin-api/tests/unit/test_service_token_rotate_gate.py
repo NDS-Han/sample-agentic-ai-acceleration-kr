@@ -95,7 +95,9 @@ def harness(monkeypatch):
 
     @asynccontextmanager
     async def _sl():
-        yield MagicMock()
+        auth_session = MagicMock()
+        auth_session.get = AsyncMock(return_value=None)  # integration grant 없음 = generic svc-
+        yield auth_session
 
     monkeypatch.setattr("app.core.auth.AsyncSessionLocal", _sl)
     verify = AsyncMock(return_value=tok)

@@ -184,6 +184,19 @@ class RateLimitConfigRepository:
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
 
+    async def list_active_rpm_aliases(
+        self, scope: RateLimitScope, scope_id: uuid.UUID | None
+    ) -> list[tuple[str | None, int | None]]:
+        """(model_alias, rpm_limit) — 한 scope 의 활성 한도 행 전부(컬럼만). 실시간 RPM 카드가
+        gateway 카운터 키를 SCAN 없이 계산하는 입력(NULL alias = 전체 모델 합산 `*` 키)."""
+        stmt = select(RateLimitConfig.model_alias, RateLimitConfig.rpm_limit).where(
+            RateLimitConfig.scope == scope,
+            RateLimitConfig.scope_id.is_(None) if scope_id is None
+            else RateLimitConfig.scope_id == scope_id,
+            RateLimitConfig.is_active.is_(True),
+        )
+        return [(r.model_alias, r.rpm_limit) for r in (await self._session.execute(stmt)).all()]
+
     async def list_active_by_scope(self, scope: RateLimitScope) -> list[RateLimitConfig]:
         stmt = select(RateLimitConfig).where(
             RateLimitConfig.scope == scope,

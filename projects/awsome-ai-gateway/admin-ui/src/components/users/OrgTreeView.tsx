@@ -10,7 +10,8 @@ import { OrgTree } from './OrgTree';
 import { OrgDetailPanel } from './OrgDetailPanel';
 import { OrgSearchBox } from './OrgSearchBox';
 import { useToast } from '@/components/common/ToastProvider';
-import { getOrgTreeAction } from '@/lib/actions/users';
+import { getOrgTreeAction, getOrgTreeMarksAction } from '@/lib/actions/users';
+import { applyTeamMarks, hydrateOrgTree } from '@/lib/utils/orgTreeHydrate';
 import {
   findNodeById,
   findNodeExpandPath,
@@ -64,7 +65,11 @@ export function OrgTreeView({ root }: OrgTreeViewProps) {
   // "빈 팀 데이터 있음" 을 오판하면 일관 상태 롤백이 빠진다.
   const overrideHasEmptyRef = useRef(overrideHasEmpty);
   overrideHasEmptyRef.current = overrideHasEmpty;
-  const effectiveRoot = treeOverride ?? root;
+  // 서버는 축약형(slim)을 준다 — 화면 코드가 가정하는 모양(모든 meta, USER children=[],
+  // USER 팀 이름)으로 채운다. 이미 채운 트리(패치 결과)를 다시 넣어도 같다(멱등).
+  const effectiveRoot = useMemo(() => hydrateOrgTree(treeOverride ?? root), [treeOverride, root]);
+  const effectiveRootRef = useRef(effectiveRoot);
+  effectiveRootRef.current = effectiveRoot;
   // router.refresh() 가 새 root 를 가져와도 override 가 그 위에 있으면 화면은
   // 영원히 구 트리다 — root 가 바뀌면 override 를 폐기한다. 토글 ON 이면
   // include_empty 트리를 다시 가져와 같은 모드를 유지한다.
@@ -365,7 +370,38 @@ export function OrgTreeView({ root }: OrgTreeViewProps) {
     setExpandedNodes((prev) => (prev.has(id) ? prev : new Set([...prev, id])));
   };
 
-  /** 저장 후 트리 메타(개별설정 점·팀장)를 다시 읽는다. 토글 상태는 ref 의 최신값. */
+  /**
+   * 저장 후 트리 메타(개별설정 점·팀장·역할) 갱신. 팀을 알면 그 팀의 marks(수 KB)만 받아 노드를
+   * 고친다 — 예전엔 저장마다 트리 전체(6k 사용자 ≈ MB)를 다시 받았다. 팀이 트리에 없거나 멤버
+   * 집합이 달라졌으면(동기화) 전체 재조회로 폴백한다. 패치는 세대를 올리지 않는다 — 진행 중인
+   * 토글 재조회를 무효화할 이유가 없고, 늦게 온 재조회는 패치를 포함한 최신 데이터다.
+   */
+  const refreshAfterSave = (teamId: string | null) => {
+    if (!teamId) {
+      reloadTree();
+      return;
+    }
+    void (async () => {
+      try {
+        const r = await getOrgTreeMarksAction(teamId);
+        if (!r.success) {
+          reloadTree();
+          return;
+        }
+        const patched = applyTeamMarks(effectiveRootRef.current, r.data);
+        if (patched) {
+          // override 가 없었으면(기본 트리) 패치 결과도 기본 트리다 — overrideHasEmpty 는 그대로.
+          setTreeOverride(patched);
+        } else {
+          reloadTree();
+        }
+      } catch {
+        reloadTree();
+      }
+    })();
+  };
+
+  /** 트리 전체 재조회(패치 불가 시 폴백). 토글 상태는 ref 의 최신값. */
   const reloadTree = () => {
     const gen = ++treeGenRef.current;
     const withEmpty = showEmptyRef.current;
@@ -450,7 +486,7 @@ export function OrgTreeView({ root }: OrgTreeViewProps) {
           node={selectedNode}
           root={effectiveRoot}
           onOpenUser={openUserById}
-          onSaved={reloadTree}
+          onSaved={refreshAfterSave}
         />
       </div>
     </div>

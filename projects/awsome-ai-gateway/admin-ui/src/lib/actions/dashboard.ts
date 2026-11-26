@@ -11,7 +11,7 @@ import type { ChargedBreakdown, WebSearchUsage } from '@/types/entities';
 export interface DashboardSummary {
   period: string;
   total_requests: number;
-  /** ERROR+TIMEOUT 요청 수 — 전체 요청 = total_requests + error_requests */
+  /** ERROR+TIMEOUT 요청 수 — 전체 요청 = total_requests + cancelled_requests + error_requests */
   error_requests: number;
   total_tokens: number;
   total_cost_usd: number;
@@ -108,7 +108,7 @@ export async function fetchAvailablePeriods(): Promise<AvailablePeriods> {
 export interface DashboardKPI {
   period: string;
   total_requests: number;
-  /** ERROR+TIMEOUT 요청 수 — 전체 요청 = total_requests + error_requests */
+  /** ERROR+TIMEOUT 요청 수 — 전체 요청 = total_requests + cancelled_requests + error_requests */
   error_requests: number;
   total_tokens: number;
   /** 모델 토큰 비용 — 청구 대상 전 상태(성공·실패·취소, wave 3). 웹 검색은 charged 에. */
@@ -163,6 +163,7 @@ export interface DashboardWebSearch {
   /** 기록된 비용 합. null = 이 기간에 비용이 기록된 검색이 없음(Not tracked). */
   cost_usd: number | null;
   untracked_queries: number;
+  /** 하위 호환 필드명 — 값은 성공+취소 요청 수(요청 카드·회/요청 분모와 같은 모집단). */
   successful_requests: number;
   elapsed_days: number;
   /** 검색 수 / 경과일(리포팅 TZ). 미래 달이면 null. */

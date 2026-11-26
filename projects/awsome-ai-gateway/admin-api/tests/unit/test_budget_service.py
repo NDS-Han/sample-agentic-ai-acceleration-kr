@@ -469,9 +469,9 @@ class TestSetUserBudget:
     async def test_cent_precision_rejected(
         self, budget_service: BudgetService, mock_session: AsyncMock, admin_user: CurrentUser
     ):
-        """D-17: 센트 초과 정밀도(3자리+) → 422 invalid_amount_precision."""
+        """AICM 계약상 4자리까지 허용 — 5자리 이상만 invalid_amount_precision."""
         user_id = uuid.uuid4()
-        data = SetBudgetRequest(max_budget_usd=Decimal("10.005"))
+        data = SetBudgetRequest(max_budget_usd=Decimal("10.00001"))
 
         with pytest.raises(BudgetRuleError) as excinfo:
             await budget_service.set_user_budget(

@@ -138,8 +138,15 @@ class User(Base):
     )
 
     team: Mapped[Team | None] = relationship(back_populates="members", foreign_keys=[team_id], lazy="selectin")
+    #: ⚠️ lazy="raise" — 예전 "selectin" 은 ``select(User)`` 마다 그 사용자들의 **모든** VK 행
+    #: (폐기·만료 이력 포함)을 추가 SELECT 로 끌어왔다. 조직 트리(6k 사용자)·팀 멤버 로딩·
+    #: 예산 화면이 매번 VK 테이블 전체를 읽었다. 읽는 코드가 없으므로 접근 자체를 금지해
+    #: 다시 생기지 않게 한다 — 필요하면 쿼리에서 ``selectinload(User.virtual_keys)`` 로 명시.
+    #: passive_deletes: User 삭제 시 VK 를 읽어 FK 를 NULL 로 바꾸려 하지 않는다(FK 는
+    #: NOT NULL 이라 어차피 DB 가 거절 — raise 로더를 건드리지 않게).
     virtual_keys: Mapped[list[VirtualKey]] = relationship(
-        back_populates="user", foreign_keys="VirtualKey.user_id", lazy="selectin"
+        back_populates="user", foreign_keys="VirtualKey.user_id", lazy="raise",
+        passive_deletes=True,
     )
 
 
@@ -179,7 +186,9 @@ class VirtualKey(Base):
     revoked_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("auth.users.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
-    user: Mapped[User] = relationship(back_populates="virtual_keys", foreign_keys=[user_id], lazy="selectin")
+    #: lazy="raise" — VK 목록·폐기·로테이션이 VK 마다 소유자 User(+ 그 User 의 team, 그 team 의
+    #: members …)를 selectin 연쇄로 읽던 경로를 끊는다. 소유자 정보는 쿼리에서 JOIN 한다.
+    user: Mapped[User] = relationship(back_populates="virtual_keys", foreign_keys=[user_id], lazy="raise")
 
 
 # ── RotationPolicy ──

@@ -8,6 +8,12 @@ import structlog
 from app.core.clients import VALID_CLIENTS
 from app.repositories.user_allowed_client_repository import UserAllowedClientRepository
 from app.repositories.user_repository import UserRepository
+from app.services.managed_fields import (
+    FIELD_ALLOWED_CLIENTS,
+    RESOURCE_USER,
+    assert_writable,
+    record_aicm_write,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -24,7 +30,15 @@ class UserAllowedClientService:
     async def get(self, user_id: uuid.UUID) -> list[str]:
         return await UserAllowedClientRepository(self._session).list_by_user(user_id)
 
-    async def set(self, user_id: uuid.UUID, clients: list[str], admin_id: uuid.UUID) -> list[str]:
+    async def set(
+        self,
+        user_id: uuid.UUID,
+        clients: list[str],
+        admin_id: uuid.UUID,
+        *,
+        actor=None,
+        request_id: str = "",
+    ) -> list[str]:
         invalid = [c for c in clients if c not in _VALID_CLIENTS]
         if invalid:
             raise ValueError(f"invalid clients: {invalid}; allowed={sorted(_VALID_CLIENTS)}")
@@ -34,7 +48,16 @@ class UserAllowedClientService:
         user = await UserRepository(self._session).get_user(user_id)
         if user is None:
             raise LookupError(f"user not found: {user_id}")
+        if actor is not None:
+            await assert_writable(
+                self._session, [(RESOURCE_USER, user_id, FIELD_ALLOWED_CLIENTS)], actor=actor
+            )
         await repo.replace_for_user(user_id, clients, admin_id)
+        if actor is not None:
+            await record_aicm_write(
+                self._session, resource_type=RESOURCE_USER, resource_id=user_id,
+                facet=FIELD_ALLOWED_CLIENTS, actor=actor, request_id=request_id,
+            )
         # ⚠️ 여기서 캐시를 지우지 **않는다.** 이 메서드는 커밋 전에 끝나고, 커밋은
         #    라우터가 한다. DEL→commit 창에 들어온 게이트웨이 요청이 **변경 전** 정책을
         #    다시 캐시하면 그 스냅샷이 VK 캐시 TTL(~300s) 동안 살아 있다 — 화면은 200 을
@@ -48,8 +71,24 @@ class UserAllowedClientService:
         )
         return clients
 
-    async def clear(self, user_id: uuid.UUID, admin_id: uuid.UUID) -> None:
+    async def clear(
+        self,
+        user_id: uuid.UUID,
+        admin_id: uuid.UUID,
+        *,
+        actor=None,
+        request_id: str = "",
+    ) -> None:
+        if actor is not None:
+            await assert_writable(
+                self._session, [(RESOURCE_USER, user_id, FIELD_ALLOWED_CLIENTS)], actor=actor
+            )
         await UserAllowedClientRepository(self._session).clear_for_user(user_id)
+        if actor is not None:
+            await record_aicm_write(
+                self._session, resource_type=RESOURCE_USER, resource_id=user_id,
+                facet=FIELD_ALLOWED_CLIENTS, actor=actor, request_id=request_id, cleared=True,
+            )
         # 커밋 후 무효화 — 위 `set` 의 주석과 같은 이유.
         logger.info(
             "admin.clear_user_allowed_clients",

@@ -18,6 +18,12 @@ from app.models.model import ModelStatus
 from app.repositories.model_repository import ModelRepository
 from app.repositories.user_allowed_model_repository import UserAllowedModelRepository
 from app.repositories.user_repository import UserRepository
+from app.services.managed_fields import (
+    FIELD_ALLOWED_MODELS,
+    RESOURCE_USER,
+    assert_writable,
+    record_aicm_write,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -66,8 +72,15 @@ class UserAllowedModelService:
             if m.status != ModelStatus.ACTIVE:
                 raise ValueError(f"model alias is not ACTIVE: {alias}")
 
+        await assert_writable(
+            self._session, [(RESOURCE_USER, user_id, FIELD_ALLOWED_MODELS)], actor=actor
+        )
         before = await repo.list_by_user(user_id)
         await repo.replace_for_user(user_id, aliases, actor.user_id)
+        await record_aicm_write(
+            self._session, resource_type=RESOURCE_USER, resource_id=user_id,
+            facet=FIELD_ALLOWED_MODELS, actor=actor, request_id=request_id,
+        )
 
         # Durable audit (Codex MF2) — national-core-tech control needs a permanent
         # record, like SET_TEAM_ALLOWED_MODELS. logger.info alone is not durable.
@@ -93,8 +106,15 @@ class UserAllowedModelService:
         request_id: str = "",
     ) -> None:
         repo = UserAllowedModelRepository(self._session)
+        await assert_writable(
+            self._session, [(RESOURCE_USER, user_id, FIELD_ALLOWED_MODELS)], actor=actor
+        )
         before = await repo.list_by_user(user_id)
         await repo.clear_for_user(user_id)
+        await record_aicm_write(
+            self._session, resource_type=RESOURCE_USER, resource_id=user_id,
+            facet=FIELD_ALLOWED_MODELS, actor=actor, request_id=request_id, cleared=True,
+        )
         await audit_logger.log(
             self._session,
             actor_user_id=actor.user_id,

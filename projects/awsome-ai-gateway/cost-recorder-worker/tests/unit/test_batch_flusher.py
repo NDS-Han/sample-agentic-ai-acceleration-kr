@@ -28,13 +28,11 @@ def _no_late_day_marking(monkeypatch):
 
 
 def _insert_returning_exec(stmt, params=None):
-    """session.execute side_effect — INSERT ... RETURNING 에 실제 삽입된
-    request_id 를 돌려준다. 그 외(replay SELECT/UPSERT)는 기본 MagicMock."""
+    """session.execute side_effect — bulk INSERT ... RETURNING 에 실제 삽입된
+    request_id 행들을 돌려준다. 그 외(replay SELECT/UPSERT)는 기본 MagicMock."""
     result = MagicMock()
-    if "RETURNING" in str(stmt):
-        result.scalar_one_or_none.return_value = (
-            params["request_id"] if isinstance(params, dict) else None
-        )
+    if "INSERT INTO usage.usage_logs" in str(stmt) and isinstance(params, dict):
+        result.all.return_value = [(rid,) for rid in params["request_ids"]]
     return result
 
 
@@ -93,16 +91,7 @@ async def test_flush_inserts_usage_and_upserts_budgets():
     session.__aenter__ = AsyncMock(return_value=session)
     session.__aexit__ = AsyncMock(return_value=None)
 
-    async def _exec(stmt, params=None):
-        result = MagicMock()
-        if "RETURNING" in str(stmt):
-            # 행 단위 INSERT ... RETURNING — 실제 삽입된 것처럼 request_id 반환
-            result.scalar_one_or_none.return_value = (
-                params["request_id"] if isinstance(params, dict) else None
-            )
-        return result
-
-    session.execute = AsyncMock(side_effect=_exec)
+    session.execute = AsyncMock(side_effect=_insert_returning_exec)
     session.commit = AsyncMock()
 
     session_factory = MagicMock(return_value=session)
@@ -120,15 +109,15 @@ async def test_flush_inserts_usage_and_upserts_budgets():
     flusher = BatchFlusher(session_factory=session_factory, redis=redis)
     await flusher.flush(entries)
 
-    # 6 session.execute 호출: 재처리 필터 SELECT + INSERT × 3(행 단위, RETURNING)
+    # 4개의 DB 문장: 재처리 필터 SELECT + bulk INSERT 1회(RETURNING)
     # + UPSERT user budget + UPSERT team budget
     #
     # ⚠️ 첫 호출이 재처리 필터여야 한다. budget_usages 는 **가산** UPSERT 라, 재처리된
     #    entry 를 걸러내지 않으면 사용자의 기록 사용액이 영구히 두 배가 된다
     #    (batch_flusher._filter_replays 주석 참조). 개수만 세면 그 SELECT 가 뒤로 밀려
     #    무의미해진 것을 잡지 못하므로 순서를 함께 못 박는다.
-    # wave 3b: 앞뒤로 시작 원장 잠금(SELECT … FOR UPDATE)과 삭제가 붙는다 → 8.
-    assert session.execute.await_count == 8
+    # wave 3b: 앞뒤로 시작 원장 잠금(SELECT … FOR UPDATE)과 삭제가 붙는다 → 6.
+    assert session.execute.await_count == 6
     assert session.commit.await_count == 1
     sqls = [str(c.args[0]).lower() for c in session.execute.await_args_list]
     assert "from usage.request_starts" in sqls[0] and "for update" in sqls[0], sqls[0][:120]
@@ -139,13 +128,13 @@ async def test_flush_inserts_usage_and_upserts_budgets():
     assert "delete from usage.request_starts" in sqls[-1]
 
     # 마지막 두 호출 = user UPSERT, team UPSERT — 합산된 cost (0.30)
-    user_call = session.execute.await_args_list[5]
+    user_call = session.execute.await_args_list[3]
     user_params = user_call.args[1]
     assert len(user_params) == 1  # 단일 (user, period) 그룹
     assert user_params[0]["scope"] == "USER"
     assert user_params[0]["cost"] == "0.30"
 
-    team_call = session.execute.await_args_list[6]
+    team_call = session.execute.await_args_list[4]
     team_params = team_call.args[1]
     assert team_params[0]["scope"] == "TEAM"
     assert team_params[0]["cost"] == "0.30"
@@ -225,10 +214,8 @@ def _mock_session_with_cumulative(
     async def _exec(stmt, params=None):
         sql = str(stmt)
         result = MagicMock()
-        if "RETURNING" in sql:
-            result.scalar_one_or_none.return_value = (
-                params["request_id"] if isinstance(params, dict) else None
-            )
+        if "INSERT INTO usage.usage_logs" in sql and isinstance(params, dict):
+            result.all.return_value = [(rid,) for rid in params["request_ids"]]
         elif "used_usd" in sql:
             result.scalar_one_or_none.return_value = cumulative
         return result
@@ -327,11 +314,9 @@ def _mock_session_with_replays(existing_ids: set[str]) -> MagicMock:
     async def _exec(stmt, params=None):
         sql = str(stmt)
         result = MagicMock()
-        if "RETURNING" in sql:
-            result.scalar_one_or_none.return_value = (
-                params["request_id"] if isinstance(params, dict) else None
-            )
-        elif "request_id" in sql:
+        if "INSERT INTO usage.usage_logs" in sql and isinstance(params, dict):
+            result.all.return_value = [(rid,) for rid in params["request_ids"]]
+        elif "SELECT request_id FROM usage.usage_logs" in sql:
             result.__iter__ = MagicMock(
                 return_value=iter([(rid,) for rid in existing_ids])
             )
@@ -431,6 +416,52 @@ async def test_all_replays_skips_counters_and_publish():
     redis.publish.assert_not_called()
 
 
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_usage_insert_is_bulk_and_budgets_use_only_returned_rows():
+    """배치 INSERT 는 1회고, budget 가산은 RETURNING 된 행만 포함한다."""
+    insert_params: list = []
+
+    async def _exec(stmt, params=None):
+        sql = str(stmt)
+        result = MagicMock()
+        if "INSERT INTO usage.usage_logs" in sql:
+            insert_params.append(params)
+            if isinstance(params, dict) and "request_id" in params:
+                result.scalar_one_or_none.return_value = params["request_id"]
+            result.all.return_value = [("req-a",), ("req-c",)]
+        return result
+
+    session = AsyncMock()
+    session.__aenter__ = AsyncMock(return_value=session)
+    session.__aexit__ = AsyncMock(return_value=None)
+    session.commit = AsyncMock()
+    session.execute = AsyncMock(side_effect=_exec)
+    session_factory = MagicMock(return_value=session)
+
+    pipe = MagicMock()
+    pipe.execute = AsyncMock()
+    redis = MagicMock()
+    redis.pipeline = MagicMock(return_value=pipe)
+    redis.publish = AsyncMock()
+
+    entries = [
+        _make_entry(request_id="req-a", cost="0.10"),
+        _make_entry(request_id="req-b", cost="0.20"),
+        _make_entry(request_id="req-c", cost="0.30"),
+    ]
+    flusher = BatchFlusher(session_factory=session_factory, redis=redis)
+    await flusher.flush(entries)
+
+    assert len(insert_params) == 1
+    assert insert_params[0]["request_ids"] == ["req-a", "req-b", "req-c"]
+    user_upserts = [
+        c.args[1] for c in session.execute.await_args_list
+        if isinstance(c.args[1], list) and c.args[1] and c.args[1][0].get("scope") == "USER"
+    ]
+    assert user_upserts and user_upserts[0][0]["cost"] == "0.40"
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # E2E S5 — usage_logs.status 전파 (워커 SUCCESS 하드코딩 회귀)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -439,12 +470,14 @@ def _insert_param_capturing_exec(captured: list):
 
     async def _exec(stmt, params=None):
         result = MagicMock()
-        if "RETURNING" in str(stmt):
-            if isinstance(params, dict):
-                captured.append(dict(params))
-            result.scalar_one_or_none.return_value = (
-                params["request_id"] if isinstance(params, dict) else None
-            )
+        if "INSERT INTO usage.usage_logs" in str(stmt) and isinstance(params, dict):
+            for i, rid in enumerate(params["request_ids"]):
+                captured.append({
+                    "request_id": rid,
+                    "status": params["statuses"][i],
+                    "session_id": params["session_ids"][i],
+                })
+            result.all.return_value = [(rid,) for rid in params["request_ids"]]
         return result
 
     return _exec
@@ -584,12 +617,10 @@ async def test_poison_data_error_row_skipped_others_recorded():
 
     async def _exec(stmt, params=None):
         result = MagicMock()
-        if "RETURNING" in str(stmt):
-            if isinstance(params, dict) and params["request_id"] == "req-bad-uuid":
+        if "INSERT INTO usage.usage_logs" in str(stmt) and isinstance(params, dict):
+            if "req-bad-uuid" in params["request_ids"]:
                 raise DataError("INSERT", params, Exception("invalid input for uuid"))
-            result.scalar_one_or_none.return_value = (
-                params["request_id"] if isinstance(params, dict) else None
-            )
+            result.all.return_value = [(rid,) for rid in params["request_ids"]]
         return result
 
     session_factory = _session_factory_for(_exec)
@@ -666,11 +697,11 @@ async def test_flush_dead_letter_swallows_permanent_errors_per_row():
     async def _exec(stmt, params=None):
         result = MagicMock()
         sql = str(stmt)
-        if "RETURNING" in sql:
+        if "INSERT INTO usage.usage_logs" in sql:
             calls["n"] += 1
             if calls["n"] == 1:
                 raise DataError("INSERT", {}, Exception("bad uuid"))
-            result.scalar_one_or_none.return_value = params["request_id"]
+            result.all.return_value = [(rid,) for rid in params["request_ids"]]
         return result
 
     session.execute = AsyncMock(side_effect=_exec)
@@ -698,12 +729,10 @@ async def test_class22_dbapi_error_is_permanent_via_sqlstate():
 
     async def _exec(stmt, params=None):
         result = MagicMock()
-        if "RETURNING" in str(stmt):
-            if isinstance(params, dict) and params["request_id"] == "req-bad":
+        if "INSERT INTO usage.usage_logs" in str(stmt) and isinstance(params, dict):
+            if "req-bad" in params["request_ids"]:
                 raise DBAPIError("INSERT", params, _Orig("invalid input syntax"))
-            result.scalar_one_or_none.return_value = (
-                params["request_id"] if isinstance(params, dict) else None
-            )
+            result.all.return_value = [(rid,) for rid in params["request_ids"]]
         return result
 
     session_factory = _session_factory_for(_exec)
@@ -868,11 +897,15 @@ async def test_flush_carries_session_id_to_insert_params():
     insert_params = [
         c.args[1]
         for c in session.execute.await_args_list
-        if isinstance(c.args[1], dict) and "request_id" in c.args[1]
+        if isinstance(c.args[1], dict) and "request_ids" in c.args[1]
     ]
-    by_rid = {p["request_id"]: p for p in insert_params}
-    assert by_rid["req-s"]["session_id"] == "sess-1"
-    assert by_rid["req-n"]["session_id"] is None
+    assert len(insert_params) == 1
+    params = insert_params[0]
+    by_rid = {
+        rid: params["session_ids"][i] for i, rid in enumerate(params["request_ids"])
+    }
+    assert by_rid["req-s"] == "sess-1"
+    assert by_rid["req-n"] is None
 
 
 @pytest.mark.asyncio

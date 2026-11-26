@@ -302,6 +302,41 @@ async def test_distinct_requests_still_accumulate(dsn):
         await engine.dispose()
 
 
+@_pg_required
+async def test_poison_row_in_bulk_batch_is_dead_lettered_and_good_rows_survive(dsn):
+    """bulk INSERT 가 행 하나의 결정적 오류로 원자적으로 실패해도, per-row 폴백이
+    좋은 행은 같은 예산 계약으로 기록하고 poison 만 dead-letter 에 남긴다."""
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    engine = create_async_engine(dsn)
+    try:
+        flusher = await _flusher(engine)
+        suffix = uuid.uuid4().hex[:8]
+        good = _entry(f"good-{suffix}", "2.00")
+        bad = _entry(f"bad-{suffix}", "9.00")
+        bad.user_id = "not-a-uuid"
+        before = await _used_usd(engine, "USER", USER_ID)
+
+        await flusher.flush([good, bad])
+
+        after = await _used_usd(engine, "USER", USER_ID)
+        assert after - before == Decimal("2.00")
+        async with engine.connect() as c:
+            rows = (await c.execute(text(
+                "SELECT request_id FROM usage.usage_logs WHERE request_id = ANY(:ids)"
+            ), {"ids": [good.request_id, bad.request_id]})).all()
+            dead = (await c.execute(text(
+                "SELECT request_id, reason, payload FROM usage.cost_dead_letters "
+                "WHERE request_id = :rid"
+            ), {"rid": bad.request_id})).one()
+        assert [r[0] for r in rows] == [good.request_id]
+        assert dead[0] == bad.request_id and dead[1] == "permanent_row_error"
+        assert bad.request_id in dead[2]
+    finally:
+        await engine.dispose()
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 2. 실 Redis — 다른 consumer 이름의 PEL 을 회수하는가
 # ─────────────────────────────────────────────────────────────────────────────

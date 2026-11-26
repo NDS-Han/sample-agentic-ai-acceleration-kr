@@ -88,3 +88,35 @@ class ConfirmationRequiredError(AppError):
 class STSVerificationError(AppError):
     def __init__(self, message: str = "STS identity verification failed"):
         super().__init__(message=message, code="sts_verification_error")
+
+
+class IntegrationError(AppError):
+    """외부 통합(/aicm/v1) 경로의 오류 — 임의 HTTP 상태 + 기계 판독용 code + 선택 Retry-After.
+
+    Cognito 상류 오류(502/503/504)·스코프 부족(403)·멱등 키 충돌(409/422)처럼 기존 타입으로
+    상태와 code 를 함께 실을 수 없는 경우에 쓴다. ``AICM_API_ENABLED=false`` 면 아무도
+    던지지 않는다.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str,
+        status_code: int,
+        retry_after: int | None = None,
+        details: dict | None = None,
+    ):
+        super().__init__(message=message, code=code)
+        self.status_code = status_code
+        self.retry_after = retry_after
+        self.details = details
+
+
+class ManagedFieldLockedError(AppError):
+    """AICM 이 관리하는 필드를 사람이 바꾸려 함 — **409** ``aicm_managed``."""
+
+    def __init__(self, message: str, *, details: dict):
+        super().__init__(message=message, code="aicm_managed")
+        self.status_code = 409
+        self.details = details

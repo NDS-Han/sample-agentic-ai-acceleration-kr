@@ -34,7 +34,7 @@ from worker.web_search_pricing import DEFAULT_PRICE_PER_1K, WebSearchPricing, we
 logger = structlog.get_logger(__name__)
 
 
-_INSERT_USAGE_LOGS = text(
+_INSERT_USAGE_LOGS_BULK = text(
     """
     INSERT INTO usage.usage_logs (
         id, request_id, user_id, team_id, dept_id, model_alias, provider,
@@ -44,34 +44,78 @@ _INSERT_USAGE_LOGS = text(
         is_streaming, estimated_usage, downgraded_from, availability_fallback_from,
         sso_subject, bedrock_request_id, client, context_tier, key_prefix,
         session_id, pricing_missing
-    ) VALUES (
+    )
+    SELECT
         gen_random_uuid(),
-        :request_id,
-        CAST(:user_id AS uuid),
-        CAST(:team_id AS uuid),
-        CAST(:dept_id AS uuid),
-        :model_alias,
-        :provider,
-        :input_tokens,
-        :output_tokens,
-        :cache_creation_tokens,
-        :cache_read_tokens,
-        :reasoning_tokens,
-        :web_search_count,
-        :web_search_cost_usd,
-        :cost_usd,
-        :latency_ms,
-        :ttft_ms,
-        CAST(:status AS usage.usage_status),
-        CAST(:requested_at AS timestamptz),
-        CAST(:completed_at AS timestamptz),
-        :is_streaming,
-        :estimated_usage,
-        :downgraded_from,
-        :availability_fallback_from,
-        :sso_subject,
-        :bedrock_request_id,
-        :client, :context_tier, :key_prefix, :session_id, :pricing_missing
+        t.request_id,
+        CAST(t.user_id AS uuid),
+        CAST(t.team_id AS uuid),
+        CAST(t.dept_id AS uuid),
+        t.model_alias,
+        t.provider,
+        t.input_tokens,
+        t.output_tokens,
+        t.cache_creation_tokens,
+        t.cache_read_tokens,
+        t.reasoning_tokens,
+        t.web_search_count,
+        t.web_search_cost_usd,
+        t.cost_usd,
+        t.latency_ms,
+        t.ttft_ms,
+        CAST(t.status AS usage.usage_status),
+        t.requested_at,
+        t.completed_at,
+        t.is_streaming,
+        t.estimated_usage,
+        t.downgraded_from,
+        t.availability_fallback_from,
+        t.sso_subject,
+        t.bedrock_request_id,
+        t.client,
+        t.context_tier,
+        t.key_prefix,
+        t.session_id,
+        t.pricing_missing
+    FROM unnest(
+        CAST(:request_ids AS varchar[]),
+        CAST(:user_ids AS varchar[]),
+        CAST(:team_ids AS varchar[]),
+        CAST(:dept_ids AS varchar[]),
+        CAST(:model_aliases AS varchar[]),
+        CAST(:providers AS varchar[]),
+        CAST(:input_tokens_array AS integer[]),
+        CAST(:output_tokens_array AS integer[]),
+        CAST(:cache_creation_tokens_array AS integer[]),
+        CAST(:cache_read_tokens_array AS integer[]),
+        CAST(:reasoning_tokens_array AS integer[]),
+        CAST(:web_search_count_array AS integer[]),
+        CAST(:web_search_costs AS numeric[]),
+        CAST(:costs AS numeric[]),
+        CAST(:latency_ms_array AS integer[]),
+        CAST(:ttft_ms_array AS integer[]),
+        CAST(:statuses AS varchar[]),
+        CAST(:requested_ats AS timestamptz[]),
+        CAST(:completed_ats AS timestamptz[]),
+        CAST(:is_streamings AS boolean[]),
+        CAST(:estimated_usages AS boolean[]),
+        CAST(:downgraded_froms AS varchar[]),
+        CAST(:availability_fallback_froms AS varchar[]),
+        CAST(:sso_subjects AS varchar[]),
+        CAST(:bedrock_request_ids AS varchar[]),
+        CAST(:clients AS varchar[]),
+        CAST(:context_tiers AS varchar[]),
+        CAST(:key_prefixes AS varchar[]),
+        CAST(:session_ids AS varchar[]),
+        CAST(:pricing_missings AS boolean[])
+    ) AS t(
+        request_id, user_id, team_id, dept_id, model_alias, provider,
+        input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+        reasoning_tokens, web_search_count, web_search_cost_usd, cost_usd,
+        latency_ms, ttft_ms, status, requested_at, completed_at,
+        is_streaming, estimated_usage, downgraded_from, availability_fallback_from,
+        sso_subject, bedrock_request_id, client, context_tier, key_prefix,
+        session_id, pricing_missing
     )
     ON CONFLICT (request_id) DO NOTHING
     -- ⚠️ RETURNING 이 없으면 "ON CONFLICT 로 건너뛴" 행과 "실제 삽입된" 행을
@@ -81,6 +125,39 @@ _INSERT_USAGE_LOGS = text(
     --    이중청구가 된다. RETURNING 기준으로 가산하면 이 창이 완전히 닫힌다.
     RETURNING request_id
     """
+)
+
+_USAGE_LOG_ARRAY_FIELDS = (
+    ("request_ids", "request_id"),
+    ("user_ids", "user_id"),
+    ("team_ids", "team_id"),
+    ("dept_ids", "dept_id"),
+    ("model_aliases", "model_alias"),
+    ("providers", "provider"),
+    ("input_tokens_array", "input_tokens"),
+    ("output_tokens_array", "output_tokens"),
+    ("cache_creation_tokens_array", "cache_creation_tokens"),
+    ("cache_read_tokens_array", "cache_read_tokens"),
+    ("reasoning_tokens_array", "reasoning_tokens"),
+    ("web_search_count_array", "web_search_count"),
+    ("web_search_costs", "web_search_cost_usd"),
+    ("costs", "cost_usd"),
+    ("latency_ms_array", "latency_ms"),
+    ("ttft_ms_array", "ttft_ms"),
+    ("statuses", "status"),
+    ("requested_ats", "requested_at"),
+    ("completed_ats", "completed_at"),
+    ("is_streamings", "is_streaming"),
+    ("estimated_usages", "estimated_usage"),
+    ("downgraded_froms", "downgraded_from"),
+    ("availability_fallback_froms", "availability_fallback_from"),
+    ("sso_subjects", "sso_subject"),
+    ("bedrock_request_ids", "bedrock_request_id"),
+    ("clients", "client"),
+    ("context_tiers", "context_tier"),
+    ("key_prefixes", "key_prefix"),
+    ("session_ids", "session_id"),
+    ("pricing_missings", "pricing_missing"),
 )
 
 
@@ -948,22 +1025,22 @@ class BatchFlusher:
         entries: list[CostStreamEntry],
         ws_price: Decimal = DEFAULT_PRICE_PER_1K,
     ) -> set[str]:
-        """usage_logs INSERT 후 **실제로 삽입된** request_id 집합을 반환.
+        """usage_logs 를 한 문장으로 INSERT 하고 **실제로 삽입된** request_id 집합을 반환.
 
-        행 단위 INSERT 를 쓰는 이유: asyncpg executemany 는 RETURNING 행을
-        돌려주지 못해 bulk + RETURNING 조합이 불가하다. 배치 크기(수십~수백)
-        대비 왕복 비용은 감내 범위이고, 이 반환값이 budget_usages 이중가산의
-        마지막 방어선이다(SELECT-then-INSERT 창 — 파일 상단 주석 참조).
+        ``unnest`` 배열 확장으로 배치 전체가 한 왕복이다. ``ON CONFLICT DO NOTHING``
+        은 경합/재처리 행을 건너뛰고 ``RETURNING`` 은 실제 삽입 행만 돌려주므로,
+        budget_usages 가산은 그 집합만 보면 된다(SELECT-then-INSERT 창 — 파일 상단
+        주석 참조). 한 행의 결정적 값 오류는 문장 전체를 실패시키지만, 호출자의
+        per-row 폴백이 같은 함수를 행 단위로 다시 호출해 poison 만 dead-letter 로
+        분리한다.
         """
-        inserted: set[str] = set()
-        for e in entries:
-            params = self._row_params(e, ws_price)
-            row_id = (
-                await session.execute(_INSERT_USAGE_LOGS, params)
-            ).scalar_one_or_none()
-            if row_id is not None:
-                inserted.add(row_id)
-        return inserted
+        rows = [self._row_params(e, ws_price) for e in entries]
+        params = {
+            array_key: [row[row_key] for row in rows]
+            for array_key, row_key in _USAGE_LOG_ARRAY_FIELDS
+        }
+        inserted_rows = (await session.execute(_INSERT_USAGE_LOGS_BULK, params)).all()
+        return {r[0] for r in inserted_rows}
 
     def _row_params(self, e: CostStreamEntry, ws_price: Decimal) -> dict:
         """usage_logs 행 바인딩 — INSERT 와 추정 행 교체(UPDATE)가 같은 값을 쓴다."""

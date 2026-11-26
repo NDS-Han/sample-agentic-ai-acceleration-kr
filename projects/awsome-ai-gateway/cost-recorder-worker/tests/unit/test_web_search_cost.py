@@ -17,7 +17,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from worker.batch_flusher import BatchFlusher
+from worker.batch_flusher import _USAGE_LOG_ARRAY_FIELDS, BatchFlusher
 from worker.schemas.cost_stream import CostStreamEntry
 from worker.web_search_pricing import (
     DEFAULT_PRICE_PER_1K,
@@ -67,8 +67,12 @@ class _Recorder:
         sql = str(stmt)
         result = MagicMock()
         if "INSERT INTO usage.usage_logs" in sql:
-            self.inserts.append(dict(params))
-            result.scalar_one_or_none.return_value = params["request_id"]
+            for i, rid in enumerate(params["request_ids"]):
+                self.inserts.append({
+                    row_key: params[array_key][i]
+                    for array_key, row_key in _USAGE_LOG_ARRAY_FIELDS
+                })
+            result.all.return_value = [(rid,) for rid in params["request_ids"]]
         elif "budget.budget_usages" in sql and "INSERT" in sql:
             self.upserts.append([dict(p) for p in params])
         else:

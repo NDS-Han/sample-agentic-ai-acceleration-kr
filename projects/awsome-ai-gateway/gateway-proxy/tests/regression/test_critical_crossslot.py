@@ -79,8 +79,8 @@ async def test_multi_scope_rpm_calls_eval_per_scope_no_crossslot():
     ]
 
     svc = RateLimitService()
-    with patch("app.services.rate_limit_service._get_breaker", return_value=None), \
-         patch("app.services.rate_limit_service.LuaScriptLoader") as mock_lua:
+    # 공용 Redis 브레이커는 conftest 가 닫아 둔다 — 성공 eval 은 그대로 통과한다.
+    with patch("app.services.rate_limit_service.LuaScriptLoader") as mock_lua:
         mock_lua.get.return_value = "-- dummy lua script"
         result = await svc.check_multi_scope_rpm(redis, descriptors, request_id="req-1")
 
@@ -133,8 +133,8 @@ async def test_multi_scope_tpm_calls_eval_per_scope_no_crossslot():
     ]
 
     svc = RateLimitService()
-    with patch("app.services.rate_limit_service._get_breaker", return_value=None), \
-         patch("app.services.rate_limit_service.LuaScriptLoader") as mock_lua:
+    # 공용 Redis 브레이커는 conftest 가 닫아 둔다 — 성공 eval 은 그대로 통과한다.
+    with patch("app.services.rate_limit_service.LuaScriptLoader") as mock_lua:
         mock_lua.get.return_value = "-- dummy lua script"
         result = await svc.check_multi_scope_tpm(redis, descriptors, reserved_tokens=500)
 
