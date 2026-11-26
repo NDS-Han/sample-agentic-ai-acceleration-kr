@@ -9,7 +9,8 @@
   같은 키의 동시 요청은 PK 행 잠금에서 기다렸다가 결과를 본다.
 - 같은 해시로 재전송 → 저장된 응답을 그대로(새 감사 행 없음, ``Idempotent-Replayed: true``).
   다른 해시 → 422 ``idempotency_key_reused``. 아직 진행 중 → 409 ``idempotency_in_progress``.
-- 2xx 응답만 저장한다. 실패하면 선점 행을 지워 같은 키로 다시 시도할 수 있다.
+- handler 가 정상 반환한 응답은 상태코드와 무관하게 저장한다(보안 거부 403 도 같은 키 재전송에 그대로 재생).
+  handler 가 예외로 실패하면 선점 행을 지워 같은 키로 다시 시도할 수 있다.
 - 비밀값(rotate 의 새 토큰 원문)은 저장하지 않는다 — 재전송은 409 ``idempotency_secret_not_replayable``.
 - 보존: ``AICM_IDEMPOTENCY_RETENTION_DAYS``. 새 키를 기록할 때 같은 통합의 만료 행을 최대 100개 지운다.
 """

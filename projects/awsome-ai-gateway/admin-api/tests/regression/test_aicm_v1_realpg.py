@@ -13,8 +13,10 @@ import hashlib
 import json
 import os
 import uuid
+from contextlib import ExitStack
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -274,7 +276,7 @@ async def _mk_team(sm, name: str) -> uuid.UUID:
 
 
 async def _mk_user(sm, *, team_id=None, role="DEVELOPER", provider="oidc", sub=None, email=None,
-                   keys: int = 0) -> tuple[uuid.UUID, str]:
+                   keys: int = 0, service_account: bool = False) -> tuple[uuid.UUID, str]:
     from sqlalchemy import text
 
     uid = uuid.uuid4()
@@ -282,9 +284,10 @@ async def _mk_user(sm, *, team_id=None, role="DEVELOPER", provider="oidc", sub=N
     email = email or f"u{uid.hex[:8]}@corp.example"
     async with sm() as s:
         await s.execute(text(
-            "INSERT INTO auth.users (id, team_id, email, display_name, role, sso_subject, provider, is_active) "
-            "VALUES (:i, :t, :e, 'U', CAST(:r AS auth.user_role), :s, :p, true)"),
-            {"i": uid, "t": team_id, "e": email, "r": role, "s": sub, "p": provider})
+            "INSERT INTO auth.users (id, team_id, email, display_name, role, sso_subject, provider, is_active, "
+            "is_service_account) "
+            "VALUES (:i, :t, :e, 'U', CAST(:r AS auth.user_role), :s, :p, true, :sa)"),
+            {"i": uid, "t": team_id, "e": email, "r": role, "s": sub, "p": provider, "sa": service_account})
         for _ in range(keys):
             raw = f"vk-{uuid.uuid4().hex}"
             await s.execute(text(
@@ -314,6 +317,40 @@ def _stub_sync(stub, username, sub, email, *, enabled=True, groups="Claude_Platf
     }, {"UserPoolId": POOL, "Username": username})
     stub.add_response("admin_list_groups_for_user", {"Groups": []},
                       {"UserPoolId": POOL, "Username": username, "Limit": 60})
+
+
+_COGNITO_WRITE_OPS = (
+    "admin_create_user",
+    "admin_link_provider_for_user",
+    "admin_update_user_attributes",
+    "admin_disable_user",
+    "admin_user_global_sign_out",
+)
+
+
+def _spy_cognito_writes(client, stack: ExitStack) -> dict:
+    return {
+        name: stack.enter_context(patch.object(client, name, wraps=getattr(client, name)))
+        for name in _COGNITO_WRITE_OPS
+    }
+
+
+def _assert_no_cognito_writes(writes: dict) -> None:
+    for name, spy in writes.items():
+        spy.assert_not_called(), name
+
+
+def _stub_find_by_email(stub, email: str, users: list[dict]) -> None:
+    stub.add_response("list_users", {"Users": users},
+                      {"UserPoolId": POOL, "Filter": f'email = "{email}"', "Limit": 10})
+
+
+def _stub_user_pool_groups(stub, username: str, groups: list[str] | None = None) -> None:
+    stub.add_response(
+        "admin_list_groups_for_user",
+        {"Groups": [{"GroupName": g} for g in (groups or [])]},
+        {"UserPoolId": POOL, "Username": username, "Limit": 60},
+    )
 
 
 # ── auth / tokens ────────────────────────────────────────────────────────────
@@ -515,6 +552,296 @@ def _created_user(username, email, sub, groups):
                                     {"Name": "custom:groups", "Value": groups}]}}
 
 
+async def test_provision_refuses_admin_matched_by_email_and_replays_403(env):
+    """DB admin 의 sub 와 Cognito sub 가 달라도, email fallback 으로 연결될 admin 은 건드리지 않는다."""
+    c, sm, stub = env["client"], env["sm"], env["stub"]
+    t = await _issue(c, scopes=["users:provision"])
+    team = await _mk_team(sm, f"Adm{uuid.uuid4().hex[:6]}")
+    email = f"admin-victim-{uuid.uuid4().hex[:6]}@corp.example"
+    db_sub, cognito_sub = str(uuid.uuid4()), str(uuid.uuid4())
+    uid, _ = await _mk_user(sm, team_id=team, role="ADMIN", sub=db_sub, email=email)
+    username = "ADFS_admin victim".replace(" ", "_")
+    desired = f"Claude_New{uuid.uuid4().hex[:6]}"
+    _stub_find_by_email(stub, email, [
+        _cu(username, cognito_sub, email, status="EXTERNAL_PROVIDER", groups="Claude_Old")
+    ])
+    _stub_user_pool_groups(stub, username)
+    body = {"email": email, "groups": [desired], "link": {"value": "N"}}
+
+    with ExitStack() as stack:
+        writes = _spy_cognito_writes(env["cognito_client"], stack)
+        r = await c.post("/aicm/v1/users/provision", json=body, headers=_h(t["token"], "pa-email"))
+        assert r.status_code == 403, r.text
+        assert r.json()["error"]["code"] == "target_is_admin"
+        replay = await c.post("/aicm/v1/users/provision", json=body, headers=_h(t["token"], "pa-email"))
+        assert replay.status_code == 403
+        assert replay.json() == r.json()
+        assert replay.headers["Idempotent-Replayed"] == "true"
+        _assert_no_cognito_writes(writes)
+    stub.assert_no_pending_responses()
+
+    row = (await _q(sm, "SELECT role::text, team_id, is_active FROM auth.users WHERE id=:i", i=uid))[0]
+    assert row == ("ADMIN", team, True)
+    rows = await _q(
+        sm,
+        "SELECT actor_user_id, actor_role, result, changes::text FROM audit.audit_logs "
+        "WHERE action='AICM_PROVISION_REFUSED' AND resource_id=:r",
+        r=str(uid),
+    )
+    assert len(rows) == 1  # replay 는 새 감사 행을 만들지 않는다
+    actor_id, actor_role, result, changes_raw = rows[0]
+    assert actor_id == uuid.UUID("00000000-0000-4000-a000-000000000011")
+    assert actor_role == "ADMIN" and result == "FAILURE"
+    changes = json.loads(changes_raw)
+    assert changes["reason_code"] == "gateway_admin"
+    assert changes["_service_token_id"] == t["id"] and changes["_integration"] == "aicm"
+
+
+async def test_provision_refuses_last_human_admin_without_demotion(env):
+    """마지막 사람 admin 을 대상으로 한 provision 도 403 — role/team/is_active 는 그대로다."""
+    c, sm, stub = env["client"], env["sm"], env["stub"]
+    t = await _issue(c, scopes=["users:provision"])
+    team = await _mk_team(sm, f"Last{uuid.uuid4().hex[:6]}")
+    email = f"last-admin-{uuid.uuid4().hex[:6]}@corp.example"
+    sub = str(uuid.uuid4())
+    uid, _ = await _mk_user(sm, team_id=team, role="ADMIN", sub=sub, email=email)
+    username = "ADFS_last_admin"
+    desired = f"Claude_Demote{uuid.uuid4().hex[:6]}"
+    _stub_find_by_email(stub, email, [
+        _cu(username, sub, email, status="EXTERNAL_PROVIDER", groups="Claude_Old")
+    ])
+    _stub_user_pool_groups(stub, username)
+
+    with ExitStack() as stack:
+        writes = _spy_cognito_writes(env["cognito_client"], stack)
+        r = await c.post(
+            "/aicm/v1/users/provision",
+            json={"email": email, "groups": [desired], "link": {"value": "N"}},
+            headers=_h(t["token"], "pa-last-admin"),
+        )
+        assert r.status_code == 403, r.text
+        assert r.json()["error"]["code"] == "target_is_admin"
+        _assert_no_cognito_writes(writes)
+    stub.assert_no_pending_responses()
+    row = (await _q(sm, "SELECT role::text, team_id, is_active FROM auth.users WHERE id=:i", i=uid))[0]
+    assert row == ("ADMIN", team, True)
+
+
+async def test_provision_refuses_cognito_pool_admin_group_even_when_db_not_admin(env):
+    """DB 가 아직 DEVELOPER 여도 Cognito pool 그룹에 ADMIN_GROUPS 가 있으면 pre-write 거부."""
+    c, sm, stub = env["client"], env["sm"], env["stub"]
+    t = await _issue(c, scopes=["users:provision"])
+    team = await _mk_team(sm, f"Pg{uuid.uuid4().hex[:6]}")
+    uid, sub = await _mk_user(sm, team_id=team, role="DEVELOPER")
+    email = (await _q(sm, "SELECT email FROM auth.users WHERE id=:i", i=uid))[0][0]
+    username = "ADFS_pool_admin"
+    desired = f"Claude_Pool{uuid.uuid4().hex[:6]}"
+    _stub_find_by_email(stub, email, [
+        _cu(username, sub, email, status="EXTERNAL_PROVIDER", groups="Claude_Old")
+    ])
+    _stub_user_pool_groups(stub, username, ["ClaudeAdmin"])
+
+    with ExitStack() as stack:
+        writes = _spy_cognito_writes(env["cognito_client"], stack)
+        r = await c.post(
+            "/aicm/v1/users/provision",
+            json={"email": email, "groups": [desired], "link": {"value": "N"}},
+            headers=_h(t["token"], "pa-pool-admin"),
+        )
+        assert r.status_code == 403, r.text
+        assert r.json()["error"]["code"] == "target_is_admin"
+        _assert_no_cognito_writes(writes)
+    stub.assert_no_pending_responses()
+    assert (await _q(sm, "SELECT role::text FROM auth.users WHERE id=:i", i=uid))[0][0] == "DEVELOPER"
+
+
+async def test_provision_refuses_cognito_attribute_admin_group_even_when_db_not_admin(env):
+    """ADMIN_GROUPS 가 Cognito groups 속성에만 있어도 DB role 과 무관하게 쓰기 전 거부."""
+    c, sm, stub = env["client"], env["sm"], env["stub"]
+    t = await _issue(c, scopes=["users:provision"])
+    team = await _mk_team(sm, f"AttrAdm{uuid.uuid4().hex[:5]}")
+    email = f"attr-admin-{uuid.uuid4().hex[:6]}@corp.example"
+    sub = str(uuid.uuid4())
+    uid, _ = await _mk_user(sm, team_id=team, role="DEVELOPER", sub=sub, email=email)
+    username = f"attradm-{uuid.uuid4().hex[:6]}"
+    desired = f"Claude_New{uuid.uuid4().hex[:6]}"
+    _stub_find_by_email(stub, email, [_cu(username, sub, email, groups="Claude_Old;ClaudeAdmin")])
+    _stub_user_pool_groups(stub, username)
+    with ExitStack() as stack:
+        writes = _spy_cognito_writes(env["cognito_client"], stack)
+        r = await c.post("/aicm/v1/users/provision", json={"email": email, "groups": [desired], "link": {"value": "N"}},
+                         headers=_h(t["token"], "pa-attradm"))
+        assert r.status_code == 403, r.text
+        assert r.json()["error"]["details"]["reason_code"] == "cognito_admin_group"
+        _assert_no_cognito_writes(writes)
+    row = (await _q(sm, "SELECT role::text, team_id, is_active FROM auth.users WHERE id=:i", i=uid))[0]
+    assert row == ("DEVELOPER", team, True)
+    assert await _q(sm, "SELECT 1 FROM audit.audit_logs WHERE action='AICM_PROVISION_REFUSED' AND resource_id=:r",
+                    r=str(uid))
+
+
+async def test_provision_refuses_system_and_service_account_targets(env):
+    c, sm, stub = env["client"], env["sm"], env["stub"]
+    t = await _issue(c, scopes=["users:provision"])
+
+    # 서비스 계정 — Cognito 에 같은 sub/email 이 있어도 연결/갱신하지 않는다.
+    uid, sub = await _mk_user(sm, role="DEVELOPER", service_account=True)
+    svc_email = (await _q(sm, "SELECT email FROM auth.users WHERE id=:i", i=uid))[0][0]
+    username = "ADFS_service_account"
+    _stub_find_by_email(stub, svc_email, [
+        _cu(username, sub, svc_email, status="EXTERNAL_PROVIDER", groups="Claude_Old")
+    ])
+    _stub_user_pool_groups(stub, username)
+
+    # 시스템 사용자 — Cognito 에 없으면 생성부터 막는다(연결/속성 쓰기 이전).
+    system_email = "service-token@system.internal"
+    _stub_find_by_email(stub, system_email, [])
+
+    with ExitStack() as stack:
+        writes = _spy_cognito_writes(env["cognito_client"], stack)
+        r = await c.post(
+            "/aicm/v1/users/provision",
+            json={"email": svc_email, "groups": [f"Claude_Svc{uuid.uuid4().hex[:6]}"], "link": {"value": "N"}},
+            headers=_h(t["token"], "pa-service-acct"),
+        )
+        assert r.status_code == 403, r.text
+        assert r.json()["error"]["code"] == "target_is_service_account"
+
+        r = await c.post(
+            "/aicm/v1/users/provision",
+            json={"email": system_email, "groups": [f"Claude_Sys{uuid.uuid4().hex[:6]}"], "link": {"value": "N"}},
+            headers=_h(t["token"], "pa-system-user"),
+        )
+        assert r.status_code == 403, r.text
+        assert r.json()["error"]["code"] == "target_is_system_user"
+        _assert_no_cognito_writes(writes)
+    stub.assert_no_pending_responses()
+
+
+async def test_provision_refuses_admin_email_before_create(env, monkeypatch):
+    from app.core.config import get_settings
+
+    c, sm, stub = env["client"], env["sm"], env["stub"]
+    t = await _issue(c, scopes=["users:provision"])
+    email = f"configured-admin-{uuid.uuid4().hex[:6]}@corp.example"
+    monkeypatch.setattr(get_settings(), "ADMIN_EMAILS", [email])
+    _stub_find_by_email(stub, email, [])
+
+    with ExitStack() as stack:
+        writes = _spy_cognito_writes(env["cognito_client"], stack)
+        r = await c.post(
+            "/aicm/v1/users/provision",
+            json={"email": email, "groups": [f"Claude_Ae{uuid.uuid4().hex[:6]}"], "link": {"value": "N"}},
+            headers=_h(t["token"], "pa-admin-email"),
+        )
+        assert r.status_code == 403, r.text
+        assert r.json()["error"]["code"] == "target_is_admin"
+        _assert_no_cognito_writes(writes)
+    stub.assert_no_pending_responses()
+    assert not await _q(sm, "SELECT 1 FROM auth.users WHERE email=:e", e=email)
+
+
+async def test_provision_existing_team_leader_same_team_keeps_role(env):
+    c, sm, stub = env["client"], env["sm"], env["stub"]
+    t = await _issue(c, scopes=["users:provision"])
+    team_name = f"Tl{uuid.uuid4().hex[:6]}"
+    team = await _mk_team(sm, team_name)
+    group = f"Claude_{team_name}"
+    uid, sub = await _mk_user(sm, team_id=team, role="TEAM_LEADER")
+    email = (await _q(sm, "SELECT email FROM auth.users WHERE id=:i", i=uid))[0][0]
+    username = "ADFS_team_leader"
+    _stub_find_by_email(stub, email, [
+        _cu(username, sub, email, status="EXTERNAL_PROVIDER", groups=group)
+    ])
+    _stub_user_pool_groups(stub, username)
+    _stub_sync(stub, username, sub, email, groups=group)
+
+    with ExitStack() as stack:
+        writes = _spy_cognito_writes(env["cognito_client"], stack)
+        r = await c.post(
+            "/aicm/v1/users/provision",
+            json={"email": email, "groups": [group], "link": {"value": "N"}},
+            headers=_h(t["token"], "pa-team-leader-same"),
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["role"] == "TEAM_LEADER"
+        _assert_no_cognito_writes(writes)  # 같은 그룹 — 속성 정정도 없다
+    stub.assert_no_pending_responses()
+    row = (await _q(sm, "SELECT role::text, team_id FROM auth.users WHERE id=:i", i=uid))[0]
+    assert row == ("TEAM_LEADER", team)
+
+
+async def test_provision_refuses_team_leader_team_move(env):
+    """팀 리더를 다른 팀으로 옮기면 현재 sync 규칙상 DEVELOPER 로 강등되므로 쓰기 전에 거부."""
+    c, sm, stub = env["client"], env["sm"], env["stub"]
+    t = await _issue(c, scopes=["users:provision"])
+    old_team_name = f"Old{uuid.uuid4().hex[:6]}"
+    old_team = await _mk_team(sm, old_team_name)
+    old_group = f"Claude_{old_team_name}"
+    new_group = f"Claude_New{uuid.uuid4().hex[:6]}"
+    uid, sub = await _mk_user(sm, team_id=old_team, role="TEAM_LEADER")
+    email = (await _q(sm, "SELECT email FROM auth.users WHERE id=:i", i=uid))[0][0]
+    username = "ADFS_leader_move"
+    _stub_find_by_email(stub, email, [
+        _cu(username, sub, email, status="EXTERNAL_PROVIDER", groups=old_group)
+    ])
+    _stub_user_pool_groups(stub, username)
+
+    with ExitStack() as stack:
+        writes = _spy_cognito_writes(env["cognito_client"], stack)
+        r = await c.post(
+            "/aicm/v1/users/provision",
+            json={"email": email, "groups": [new_group], "link": {"value": "N"}},
+            headers=_h(t["token"], "pa-team-leader-move"),
+        )
+        assert r.status_code == 403, r.text
+        assert r.json()["error"]["code"] == "team_leader_change_forbidden"
+        _assert_no_cognito_writes(writes)
+    stub.assert_no_pending_responses()
+    row = (await _q(sm, "SELECT role::text, team_id FROM auth.users WHERE id=:i", i=uid))[0]
+    assert row == ("TEAM_LEADER", old_team)
+
+
+async def test_provision_existing_developer_team_change_still_works(env):
+    """일반 DEVELOPER 의 팀 그룹 정정은 계속 동작하고, 비-팀 속성 그룹은 보존한다."""
+    c, sm, stub = env["client"], env["sm"], env["stub"]
+    t = await _issue(c, scopes=["users:provision"])
+    old_team_name = f"DevOld{uuid.uuid4().hex[:6]}"
+    new_team_name = f"DevNew{uuid.uuid4().hex[:6]}"
+    old_team = await _mk_team(sm, old_team_name)
+    uid, sub = await _mk_user(sm, team_id=old_team, role="DEVELOPER")
+    email = (await _q(sm, "SELECT email FROM auth.users WHERE id=:i", i=uid))[0][0]
+    username = "ADFS_developer"
+    desired = f"Claude_{new_team_name}"
+    current = f"PartnerPortal;Claude_{old_team_name}"
+    merged = f"PartnerPortal;{desired}"
+    _stub_find_by_email(stub, email, [
+        _cu(username, sub, email, status="EXTERNAL_PROVIDER", groups=current)
+    ])
+    _stub_user_pool_groups(stub, username)
+    stub.add_response("admin_update_user_attributes", {}, {
+        "UserPoolId": POOL, "Username": username,
+        "UserAttributes": [{"Name": "custom:groups", "Value": merged}],
+    })
+    _stub_sync(stub, username, sub, email, groups=merged)
+
+    r = await c.post(
+        "/aicm/v1/users/provision",
+        json={"email": email, "groups": [desired], "link": {"value": "N"}},
+        headers=_h(t["token"], "pa-dev-existing"),
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["state"] == "already_federated"
+    assert r.json()["role"] == "DEVELOPER"
+    stub.assert_no_pending_responses()
+    row = (await _q(
+        sm,
+        "SELECT u.role::text, t.name FROM auth.users u JOIN auth.teams t ON t.id=u.team_id WHERE u.id=:i",
+        i=uid,
+    ))[0]
+    assert row == ("DEVELOPER", new_team_name)
+
+
 async def test_provision_create_link_sync(env):
     c, sm, stub = env["client"], env["sm"], env["stub"]
     t = await _issue(c, scopes=["users:provision"])
@@ -571,6 +898,7 @@ async def test_provision_partial_failure_resumes_on_retry(env):
     # 재시도: 네이티브 사용자를 찾아 연결만 하고 sync → linked
     stub.add_response("list_users", {"Users": [_cu("uuid-p", sub, email, status="FORCE_CHANGE_PASSWORD",
                                                    groups=groups)]}, flt)
+    _stub_user_pool_groups(stub, "uuid-p")
     stub.add_response("admin_link_provider_for_user", {})
     _stub_sync(stub, "uuid-p", sub, email, groups=groups)
     r = await c.post("/aicm/v1/users/provision", json=body, headers=_h(t["token"], "pp"))
@@ -589,6 +917,7 @@ async def test_provision_already_federated_and_guards(env):
     # 이미 ADFS 로 로그인한 사람: 생성·연결·삭제 없음, 그룹만 맞추고 sync
     stub.add_response("list_users", {"Users": [_cu("ADFS_abc", sub, email, status="EXTERNAL_PROVIDER",
                                                    groups="Claude_Old")]}, flt)
+    _stub_user_pool_groups(stub, "ADFS_abc")
     stub.add_response("admin_update_user_attributes", {}, {
         "UserPoolId": POOL, "Username": "ADFS_abc", "UserAttributes": [{"Name": "custom:groups", "Value": groups}]})
     _stub_sync(stub, "ADFS_abc", sub, email, groups=groups)
@@ -621,6 +950,7 @@ async def test_provision_already_federated_and_guards(env):
 
     # 연결 충돌 → 409 link_conflict
     stub.add_response("list_users", {"Users": [_cu("native-1", sub, email, groups=groups)]}, flt)
+    _stub_user_pool_groups(stub, "native-1")
     stub.add_client_error("admin_link_provider_for_user", service_error_code="AliasExistsException",
                           http_status_code=400)
     r = await c.post("/aicm/v1/users/provision", json={"email": email, "groups": [groups], "link": {"value": "N"}},
@@ -662,6 +992,7 @@ async def test_concurrent_provision_same_email_creates_once(env):
     _stub_sync(stub, "uuid-cc", sub, email, groups=groups)
     ident = json.dumps([{"providerName": "ADFS", "userId": "N"}])
     stub.add_response("list_users", {"Users": [_cu("uuid-cc", sub, email, groups=groups, identities=ident)]})
+    _stub_user_pool_groups(stub, "uuid-cc")
     _stub_sync(stub, "uuid-cc", sub, email, groups=groups)
     body = {"email": email, "groups": [groups], "link": {"value": "N"}}
     r1, r2 = await asyncio.gather(

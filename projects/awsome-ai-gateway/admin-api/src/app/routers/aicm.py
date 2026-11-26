@@ -250,12 +250,12 @@ async def provision_user(
     게이트웨이 sync. 각 단계는 확인 후 실행이라 재시도하면 이어서 끝낸다."""
 
     async def handler():
-        out, after = await _lifecycle(request).provision(
+        status, out, after = await _lifecycle(request).provision(
             session, email=body.email, display_name=body.display_name, groups=body.groups,
             link=body.link.model_dump() if body.link else None, actor=p.actor,
             ip_address=p.client_ip, request_id=_rid(request),
         )
-        return 200, out, after
+        return status, out, after
 
     return await _idem(request, session, handler)
 

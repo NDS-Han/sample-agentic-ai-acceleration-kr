@@ -14,17 +14,19 @@ from __future__ import annotations
 import json
 import re
 import uuid
+from dataclasses import dataclass
 
 import structlog
-from sqlalchemy import text
+from sqlalchemy import or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.audit import audit_logger
 from app.core.cache_invalidation import publish_gateway_auth_invalidation
 from app.core.config import get_settings
 from app.core.exceptions import IntegrationError, NotFoundError
-from app.core.oidc_identity import flatten_groups
+from app.core.oidc_identity import flatten_groups, team_resolution_groups
 from app.models.auth import User, UserRole
+from app.repositories.user_repository import UserRepository
 from app.services.cognito_admin import USER_READ, CognitoAdmin, CognitoClientError, attr
 from app.services.cognito_sync_service import CognitoSyncService
 from app.services.user_team_service import release_stale_leader_pointer
@@ -42,6 +44,21 @@ _LINK_ATTR_RE = re.compile(r"^[A-Za-z0-9_:.\-]{1,64}$")
 #: Cognito 사용자 지정 속성 값 상한.
 _ATTR_MAX = 2048
 DEACTIVATION_REASON = "integration_deactivated"
+_NEW_TEAM = object()
+
+
+@dataclass(frozen=True)
+class _ProvisionRefusal:
+    code: str
+    message: str
+    reason_code: str
+    details: dict
+
+
+@dataclass(frozen=True)
+class _ProvisionPlan:
+    write_groups: list[str]
+    groups_update_needed: bool
 
 
 def _err(status: int, code: str, message: str, **details) -> IntegrationError:
@@ -66,6 +83,213 @@ class UserLifecycleService:
         return CognitoSyncService(self._cog.client, key_service=self._key_service, cache_mgr=self._cache_mgr)
 
     # ── provision ────────────────────────────────────────────────────────────
+
+    async def _pool_groups(self, username: str) -> list[str]:
+        """쓰기 전 판정용 pool 그룹 전체(페이지네이션)."""
+        out: list[str] = []
+        token = None
+        while True:
+            kw = {"Username": username, "Limit": 60}
+            if token:
+                kw["NextToken"] = token
+            resp = await self._cog.call("admin_list_groups_for_user", **kw)
+            out.extend(g["GroupName"] for g in resp.get("Groups", []))
+            token = resp.get("NextToken")
+            if not token:
+                return out
+
+    @staticmethod
+    async def _target_rows(session: AsyncSession, *, sub: str | None, emails: list[str]) -> list[User]:
+        clauses = []
+        if sub:
+            clauses.append(User.sso_subject == sub)
+        if emails:
+            clauses.append(User.email.in_(emails))
+        if not clauses:
+            return []
+        stmt = (
+            select(User)
+            .where(or_(*clauses) if len(clauses) > 1 else clauses[0])
+            .order_by(User.id)
+            .with_for_update()
+        )
+        return list((await session.execute(stmt)).scalars())
+
+    @staticmethod
+    def _refusal(code: str, message: str, reason_code: str, rows: list[User], **details) -> _ProvisionRefusal:
+        return _ProvisionRefusal(
+            code=code,
+            message=message,
+            reason_code=reason_code,
+            details={
+                "reason_code": reason_code,
+                "target_user_ids": [str(r.id) for r in rows],
+                **details,
+            },
+        )
+
+    @staticmethod
+    def _merge_write_groups(current: list[str], desired: list[str]) -> tuple[list[str], bool]:
+        """관리 대상(팀 그룹)만 바꾼 속성값과 쓰기 필요 여부.
+
+        AICM 이 모르는 비-팀 그룹은 지우지 않고 앞쪽 순서를 유지한다. 팀 해석은
+        첫 파싱 가능 그룹이므로 비-팀 그룹의 위치는 역할/팀에 영향이 없다.
+        """
+        current_team = [g for g in current if CognitoSyncService._parse_group(g) is not None]
+        if current_team == desired:
+            return list(current), False
+        merged: list[str] = []
+        for g in current:
+            if CognitoSyncService._parse_group(g) is not None:
+                continue
+            if g not in merged:
+                merged.append(g)
+        for g in desired:
+            if g not in merged:
+                merged.append(g)
+        return merged, True
+
+    async def _predicted_team_id(self, session: AsyncSession, effective_groups: list[str]):
+        s = get_settings()
+        parsed = None
+        for g in effective_groups:
+            parsed = CognitoSyncService._parse_group(g)
+            if parsed is not None:
+                break
+        if parsed is None:
+            return uuid.UUID(s.DEFAULT_TEAM_ID)
+        dept_name, team_name = parsed
+        cache = await self._sync_service()._build_team_cache(UserRepository(session))
+        dept_id = cache.default_dept_id if dept_name is None else cache.depts_by_name.get(dept_name)
+        if dept_id is None:
+            return _NEW_TEAM
+        return cache.teams.get((dept_id, team_name), _NEW_TEAM)
+
+    async def _provision_preflight(
+        self, session: AsyncSession, *, email: str, cognito_user: dict | None,
+        desired_groups: list[str], pool_groups: list[str],
+    ) -> _ProvisionPlan | _ProvisionRefusal:
+        """Cognito/DB 쓰기 전 보호 대상·역할 변경 가능성 판정.
+
+        반환된 계획만 이후 쓰기에 쓴다. 거부는 예외가 아니라 403 응답 본문으로
+        돌려주어 멱등키 저장소가 같은 403 을 재생할 수 있게 한다.
+        """
+        s = get_settings()
+        groups_attr = s.AICM_PROVISION_GROUPS_ATTRIBUTE
+        username = cognito_user.get("Username") if cognito_user else None
+        sub = (attr(cognito_user, "sub") if cognito_user else None) or username
+        cognito_email = (attr(cognito_user, "email") if cognito_user else None) or email
+        emails = list(dict.fromkeys(e for e in (email, cognito_email) if e))
+        rows = await self._target_rows(session, sub=sub, emails=emails)
+
+        for row in rows:
+            if row.id in _SYSTEM_USER_IDS:
+                return self._refusal(
+                    "target_is_system_user", "system users cannot be changed by an integration",
+                    "system_user", [row],
+                )
+        for row in rows:
+            if row.is_service_account:
+                return self._refusal(
+                    "target_is_service_account", "service accounts cannot be changed by an integration",
+                    "service_account", [row],
+                )
+        for row in rows:
+            if row.role == UserRole.ADMIN:
+                return self._refusal(
+                    "target_is_admin", "gateway admins cannot be changed by an integration",
+                    "gateway_admin", [row],
+                )
+
+        admin_emails = {e.lower() for e in s.ADMIN_EMAILS}
+        if any(e.lower() in admin_emails for e in emails):
+            return self._refusal(
+                "target_is_admin", "admin emails cannot be changed by an integration",
+                "admin_email", rows,
+            )
+
+        groups_attr_names = list(dict.fromkeys((groups_attr, s.OIDC_GROUPS_CLAIM)))
+        attr_groups: list[str] = []
+        current_write_attr: list[str] = []
+        if cognito_user is not None:
+            for name in groups_attr_names:
+                values = flatten_groups(attr(cognito_user, name))
+                attr_groups.extend(values)
+                if name == groups_attr:
+                    current_write_attr = values
+        if any(g in set(s.ADMIN_GROUPS) for g in attr_groups + pool_groups):
+            return self._refusal(
+                "target_is_admin", "Cognito admin group members cannot be changed by an integration",
+                "cognito_admin_group", rows,
+            )
+
+        if cognito_user is None:
+            write_groups = list(desired_groups)
+            groups_update_needed = False
+        else:
+            write_groups, groups_update_needed = self._merge_write_groups(current_write_attr, desired_groups)
+            if len(";".join(write_groups)) > _ATTR_MAX:
+                raise _err(422, "groups_too_long", f"joined groups exceed {_ATTR_MAX} characters")
+
+        if any(row.role == UserRole.TEAM_LEADER for row in rows):
+            # sync_user 가 읽을 사후 속성 기준으로 팀을 읽기 전용으로 예측한다.
+            # TEAM_LEADER 를 다른 팀으로 옮기면 현재 sync 규칙은 DEVELOPER 강등이므로
+            # 그런 요청은 Cognito 속성/링크를 쓰기 전에 거부한다.
+            if cognito_user is None:
+                post_sync_attr = write_groups if groups_attr == s.OIDC_GROUPS_CLAIM else []
+            elif groups_attr == s.OIDC_GROUPS_CLAIM:
+                post_sync_attr = write_groups
+            else:
+                post_sync_attr = flatten_groups(attr(cognito_user, s.OIDC_GROUPS_CLAIM))
+            effective = team_resolution_groups(post_sync_attr + pool_groups)
+            predicted_team = await self._predicted_team_id(session, effective)
+            for row in rows:
+                if (
+                    row.role == UserRole.TEAM_LEADER
+                    and row.team_source != "manual"
+                    and row.team_id != predicted_team
+                ):
+                    return self._refusal(
+                        "team_leader_change_forbidden",
+                        "provisioning must not change a team leader's role or team leadership",
+                        "team_leader_change", [row],
+                        current_team_id=str(row.team_id) if row.team_id else None,
+                    )
+        return _ProvisionPlan(write_groups=write_groups, groups_update_needed=groups_update_needed)
+
+    async def _refuse_provision(
+        self, session: AsyncSession, *, email: str, cognito_user: dict | None,
+        refusal: _ProvisionRefusal, requested_groups: list[str], actor,
+        ip_address: str, request_id: str,
+    ) -> tuple[int, dict, None]:
+        username = cognito_user.get("Username") if cognito_user else None
+        sub = (attr(cognito_user, "sub") if cognito_user else None) or username
+        target_ids = refusal.details.get("target_user_ids", [])
+        resource_id = target_ids[0] if target_ids else email
+        await audit_logger.log(
+            session,
+            actor_user_id=actor.user_id,
+            actor_role=actor.role.value,
+            service_token_id=getattr(actor, "service_token_id", None),
+            action="AICM_PROVISION_REFUSED",
+            resource_type="User",
+            resource_id=resource_id,
+            result="FAILURE",
+            changes={
+                "email": email,
+                "cognito_username": username,
+                "cognito_sub": sub,
+                "requested_groups": requested_groups,
+                **refusal.details,
+            },
+            ip_address=ip_address,
+            request_id=request_id,
+        )
+        error = {"type": "forbidden", "message": refusal.message, "code": refusal.code}
+        if refusal.details:
+            error["details"] = refusal.details
+        return 403, {"error": error}, None
+
 
     @staticmethod
     def validate_groups(groups: list[str]) -> list[str]:
@@ -97,12 +321,12 @@ class UserLifecycleService:
     async def provision(
         self, session: AsyncSession, *, email: str, display_name: str | None, groups: list[str],
         link: dict | None, actor, ip_address: str, request_id: str,
-    ) -> tuple[dict, object]:
+    ) -> tuple[int, dict, object | None]:
         """Cognito 생성/연결/속성 정정 + 게이트웨이 sync.
 
-        반환은 ``(body, after_commit)``. ``sync_user(commit=False)`` 로 게이트웨이 DB 변경·
+        반환은 ``(status, body, after_commit)``. ``sync_user(commit=False)`` 로 게이트웨이 DB 변경·
         감사·멱등키 완료 행을 한 트랜잭션에 묶고, 커밋 후 ``after_commit`` 이 sync 중 수집된
-        캐시/VK 부수효과를 적용한다.
+        캐시/VK 부수효과를 적용한다. 보호 대상 거부는 403 응답도 멱등 저장소에 남긴다.
         """
         s = get_settings()
         email = (email or "").strip()
@@ -135,8 +359,35 @@ class UserLifecycleService:
             {"k": f"itg-provision:{email.lower()}"},
         )
 
-        user, created = await self._find_or_create(email, display_name, groups_attr, joined)
+        users = await self._cog.find_by_email(_safe_filter_value(email))
+        user = self._pick(users)
+        created = False
+        plan = None
+        if user is None:
+            preflight = await self._provision_preflight(
+                session, email=email, cognito_user=None, desired_groups=groups, pool_groups=[],
+            )
+            if isinstance(preflight, _ProvisionRefusal):
+                return await self._refuse_provision(
+                    session, email=email, cognito_user=None, refusal=preflight,
+                    requested_groups=groups, actor=actor, ip_address=ip_address, request_id=request_id,
+                )
+            plan = preflight
+            user, created = await self._create_or_recover(email, display_name, groups_attr, joined)
+
         username = user["Username"]
+        if not created:
+            pool_groups = await self._pool_groups(username)
+            preflight = await self._provision_preflight(
+                session, email=email, cognito_user=user, desired_groups=groups, pool_groups=pool_groups,
+            )
+            if isinstance(preflight, _ProvisionRefusal):
+                return await self._refuse_provision(
+                    session, email=email, cognito_user=user, refusal=preflight,
+                    requested_groups=groups, actor=actor, ip_address=ip_address, request_id=request_id,
+                )
+            plan = preflight
+
         federated = user.get("UserStatus") == "EXTERNAL_PROVIDER"
         state = "created" if created else ("already_federated" if federated else "existing")
 
@@ -149,14 +400,12 @@ class UserLifecycleService:
             state = "linked"
 
         groups_updated = False
-        if not created:
-            current = flatten_groups(attr(user, groups_attr))
-            if current != groups:
-                await self._call_after_create(
-                    created, "admin_update_user_attributes", Username=username,
-                    UserAttributes=[{"Name": groups_attr, "Value": joined}],
-                )
-                groups_updated = True
+        if not created and plan.groups_update_needed:
+            await self._call_after_create(
+                created, "admin_update_user_attributes", Username=username,
+                UserAttributes=[{"Name": groups_attr, "Value": ";".join(plan.write_groups)}],
+            )
+            groups_updated = True
 
         # sync_user 의 읽기 호출 2회(AdminGetUser + AdminListGroupsForUser)만 통합 쿼터에서 선점한다.
         # 실제 boto3 client 는 같은 타임아웃 설정 client 를 공유하고, DB 변경은 commit=False 로
@@ -204,14 +453,10 @@ class UserLifecycleService:
         async def after_commit() -> None:
             await sync_service._flush_pending_revocations(session, result)
 
-        return body, after_commit
+        return 200, body, after_commit
 
-    async def _find_or_create(self, email: str, display_name: str | None, groups_attr: str,
-                              joined: str) -> tuple[dict, bool]:
-        users = await self._cog.find_by_email(_safe_filter_value(email))
-        picked = self._pick(users)
-        if picked is not None:
-            return picked, False
+    async def _create_or_recover(self, email: str, display_name: str | None, groups_attr: str,
+                                 joined: str) -> tuple[dict, bool]:
         attrs = [
             {"Name": "email", "Value": email},
             {"Name": "email_verified", "Value": "true"},
