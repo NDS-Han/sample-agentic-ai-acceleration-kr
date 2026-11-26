@@ -2,7 +2,7 @@
 """business Slack alerts — notification config seed + read grants + dead-letter growth index
 
 Revision ID: 0069
-Revises: 0063
+Revises: 0065
 Create Date: 2026-11-25
 
 ## 무엇
@@ -29,7 +29,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 
 revision = "0069"
-down_revision = "0063"
+down_revision = "0065"
 branch_labels = None
 depends_on = None
 
@@ -92,15 +92,19 @@ def _exec_retry(bind, stmt: str) -> None:
 
 def _drop_invalid_index_if_needed(bind) -> None:
     """실패한 CONCURRENTLY 시도가 남긴 invalid index 는 IF NOT EXISTS 를 무의미하게 만든다."""
-    row = bind.execute(text("""
-        SELECT i.indisvalid
-        FROM pg_class c
-        JOIN pg_index i ON i.indexrelid = c.oid
-        JOIN pg_namespace n ON n.oid = c.relnamespace
-        WHERE n.nspname = 'usage' AND c.relname = 'idx_cost_dead_letters_created'
-    """)).scalar()
-    if row is False:
-        _exec_retry(bind, "DROP INDEX CONCURRENTLY IF EXISTS usage.idx_cost_dead_letters_created")
+    for schema, name in (
+        ("usage", "idx_cost_dead_letters_created"),
+        ("notification", "idx_notification_logs_biz_alert_latest"),
+    ):
+        row = bind.execute(text("""
+            SELECT i.indisvalid
+            FROM pg_class c
+            JOIN pg_index i ON i.indexrelid = c.oid
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = :schema AND c.relname = :name
+        """), {"schema": schema, "name": name}).scalar()
+        if row is False:
+            _exec_retry(bind, f"DROP INDEX CONCURRENTLY IF EXISTS {schema}.{name}")
 
 
 def _upgrade_all() -> None:
@@ -122,6 +126,15 @@ def _upgrade_all() -> None:
             "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_cost_dead_letters_created "
             "ON usage.cost_dead_letters (created_at DESC)",
         )
+        # 최근 발송행 조회(business_alert_handler._latest_slot_row)용 부분 인덱스 —
+        # ORDER BY created_at DESC, event_id DESC LIMIT 1 이 인덱스 순서 스캔으로 바로 끝난다.
+        # 슬랙 슬롯 행만 들어가므로 테이블이 커져도 인덱스는 작게 유지된다.
+        _exec_retry(
+            bind,
+            "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_notification_logs_biz_alert_latest "
+            "ON notification.notification_logs (created_at DESC, event_id DESC) "
+            "WHERE channel = 'slack' AND recipient_email = 'slack-business-alerts'",
+        )
     finally:
         bind.execute(text(f"SET lock_timeout = '{previous}'"))
 
@@ -132,6 +145,10 @@ def _downgrade_all() -> None:
     bind.execute(text(f"SET lock_timeout = '{LOCK_TIMEOUT}'"))
     try:
         _exec_retry(bind, "DROP INDEX CONCURRENTLY IF EXISTS usage.idx_cost_dead_letters_created")
+        _exec_retry(
+            bind,
+            "DROP INDEX CONCURRENTLY IF EXISTS notification.idx_notification_logs_biz_alert_latest",
+        )
         _exec_retry(
             bind,
             "ALTER TABLE notification.notification_configs DROP COLUMN IF EXISTS config",

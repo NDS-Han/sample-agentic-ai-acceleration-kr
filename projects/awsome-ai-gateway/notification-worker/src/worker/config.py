@@ -4,8 +4,11 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from pydantic import SecretStr, field_validator
+import structlog
+from pydantic import SecretStr, ValidationInfo, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+logger = structlog.get_logger(__name__)
 
 # 흔히 쓰는 비-IANA 약어/레거시 alias → 정규 IANA 이름 힌트 (검증은 그대로 엄격하게
 # 유지하되, 실수했을 때 바로 고칠 수 있도록 에러 메시지에 제안을 붙인다).
@@ -157,9 +160,9 @@ class Settings(BaseSettings):
         "slack_send_timeout_seconds",
     )
     @classmethod
-    def _positive_seconds(cls, v: float) -> float:
+    def _positive_seconds(cls, v: float, info: ValidationInfo) -> float:
         if v <= 0:
-            raise ValueError("business alert/Slack timeout intervals must be positive")
+            return _warn_and_default(cls, info, v, "must be positive")
         return v
 
     @field_validator(
@@ -168,16 +171,16 @@ class Settings(BaseSettings):
         "business_alert_reconciliation_mismatch_min_count",
     )
     @classmethod
-    def _positive_count(cls, v: int) -> int:
+    def _positive_count(cls, v: int, info: ValidationInfo) -> int:
         if v < 1:
-            raise ValueError("business alert count thresholds must be >= 1")
+            return _warn_and_default(cls, info, v, "must be >= 1")
         return v
 
     @field_validator("business_alert_reconciliation_mismatch_min_pct")
     @classmethod
-    def _pct_range(cls, v: float) -> float:
+    def _pct_range(cls, v: float, info: ValidationInfo) -> float:
         if not 0 <= v <= 100:
-            raise ValueError("business alert reconciliation min pct must be between 0 and 100")
+            return _warn_and_default(cls, info, v, "must be between 0 and 100")
         return v
 
     @field_validator("reporting_timezone")
@@ -201,6 +204,23 @@ class Settings(BaseSettings):
     otel_exporter_otlp_endpoint: str = "http://otel-collector:4317"
     otel_service_name: str = "notification-worker"
     otel_traces_sampler_arg: float = 1.0
+
+
+def _warn_and_default(cls, info: ValidationInfo, value, rule: str):
+    """잘못된 BUSINESS_ALERT_*/Slack 설정값 — 기동 크래시 대신 경고 + 기본값 폴백.
+
+    알림 워커가 한 env 오타로 crashloop 하면 이메일(예산 알림)까지 멈춘다. 경고를
+    남기고 선언된 필드 기본값으로 계속 기동한다.
+    """
+    default = cls.model_fields[info.field_name].default
+    logger.warning(
+        "invalid_business_alert_config_fallback",
+        field=info.field_name,
+        value=repr(value),
+        rule=rule,
+        fallback=repr(default),
+    )
+    return default
 
 
 @lru_cache

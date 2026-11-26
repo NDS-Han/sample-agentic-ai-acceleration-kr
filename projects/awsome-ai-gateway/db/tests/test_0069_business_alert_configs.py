@@ -15,13 +15,14 @@ _MIG_PATH = _DB / "versions" / "0069_business_alert_configs.py"
 _MIG = _MIG_PATH.read_text()
 _SEED = (_DB / "init" / "06_seed_notification_configs.sql").read_text()
 _INIT_TABLES = (_DB / "init" / "02_create_tables.sql").read_text()
+_NOTIF_SCHEMA = (_DB / "init" / "05_create_notification_schema.sql").read_text()
 _GRANTS = (_DB / "init" / "07_grant_notification_privileges.sql").read_text()
 PG_URL = os.environ.get("MIGRATION_PG_URL")
 
 
 def test_revision_chain():
     assert re.search(r'^revision = "0069"$', _MIG, re.M)
-    assert re.search(r'^down_revision = "0063"$', _MIG, re.M)
+    assert re.search(r'^down_revision = "0065"$', _MIG, re.M)
 
 
 def test_business_alert_rows_are_seeded_disabled_in_migration_and_init():
@@ -47,6 +48,9 @@ def test_lock_safe_and_concurrent_index():
     assert "CREATE INDEX CONCURRENTLY" in _MIG
     assert "idx_cost_dead_letters_created" in _MIG
     assert "idx_cost_dead_letters_created" in _INIT_TABLES
+    # 최근 발송행 조회용 부분 인덱스 — 마이그레이션과 init 스키마 양쪽에 있어야 한다.
+    assert "idx_notification_logs_biz_alert_latest" in _MIG
+    assert "idx_notification_logs_biz_alert_latest" in _NOTIF_SCHEMA
 
 
 def test_notification_worker_usage_read_grants_are_in_migration_and_init():
@@ -101,7 +105,7 @@ def test_up_down_roundtrip_real_pg():
         "AND c.relname='idx_cost_dead_letters_created'"
     ).stdout.strip() == "t"
 
-    _alembic("downgrade", "0063")
+    _alembic("downgrade", "0065")
     assert _psql(
         "SELECT EXISTS (SELECT 1 FROM information_schema.columns "
         "WHERE table_schema='notification' AND table_name='notification_configs' "

@@ -52,4 +52,9 @@ CREATE INDEX IF NOT EXISTS ix_notification_logs_status
 CREATE INDEX IF NOT EXISTS ix_notification_logs_created_at
     ON notification.notification_logs(created_at);
 
+-- business alert 최근 발송행 조회(business_alert_handler._latest_slot_row) — 0069 와 동기화.
+CREATE INDEX IF NOT EXISTS idx_notification_logs_biz_alert_latest
+    ON notification.notification_logs(created_at DESC, event_id DESC)
+    WHERE channel = 'slack' AND recipient_email = 'slack-business-alerts';
+
 -- NOTE: auth.teams.leader_user_id는 02_create_tables.sql에서 이미 선언됨.
