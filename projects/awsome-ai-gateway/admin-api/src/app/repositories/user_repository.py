@@ -373,14 +373,49 @@ class UserRepository:
                 }
         return result
 
-    async def deactivate_missing_oidc_users(
+    async def find_missing_oidc_users(
         self, seen_subjects: set[str], provider: str
+    ) -> list:
+        """sync_all reconcile 비활성화 후보의 경량 조회 — bulk UPDATE 전에 ADMIN
+        보호 가드가 후보를 분류할 수 있게 한다. 반환 행은 id/role/is_service_account/
+        sso_subject/email/team_id 만 담은 SimpleNamespace(ORM 로드 없음)."""
+        if seen_subjects:
+            subject_filter = User.sso_subject != all_(
+                bindparam("seen", value=list(seen_subjects), type_=ARRAY(String))
+            )
+        else:
+            subject_filter = User.sso_subject.isnot(None)
+        stmt = (
+            select(
+                User.id, User.role, User.is_service_account,
+                User.sso_subject, User.email, User.team_id, User.is_active,
+            )
+            .where(User.provider == provider)
+            .where(User.is_active.is_(True))
+            .where(subject_filter)
+        )
+        result = await self._session.execute(stmt)
+        return [
+            SimpleNamespace(
+                id=r.id, role=r.role, is_service_account=r.is_service_account,
+                sso_subject=r.sso_subject, email=r.email, team_id=r.team_id,
+                is_active=r.is_active,
+            )
+            for r in result.all()
+        ]
+
+    async def deactivate_missing_oidc_users(
+        self, seen_subjects: set[str], provider: str,
+        exclude_ids: set[uuid.UUID] | None = None,
     ) -> list[uuid.UUID]:
         """provider 유저 중 seen_subjects 에 없고 현재 활성인 유저를 bulk 비활성화.
 
         sync_all reconcile 전용. ORM 객체를 로드하지 않고 단일 UPDATE 로 처리해
         1만+ 유저 로드 시의 메모리 폭발을 회피한다. 비활성화된 user id 목록을
         반환한다 — 호출자가 이 id 로 VK 폐기(R3-3)를 이어서 수행한다.
+
+        ``exclude_ids`` — ADMIN 보호 가드가 skip 을 결정한 유저. 보호 대상은
+        이 UPDATE 에서 빼야 감사 행의 skip 과 실제 DB 상태가 어긋나지 않는다.
         """
         if seen_subjects:
             subject_filter = User.sso_subject != all_(
@@ -397,6 +432,8 @@ class UserRepository:
             .returning(User.id)
             .execution_options(synchronize_session=False)
         )
+        if exclude_ids:
+            stmt = stmt.where(User.id.notin_(list(exclude_ids)))
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
 

@@ -43,6 +43,8 @@ ACTION_GROUPS: dict[str, tuple[str, ...]] = {
         "COGNITO_SYNC_USER",
         "COGNITO_SYNC_GROUP",
         "AICM_ADMIN_TARGET_REFUSED",
+        "AICM_SYNC_ADMIN_CHANGE_SKIPPED",
+        "HUMAN_SYNC_LAST_ADMIN_CHANGE_SKIPPED",
     ),
     "access_policy": (
         "SET_TEAM_ALLOWED_MODELS",

@@ -156,6 +156,72 @@ class SyncResult:
     # commit-후 규약으로 drain 한다.
     pending_cache_patterns: list[str] = field(default_factory=list)
     pending_cache_ops: list = field(default_factory=list)
+    # ADMIN 보호 가드가 skip 한 변경 — user_id(uuid) → {action, reason,
+    # skipped_changes, cognito}. 응답 계약에는 노출하지 않는다(내부 감사 버퍼).
+    # 한 sync 에서 유저당 1행의 감사를 쓰기 위해 단계 간 병합되고, 각 public
+    # sync 메서드가 마지막 commit 전에 _flush_skip_audits 로 기록한다.
+    admin_skips: dict = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class SyncCaller:
+    """sync 를 trigger 한 호출자 분류 — ADMIN 보호 가드의 판정 근거.
+
+    ``is_integration=True`` 는 /aicm/v1 mirror 의 scoped svc 토큰 호출뿐이다
+    (라우터가 ``request.state.integration_principal`` 로 판정 — 경로 문자열이
+    아니라 인증 주체). AICM sync 는 기존 ADMIN 의 role/team/identity/active 를
+    절대 후퇴시키지 않는다. 사람 admin sync(None 또는 is_integration=False)는
+    기존 동작을 유지하되 마지막 활성 사람 ADMIN 의 강등/비활성화만 막는다.
+    """
+
+    is_integration: bool
+    actor_user_id: uuid.UUID
+    actor_role: str = "ADMIN"
+    service_token_id: uuid.UUID | None = None
+    ip_address: str = "0.0.0.0"
+    request_id: str = ""
+
+
+#: 감사 액션 — audit_catalog.users_org 에도 등록돼 있어야 UI 필터가 맞는다.
+ACTION_AICM_ADMIN_SKIP = "AICM_SYNC_ADMIN_CHANGE_SKIPPED"
+ACTION_HUMAN_LAST_ADMIN_SKIP = "HUMAN_SYNC_LAST_ADMIN_CHANGE_SKIPPED"
+
+
+def _record_admin_skip(
+    target: dict, *, user_id, action: str, reason: str,
+    changes: dict, cognito: dict,
+) -> None:
+    """skip 버퍼(plain dict)에 병합 — 한 sync 의 여러 단계(upsert/reconcile/
+    stale-team)가 같은 유저를 skip 해도 감사는 유저당 1행이 되도록 키 단위로
+    합친다.
+
+    ⚠️ per-user savepoint 안에서는 ``result.admin_skips`` 에 직접 쓰지 않는다 —
+    dict 는 트랜잭션을 모르는 파이썬 객체라 savepoint 롤백 후에도 엔트리가
+    남아, 실제로는 실패한 upsert 에 대한 skip 감사가 커밋된다. 호출부가 준
+    로컬 ``skip_out`` 에 쓰고 savepoint 성공 후 ``_merge_skip_records`` 로
+    이관한다(``revoked_out``/``cache_out`` 과 같은 규약, R16-V2)."""
+    rec = target.get(user_id)
+    if rec is None:
+        rec = {
+            "action": action, "reason": reason,
+            "skipped_changes": {}, "cognito": {},
+        }
+        target[user_id] = rec
+    rec["skipped_changes"].update(changes)
+    for k, v in cognito.items():
+        rec["cognito"].setdefault(k, v)
+
+
+def _merge_skip_records(dst: dict, src: dict) -> None:
+    """savepoint 를 무사히 빠져나온 로컬 skip 버퍼를 result 버퍼로 이관."""
+    for uid, rec in src.items():
+        existing = dst.get(uid)
+        if existing is None:
+            dst[uid] = rec
+        else:
+            existing["skipped_changes"].update(rec["skipped_changes"])
+            for k, v in rec["cognito"].items():
+                existing["cognito"].setdefault(k, v)
 
 
 @dataclass
@@ -174,6 +240,12 @@ class CognitoSyncService:
     # pg advisory lock key — sync_all 상호배제(R3-9). 동시에 2개의 sync_all 이
     # 돌면 reconcile 단계가 서로의 seen 집합을 모른 채 활성 유저를 비활성화한다.
     _SYNC_LOCK_KEY = 0xC0A910  # 임의 상수
+    # 마지막 사람 ADMIN 판정의 상호배제 — xact 락이라 commit/rollback 시 자동
+    # 해제. 반드시 **행 잠금 전에** 잡는다(락 순서: advisory → row). upsert 경로는
+    # pre-lock 읽기에서 guard 필요가 보일 때 row 잠금보다 먼저 잡고, bulk
+    # reconcile 도 UPDATE 전에 잡는다 — 순서가 뒤집히는 경로가 있으면
+    # single-user sync 와 full sync reconcile 이 교차 대기로 deadlock 난다.
+    _LAST_ADMIN_LOCK_KEY = 0xC0A911
 
     def __init__(self, cognito_client, key_service=None, cache_mgr=None) -> None:
         self._cognito = cognito_client
@@ -263,7 +335,94 @@ class CognitoSyncService:
                 result.errors.append(f"Post-commit transfer op failed: {e}")
         await self._finalize_revoked_keys(session, pending, result)
 
-    async def sync_all(self, session) -> SyncResult:
+    # ── ADMIN 보호 가드 (cognito-sync-admin-guard) ──
+    # AICM(mirror integration) sync 는 기존 ADMIN 의 접근을 절대 후퇴시키지
+    # 않고, 사람 admin sync 는 마지막 활성 사람 ADMIN 의 강등/비활성화만 막는다.
+    # 두 가드 모두 "skip 된 변경만" 제외하고 나머지 sync 는 그대로 적용한다.
+
+    async def _flush_skip_audits(self, session, result: SyncResult, caller) -> None:
+        """skip 버퍼의 감사 행을 세션에 기록하고 버퍼를 비운다 — 유저당 1행.
+        호출부는 반드시 commit 전에 호출해야 행이 영속된다(세션-바운드 감사)."""
+        if not result.admin_skips:
+            return
+        from app.core.audit import audit_logger
+
+        if caller is not None:
+            actor_id, actor_role = caller.actor_user_id, caller.actor_role
+            stid, ip, rid = caller.service_token_id, caller.ip_address, caller.request_id
+        else:
+            # caller 를 넘기지 않는 레거시 호출(provision 등). 사실상 도달하지
+            # 않지만, 기록이 필요해지면 행위자를 시스템 bootstrap 으로 남긴다.
+            actor_id, actor_role = uuid.UUID("00000000-0000-4000-a000-000000000010"), "ADMIN"
+            stid, ip, rid = None, "0.0.0.0", ""
+        for uid, rec in result.admin_skips.items():
+            await audit_logger.log(
+                session,
+                actor_user_id=actor_id,
+                actor_role=actor_role,
+                service_token_id=stid,
+                action=rec["action"],
+                resource_type="User",
+                resource_id=str(uid),
+                changes={
+                    "reason": rec["reason"],
+                    "skipped_changes": rec["skipped_changes"],
+                    "cognito": rec["cognito"],
+                },
+                ip_address=ip,
+                request_id=rid,
+            )
+        result.admin_skips = {}
+
+    async def _acquire_last_admin_lock(self, session) -> None:
+        """마지막 사람 ADMIN 판정의 상호배제 락. 같은 트랜잭션의 재획득은 no-op."""
+        from sqlalchemy import text
+
+        await session.execute(
+            text("SELECT pg_advisory_xact_lock(:k)"),
+            {"k": self._LAST_ADMIN_LOCK_KEY},
+        )
+
+    async def _count_active_human_admins(self, session) -> int:
+        """활성·비서비스계정·비시스템 ADMIN 수. 마지막 사람 ADMIN 판정의 기준."""
+        from sqlalchemy import func, select
+
+        from app.services.protected_targets import SYSTEM_USER_IDS
+
+        stmt = select(func.count(User.id)).where(
+            User.role == UserRole.ADMIN,
+            User.is_active.is_(True),
+            User.is_service_account.is_(False),
+            User.id.notin_(list(SYSTEM_USER_IDS)),
+        )
+        return int((await session.execute(stmt)).scalar() or 0)
+
+    def _is_human_admin(self, user) -> bool:
+        from app.services.protected_targets import SYSTEM_USER_IDS
+
+        return (
+            user.role == UserRole.ADMIN
+            and user.is_active
+            and not getattr(user, "is_service_account", False)
+            and user.id not in SYSTEM_USER_IDS
+        )
+
+    async def _last_human_admin_blocks(self, session, user) -> bool:
+        """user 가 마지막 활성 사람 ADMIN 이면 True — 강등/비활성화 금지.
+
+        락을 잡은 뒤 count 한다. READ COMMITTED 라 count 는 락 획득 시점의 새
+        스냅샷을 본다 — 앞선 sync 의 커밋된 강등/비활성화가 반영된다. 테스트
+        더블 세션(AsyncMock)은 락을 걸 수 없어 guard 를 적용하지 않는다 —
+        기존 unit 테스트 동작 유지, 실경로는 real-Postgres 회귀 테스트가 커버.
+        """
+        if not self._is_human_admin(user):
+            return False
+        if not isinstance(session, AsyncSession):
+            return False
+        await self._acquire_last_admin_lock(session)
+        return (await self._count_active_human_admins(session)) <= 1
+
+    async def sync_all(self, session, *, caller=None) -> SyncResult:
         """Cognito 에서 그룹/사용자를 가져와 DB 동기화.
 
         흐름:
@@ -358,7 +517,7 @@ class CognitoSyncService:
                 return result
 
         try:
-            return await self._sync_all_locked(session, settings, result)
+            return await self._sync_all_locked(session, settings, result, caller=caller)
         finally:
             if lock_acquired:
                 # tx 블록 종료(commit/rollback)가 xact 락을 자동 해제하고,
@@ -378,7 +537,7 @@ class CognitoSyncService:
                         "cognito_sync.advisory_unlock_failed", exc_info=True
                     )
 
-    async def _sync_all_locked(self, session, settings, result) -> SyncResult:
+    async def _sync_all_locked(self, session, settings, result, caller=None) -> SyncResult:
 
         repo = UserRepository(session)
         user_pool_id = settings.COGNITO_USER_POOL_ID
@@ -534,21 +693,26 @@ class CognitoSyncService:
                 async with session.begin_nested():
                     revoked_local: list = []
                     cache_local = {"keys": [], "patterns": [], "ops": []}
+                    skip_local: dict = {}
                     await self._upsert_one_user(
                         repo, session, sub=sub, email=email, name=name, enabled=enabled,
                         team_id=team_id, role=role, result=result,
                         email_verified=email_verified,
                         revoked_out=revoked_local,
                         cache_out=cache_local,
+                        caller=caller,
+                        skip_out=skip_local,
                     )
                 # savepoint 성공 후에만 이관 — 롤백된 upsert 의 폐기 해시가
                 # 남으면 DB ACTIVE 인 키를 커밋 후 DEL 하게 된다. 이관 캐시
                 # 작업도 마찬가지 — 롤백된 팀 이동의 DEL/swap 이 돌면 옛 팀
-                # 정책이 지워져 VK·정책이 어긋난다(R16-V2).
+                # 정책이 지워져 VK·정책이 어긋난다(R16-V2). skip 감사 버퍼도
+                # 같은 규약 — 롤백된 upsert 의 skip 기록이 커밋되면 안 된다.
                 result.pending_key_revocations.extend(revoked_local)
                 result.pending_cache_deletes.extend(cache_local["keys"])
                 result.pending_cache_patterns.extend(cache_local["patterns"])
                 result.pending_cache_ops.extend(cache_local["ops"])
+                _merge_skip_records(result.admin_skips, skip_local)
             except Exception as e:
                 result.errors.append(f"Failed to sync user {email}: {e}")
 
@@ -583,8 +747,55 @@ class CognitoSyncService:
         #    fetch 가 불완전하면(reconcile_incomplete) 이 단계는 절대 돌리지 않는다.
         if settings.COGNITO_SYNC_DEACTIVATE_MISSING and not reconcile_incomplete:
             try:
-                deactivated_ids = await repo.deactivate_missing_oidc_users(
+                # ADMIN 보호 가드 — bulk UPDATE 전에 후보를 분류한다.
+                # · AICM(integration): 기존 ADMIN 은 사람/서비스계정을 가리지 않고
+                #   절대 비활성화하지 않는다(유저당 1건의 skip 감사).
+                # · 사람 admin: 마지막 활성 사람 ADMIN 이 0이 되지 않도록 후보 중
+                #   일부를 skip 한다. 상호배제 락 안에서 count 하므로 동시 sync 가
+                #   마지막 두 admin 을 동시에 지우는 경합이 없다.
+                exclude_ids: set[uuid.UUID] = set()
+                is_integration = caller is not None and caller.is_integration
+                candidates = await repo.find_missing_oidc_users(
                     seen_sso_subjects, settings.OIDC_PROVIDER_NAME
+                )
+                admin_candidates = [c for c in candidates if c.role == UserRole.ADMIN]
+                if is_integration:
+                    for c in admin_candidates:
+                        exclude_ids.add(c.id)
+                        _record_admin_skip(
+                            result.admin_skips, user_id=c.id, action=ACTION_AICM_ADMIN_SKIP,
+                            reason="aicm_sync_never_deactivates_admin",
+                            changes={"is_active": {"from": True, "to": False}},
+                            cognito={"missing": True, "sso_subject": c.sso_subject},
+                        )
+                elif admin_candidates and isinstance(session, AsyncSession):
+                    human_candidates = sorted(
+                        (c for c in admin_candidates if self._is_human_admin(c)),
+                        key=lambda c: str(c.id),
+                    )
+                    if human_candidates:
+                        # 락 → count 순서가 핵심: 락 해제(앞선 sync 의 commit) 후
+                        # 새 스냅샷으로 세야 마지막 admin 판정이 정확하다.
+                        await self._acquire_last_admin_lock(session)
+                        total = await self._count_active_human_admins(session)
+                        # 최소 1명은 활성 사람 ADMIN 으로 남긴다 — 초과분만 skip.
+                        allowed = max(total - 1, 0)
+                        for c in human_candidates[allowed:]:
+                            exclude_ids.add(c.id)
+                            logger.warning(
+                                "cognito_sync.last_human_admin_protected",
+                                user_id=str(c.id), email=c.email, phase="reconcile",
+                            )
+                            _record_admin_skip(
+                                result.admin_skips, user_id=c.id,
+                                action=ACTION_HUMAN_LAST_ADMIN_SKIP,
+                                reason="last_human_admin_protected",
+                                changes={"is_active": {"from": True, "to": False}},
+                                cognito={"missing": True, "sso_subject": c.sso_subject},
+                            )
+                deactivated_ids = await repo.deactivate_missing_oidc_users(
+                    seen_sso_subjects, settings.OIDC_PROVIDER_NAME,
+                    exclude_ids=exclude_ids,
                 )
                 result.users_deactivated += len(deactivated_ids)
                 # R3-3: 비활성화된 유저의 ACTIVE VK 도 함께 폐기 — 같은 트랜잭션에서
@@ -664,6 +875,26 @@ class CognitoSyncService:
                     ]
                     for member in moved:
                         member_id = member.id
+                        # AICM sync 는 기존 ADMIN 의 팀도 옮기지 않는다 — 팀 이관은
+                        # 예산/레이트리밋 비활성화·캐시 무효화 부수효과를 동반하는
+                        # 접근 영향 변경이라, Cognito 에 팀이 안 보인다는 이유만으로
+                        # ADMIN 에게 적용할 수 없다. skip 은 upsert 단계의 기록과
+                        # 병합돼 유저당 1건의 감사가 된다.
+                        if (
+                            caller is not None and caller.is_integration
+                            and member.role == UserRole.ADMIN
+                        ):
+                            _record_admin_skip(
+                                result.admin_skips, user_id=member_id,
+                                action=ACTION_AICM_ADMIN_SKIP,
+                                reason="aicm_sync_never_moves_admin_team",
+                                changes={"team_id": {
+                                    "from": str(stale_team_id),
+                                    "to": str(default_team_id),
+                                }},
+                                cognito={"stale_team_cleanup": True},
+                            )
+                            continue
                         # 사용자 이관과 같은 부수효과(R16) — 과거엔 team_id 만
                         # 바꿔 개별 예산/RL·VK·rl:config 캐시·역인덱스가 옛 팀
                         # 정책으로 살아남았다.
@@ -733,6 +964,9 @@ class CognitoSyncService:
             except Exception as e:
                 result.errors.append(f"Failed to clean stale teams: {e}")
 
+        # skip 감사는 마지막 commit 에 태운다 — upsert/reconcile/stale-team 단계를
+        # 합쳐 유저당 1행. 중간 배치 commit 에는 태우지 않는다(병합이 끝나지 않았으므로).
+        await self._flush_skip_audits(session, result, caller)
         await session.commit()
         # stale-team 이관이 수집한 캐시 작업(DEL·패턴·역인덱스 스왑)은 commit 후에만
         # 적용 가능 — 여기서 drain 하지 않으면 수집만 하고 버려진다(R16-V1).
@@ -762,6 +996,8 @@ class CognitoSyncService:
         revoked_out: list,
         cache_out: dict,
         preserve_existing_team: bool = False,
+        caller=None,
+        skip_out: dict | None = None,
     ) -> User:
         """단일 사용자 upsert. sync_all 의 163-217 블록과 동일 규약(get_by_sso_subject
         → get_by_email fallback(재생성 시 새 sub 재조정) → 없으면 create).
@@ -798,6 +1034,22 @@ class CognitoSyncService:
                         f"email_unverified: {email} 은 Cognito 에서 미검증이라 "
                         "기존 계정과 연결하지 않는다"
                     )
+                if (
+                    caller is not None and caller.is_integration
+                    and by_email.role == UserRole.ADMIN
+                ):
+                    # ADMIN 계정의 identity(sso_subject) 재연결은 계정 인수와 같은
+                    # 접근 영향 변경 — AICM sync 는 링크하지 않는다. 사람 admin 은
+                    # /admin 표면에서 기존대로 수행할 수 있다.
+                    logger.warning(
+                        "cognito_sync.admin_identity_link_refused",
+                        email=email, existing_user_id=str(by_email.id),
+                        new_sso_subject=sub,
+                    )
+                    raise ValueError(
+                        f"admin_identity_link_refused: {email} — AICM sync 는 "
+                        "ADMIN 의 identity 를 재연결하지 않는다"
+                    )
                 logger.info(
                     "cognito_sync.sso_subject_reconciled",
                     user_id=str(by_email.id), email=email,
@@ -823,6 +1075,23 @@ class CognitoSyncService:
             result.users_created += 1
             return new_user
         else:
+            integration = caller is not None and caller.is_integration
+            # 마지막 사람 ADMIN 판정의 락 순서는 advisory → row 여야 한다.
+            # pre-lock 읽기에서 "활성 사람 ADMIN 의 접근이 줄어든다"가 보이면
+            # 행 잠금보다 먼저 락을 잡는다 — bulk reconcile(락 → UPDATE 행 잠금)
+            # 과 교차 대기하지 않도록. 근사치(스테일일 수 있는 pre-lock 상태)로
+            # 보수적으로 잡는 것은 무해하다 — 같은 트랜잭션의 재획득은 no-op.
+            if (
+                caller is None or not integration
+            ) and isinstance(session, AsyncSession) and self._is_human_admin(existing):
+                pre_kept = (
+                    existing.team_id
+                    if (preserve_existing_team or existing.team_source == "manual")
+                    else team_id
+                )
+                pre_role = _effective_role(existing.role, existing.team_id, role, pre_kept)
+                if not enabled or pre_role != UserRole.ADMIN:
+                    await self._acquire_last_admin_lock(session)
             # 잠금+최신화 — 관리자의 수동 이관(transfer_user 는 FOR UPDATE)과
             # 동기화가 동시에 쓰면 스테일 스냅샷 기준 manual 가드가 수동 배정을
             # 되돌린다(R21 r3 S2). populate_existing 이 미플러시 변경
@@ -836,14 +1105,29 @@ class CognitoSyncService:
                 )
                 if locked is not None:
                     existing = locked
-            # 미검증 이메일은 DB 에 싣지 않는다 — 저장된 주소는 ADMIN_EMAILS
-            # 폴백 매칭·이메일 조회의 신뢰 근거다.
-            if email and email_verified and existing.email != email:
-                existing.email = email
-                updated = True
-            if existing.display_name != name:
-                existing.display_name = name
-                updated = True
+
+            # ── ADMIN 보호 가드 ──
+            # AICM(integration): 기존 ADMIN 의 접근 영향 변경(email identity·team·
+            # role·is_active=False)은 전부 skip — 적용되는 건 display_name 같은
+            # 비권한 필드와 재활성화(접근 복구)뿐. 사람 admin: 기존 동작을 유지하되
+            # 마지막 활성 사람 ADMIN 의 강등/비활성화만 skip 한다.
+            target_admin = existing.role == UserRole.ADMIN
+            derived_role_value = role.value if hasattr(role, "value") else str(role)
+            skip_changes: dict = {}
+            cognito_info = {
+                "enabled": enabled,
+                "email": email,
+                "sso_subject": sub,
+                "derived_role": derived_role_value,
+                "derived_team_id": str(team_id),
+            }
+
+            want_email = bool(email) and email_verified and existing.email != email
+            apply_email = want_email
+            if want_email and integration and target_admin:
+                apply_email = False
+                skip_changes["email"] = {"from": existing.email, "to": email}
+
             # role 판정의 "새 팀" 은 실제로 적용될 팀이어야 한다 — manual/preserve
             # 면 팀이 안 바뀌는데 요청 team_id 기준으로 강등하면 안 된다.
             kept_team = (
@@ -852,17 +1136,79 @@ class CognitoSyncService:
                 else team_id
             )
             role = _effective_role(existing.role, existing.team_id, role, kept_team)
+
+            want_team = (
+                existing.team_id != team_id
+                and existing.team_source != "manual"
+                and not preserve_existing_team
+            )
+            apply_team = want_team
+            if want_team and integration and target_admin:
+                apply_team = False
+                skip_changes["team_id"] = {
+                    "from": str(existing.team_id), "to": str(team_id),
+                }
+
+            want_role = existing.role != role
+            apply_role = want_role
+            want_deactivate = existing.is_active and not enabled
+            apply_active = existing.is_active != enabled
+
+            if target_admin and (want_role or want_deactivate):
+                if integration:
+                    if want_role:
+                        apply_role = False
+                        skip_changes["role"] = {
+                            "from": existing.role.value, "to": role.value,
+                        }
+                    if want_deactivate:
+                        apply_active = False
+                        skip_changes["is_active"] = {"from": True, "to": False}
+                elif await self._last_human_admin_blocks(session, existing):
+                    logger.warning(
+                        "cognito_sync.last_human_admin_protected",
+                        user_id=str(existing.id), email=existing.email,
+                        demote=want_role, deactivate=want_deactivate,
+                    )
+                    if want_role:
+                        apply_role = False
+                        skip_changes["role"] = {
+                            "from": existing.role.value, "to": role.value,
+                        }
+                    if want_deactivate:
+                        apply_active = False
+                        skip_changes["is_active"] = {"from": True, "to": False}
+
+            if skip_changes:
+                action = (
+                    ACTION_AICM_ADMIN_SKIP if integration
+                    else ACTION_HUMAN_LAST_ADMIN_SKIP
+                )
+                reason = (
+                    "aicm_sync_never_demotes_admin" if integration
+                    else "last_human_admin_protected"
+                )
+                _record_admin_skip(
+                    skip_out if skip_out is not None else result.admin_skips,
+                    user_id=existing.id, action=action, reason=reason,
+                    changes=skip_changes, cognito=cognito_info,
+                )
+
+            # 미검증 이메일은 DB 에 싣지 않는다 — 저장된 주소는 ADMIN_EMAILS
+            # 폴백 매칭·이메일 조회의 신뢰 근거다.
+            if apply_email:
+                existing.email = email
+                updated = True
+            if existing.display_name != name:
+                existing.display_name = name
+                updated = True
             # 수동 배정(team_source='manual')은 sync 가 되돌리지 않는다 —
             # OIDC 로그인 경로(_upsert_user)와 같은 규칙(migration 0048).
             # preserve_existing_team(sync_group): 단일 그룹 시야로 기존 유저를
             # 그 팀으로 옮기면 복수 그룹 소속 유저가 마지막 실행 그룹에 따라
             # 팀을 오간다 — 기존 유저의 팀은 전체 그룹이 보이는 경로(sync_all/
             # login)만 바꾼다(R21 S11).
-            if (
-                existing.team_id != team_id
-                and existing.team_source != "manual"
-                and not preserve_existing_team
-            ):
+            if apply_team:
                 # transfer_user(user_team_service)와 같은 이관 부수효과(R16) —
                 # 과거엔 team_id 만 바꿔서 ①개별 USER 예산/app 예산이 새 팀에서도
                 # 그대로 따라다니고 ②개별 레이트리밋 설정이 잔존하고 ③게이트웨이
@@ -891,11 +1237,11 @@ class CognitoSyncService:
                 existing.team_id = team_id
                 existing.team_source = "sync"
                 updated = True
-            if existing.role != role:
+            if apply_role:
                 existing.role = role
                 updated = True
-            deactivated = existing.is_active and not enabled
-            if existing.is_active != enabled:
+            deactivated = apply_active and existing.is_active and not enabled
+            if apply_active:
                 existing.is_active = enabled
                 updated = True
             if updated:
@@ -978,7 +1324,8 @@ class CognitoSyncService:
         return uuid.UUID(settings.DEFAULT_TEAM_ID)
 
     async def sync_user(
-        self, session, username: str, *, commit: bool = True, deactivate_missing: bool = True
+        self, session, username: str, *, commit: bool = True, deactivate_missing: bool = True,
+        caller=None,
     ) -> SyncResult:
         """단일 사용자만 동기화. DB 에 없어도 신규 생성(고객 명시 케이스).
 
@@ -1013,7 +1360,9 @@ class CognitoSyncService:
             # 에러가 아니라 DB soft-delete(is_active=False). Cognito 삭제 후엔 sub 를
             # 알 수 없으므로 email(=username) 로 조회. email 충돌 사고 방지를 위해
             # OIDC provider 유저에 한해 비활성화(sync_all 비활성화 원칙과 동일).
-            await self._deactivate_missing_user(repo, session, username, result)
+            await self._deactivate_missing_user(
+                repo, session, username, result, caller=caller
+            )
             return result
 
         sub = self._get_attr_admin(cu, "sub") or cu.get("Username") or username
@@ -1059,22 +1408,27 @@ class CognitoSyncService:
         try:
             revoked_local: list = []
             cache_local = {"keys": [], "patterns": [], "ops": []}
+            skip_local: dict = {}
             user = await self._upsert_one_user(
                 repo, session, sub=sub, email=email, name=name, enabled=enabled,
                 team_id=team_id, role=role, result=result,
                 email_verified=email_verified,
                 revoked_out=revoked_local,
                 cache_out=cache_local,
+                caller=caller,
+                skip_out=skip_local,
             )
             result.pending_key_revocations.extend(revoked_local)
             result.pending_cache_deletes.extend(cache_local["keys"])
             result.pending_cache_patterns.extend(cache_local["patterns"])
             result.pending_cache_ops.extend(cache_local["ops"])
+            _merge_skip_records(result.admin_skips, skip_local)
             result.user_id = str(user.id)
         except Exception as e:
             result.errors.append(f"Failed to upsert user {email or username}: {e}")
 
         if commit:
+            await self._flush_skip_audits(session, result, caller)
             await session.commit()
             await self._flush_pending_revocations(session, result)
         logger.info(
@@ -1086,6 +1440,7 @@ class CognitoSyncService:
 
     async def _deactivate_missing_user(
         self, repo: UserRepository, session, username: str, result: SyncResult,
+        caller=None,
     ) -> None:
         """Cognito 에 없는 사용자를 DB 에서 email(=username) 로 찾아 soft-delete.
 
@@ -1153,6 +1508,32 @@ class CognitoSyncService:
                 )
                 return
 
+            # ADMIN 보호 가드 — Cognito 삭제 통지도 ADMIN 을 비활성화하지 않는다.
+            integration = caller is not None and caller.is_integration
+            skip_action = None
+            if integration and user.role == UserRole.ADMIN:
+                skip_action = ACTION_AICM_ADMIN_SKIP
+                skip_reason = "aicm_sync_never_deactivates_admin"
+            elif not integration and await self._last_human_admin_blocks(session, user):
+                skip_action = ACTION_HUMAN_LAST_ADMIN_SKIP
+                skip_reason = "last_human_admin_protected"
+            if skip_action is not None:
+                logger.warning(
+                    "cognito_sync.admin_deactivate_skipped",
+                    username=username, user_id=str(user.id), action=skip_action,
+                )
+                _record_admin_skip(
+                    result.admin_skips, user_id=user.id, action=skip_action,
+                    reason=skip_reason,
+                    changes={"is_active": {"from": True, "to": False}},
+                    cognito={"missing": True, "username": username},
+                )
+                # 이 경로는 비활성화 커밋에 도달하지 않으므로 skip 감사를 위해
+                # 자체 커밋이 필요하다 — 변경은 감사 행뿐이라 커밋은 무해하다.
+                await self._flush_skip_audits(session, result, caller)
+                await session.commit()
+                return
+
             user.is_active = False
             result.users_deactivated += 1
             # R3-3: 비활성화와 같은 트랜잭션에서 ACTIVE VK 폐기. 부수효과는
@@ -1188,7 +1569,7 @@ class CognitoSyncService:
                 provider=user.provider, is_active=user.is_active,
             )
 
-    async def sync_group(self, session, group_name: str) -> SyncResult:
+    async def sync_group(self, session, group_name: str, *, caller=None) -> SyncResult:
         """단일 그룹만 동기화: 팀 확보 + 그 그룹 멤버 upsert. 전역 정리 없음."""
         settings = get_settings()
         result = SyncResult()
@@ -1253,8 +1634,14 @@ class CognitoSyncService:
                 email_verified=email_verified,
             )
             snap = existing_snaps.get(sub)
-            if snap is not None and snap["role"] == UserRole.ADMIN:
+            if (
+                snap is not None and snap["role"] == UserRole.ADMIN
+                and not (caller is not None and caller.is_integration)
+            ):
                 # 이 그룹에 없는 ADMIN 권한 출처를 단일 그룹 기준으로 박탈하지 않는다.
+                # (integration 은 어차피 _upsert_one_user 의 ADMIN 가드가 강등을
+                # skip 하므로 보존이 불필요 — 오히려 derived 값을 넘겨야 skip 된
+                # 변경이 Cognito 유도값 그대로 감사에 기록된다.)
                 role = UserRole.ADMIN
             else:
                 role = derived_role
@@ -1265,6 +1652,7 @@ class CognitoSyncService:
                 async with session.begin_nested():
                     revoked_local: list = []
                     cache_local = {"keys": [], "patterns": [], "ops": []}
+                    skip_local: dict = {}
                     await self._upsert_one_user(
                         repo, session, sub=sub, email=email, name=name, enabled=enabled,
                         team_id=team_id, role=role,
@@ -1277,14 +1665,18 @@ class CognitoSyncService:
                         # 신규 유저(team_id 는 여전히 초기값으로 들어감)와
                         # role/is_active 갱신에는 영향 없다.
                         preserve_existing_team=True,
+                        caller=caller,
+                        skip_out=skip_local,
                     )
                 result.pending_key_revocations.extend(revoked_local)
                 result.pending_cache_deletes.extend(cache_local["keys"])
                 result.pending_cache_patterns.extend(cache_local["patterns"])
                 result.pending_cache_ops.extend(cache_local["ops"])
+                _merge_skip_records(result.admin_skips, skip_local)
             except Exception as e:
                 result.errors.append(f"Failed to upsert member {email or sub}: {e}")
 
+        await self._flush_skip_audits(session, result, caller)
         await session.commit()
         await self._flush_pending_revocations(session, result)
         logger.info(
