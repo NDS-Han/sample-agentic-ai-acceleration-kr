@@ -499,6 +499,16 @@ async def list_body_log_sessions(
                 )
             ).all()
         )
+        # _explicit_sessions 와 같은 타이 제외 — sid 딥링크는 세션 1개라 거의 안
+        # 타지만, before+before_key 로 페이지를 넘기면 이미 반환한 세션이 반복된다.
+        if before is not None and exclude_keys:
+            exact_rows = [
+                r for r in exact_rows
+                if not (
+                    _utc(r.ended_at) == before
+                    and _wire_key(r.session_id, r.user_id, r.client) in exclude_keys
+                )
+            ]
     elif user_ids is not None and not user_ids:
         exact_rows = []  # user 필터가 아무도 못 찾음 — 스캔할 것이 없다
     else:

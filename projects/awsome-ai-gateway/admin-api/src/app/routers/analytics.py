@@ -214,11 +214,12 @@ async def export_analytics(
     svc: AnalyticsService = request.app.state.analytics_service
 
     async def body():
+        # 집계 응답만 세션에서 읽고 세션은 바로 반납 — 본문 직렬화·전송 동안 분석 풀
+        # 연결과 열린 트랜잭션을 붙잡지 않는다(느린 클라이언트 대비).
         async with AnalyticsSessionLocal() as s:
             try:
-                content, _ = await svc.export_analytics(
+                response = await svc.get_analytics(
                     s,
-                    format=format,
                     period=period,
                     group_by=group_by,
                     scope=scope,
@@ -230,7 +231,13 @@ async def export_analytics(
                 )
             finally:
                 await s.rollback()
-        yield content.encode()
+        if format == "csv":
+            for chunk in svc._iter_csv(response, group_by):
+                yield chunk.encode()
+        else:
+            text = response.model_dump_json(indent=2)
+            for i in range(0, len(text), 65536):
+                yield text[i : i + 65536].encode()
 
     filename = (
         f"analytics_{start_date}_{end_date}.{format}"

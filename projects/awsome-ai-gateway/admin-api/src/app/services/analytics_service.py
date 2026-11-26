@@ -517,29 +517,43 @@ class AnalyticsService:
         )
 
     @staticmethod
-    def _to_csv(data: AnalyticsResponse, group_by: str) -> str:
-        # 화면의 group_by 와 같은 차원을 쓴다 — 이전엔 항상 by_model 이라
-        # '팀별' 보고내면 모델 CSV 가 나왔다.
+    def _iter_csv(data: AnalyticsResponse, group_by: str):
+        """``_to_csv`` 와 같은 바이트열을 조각으로 만든다 — export 가 본문 전체를
+        메모리에 쌓지 않고 스트리밍할 수 있게(느린 클라이언트에서도 누수 없음)."""
         output = io.StringIO()
         writer = csv.writer(output)
+
+        def flush():
+            nonlocal output, writer
+            chunk = output.getvalue()
+            output = io.StringIO()
+            writer = csv.writer(output)
+            return chunk
+
         if group_by == "team":
             writer.writerow(["period", "team", "dept_name", "team_id", "active_users", "cost_usd"])
-            for item in data.by_team:
+            for i, item in enumerate(data.by_team):
                 writer.writerow([
                     data.period, item.team, item.dept_name or "",
                     item.team_id, item.active_users, str(item.cost_usd),
                 ])
+                if i % 500 == 499:
+                    yield flush()
         elif group_by == "user":
             writer.writerow(["period", "user", "email", "requests", "cost_usd"])
-            for item in data.by_user:
+            for i, item in enumerate(data.by_user):
                 writer.writerow([data.period, item.user, item.email, item.requests, str(item.cost_usd)])
+                if i % 500 == 499:
+                    yield flush()
         else:
             writer.writerow(["period", "model", "display_name", "requests", "cost_usd"])
-            for item in data.by_model:
+            for i, item in enumerate(data.by_model):
                 writer.writerow([
                     data.period, item.model, item.display_name or "",
                     item.requests, str(item.cost_usd),
                 ])
+                if i % 500 == 499:
+                    yield flush()
         # Total (charged) 구획(wave 3) — 위 표의 cost_usd 는 모델 토큰 비용(청구 대상 전 상태)이다.
         # 청구 총액 = 성공 + 실패 + 취소 + 웹 검색. 웹 검색 공란 = 미추적(무료 아님).
         ch = data.cost_summary.charged
@@ -566,4 +580,10 @@ class AnalyticsService:
                 "" if ws.cost_usd is None else f"{ws.cost_usd:.6f}",
                 ws.untracked_queries,
             ])
-        return output.getvalue()
+        yield flush()
+
+    @staticmethod
+    def _to_csv(data: AnalyticsResponse, group_by: str) -> str:
+        # 화면의 group_by 와 같은 차원을 쓴다 — 이전엔 항상 by_model 이라
+        # '팀별' 보고내면 모델 CSV 가 나왔다.
+        return "".join(AnalyticsService._iter_csv(data, group_by))

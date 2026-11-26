@@ -260,9 +260,19 @@ async def test_export_bad_range_400_before_streaming():
 @pytest.mark.asyncio
 async def test_aggregate_export_streams_service_output():
     from app.routers import analytics
+    from app.schemas.analytics import AnalyticsResponse, CostSummary, TeamBreakdown
 
     svc = MagicMock()
-    svc.export_analytics = AsyncMock(return_value=("period,team\n", "text/csv"))
+    svc.get_analytics = AsyncMock(
+        return_value=AnalyticsResponse(
+            period="2026-11",
+            cost_summary=CostSummary(),
+            by_team=[TeamBreakdown(team="t1", team_id=str(uuid.uuid4()))],
+        )
+    )
+    # 실제 직렬화기 — 라우터는 get_analytics 후 _iter_csv 를 조각으로 스트리밍한다.
+    from app.services.analytics_service import AnalyticsService
+    svc._iter_csv = AnalyticsService._iter_csv
     request = MagicMock()
     request.app.state.analytics_service = svc
     body_session = AsyncMock()
@@ -273,7 +283,8 @@ async def test_aggregate_export_streams_service_output():
         resp = await analytics.export_analytics(
             request, format="csv", period="2026-11", group_by="team", scope="all", client=None,
             start_date=None, end_date=None, view=None, user=ADMIN, session=AsyncMock())
-        svc.export_analytics.assert_not_called()
-        assert await _drain(resp) == b"period,team\n"
-    assert svc.export_analytics.await_args.kwargs["scope_ids"] == sid
+        svc.get_analytics.assert_not_called()
+        body = await _drain(resp)
+        assert body.startswith(b"period,team") and b"charged_total_usd" in body
+    assert svc.get_analytics.await_args.kwargs["scope_ids"] == sid
     assert resp.headers["content-disposition"] == 'attachment; filename="analytics_2026-11.csv"'

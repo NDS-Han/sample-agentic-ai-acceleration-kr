@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from typing import ClassVar
 
 import structlog
 from sqlalchemy import select
@@ -11,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.audit import audit_logger
 from app.core.auth import CurrentUser
+from app.core.budget_cache import defer_redis_write_until_commit
 from app.core.cache_invalidation import (
     CacheInvalidationManager,
     invalidate_after_commit,
@@ -243,7 +245,9 @@ class RateLimitService:
         이미 상속 상태에서 호출돼도 에러가 아니어야 한다."""
         repo = RateLimitConfigRepository(session)
         removed = await repo.deactivate_configs(scope, scope_id)
-        self._invalidate_live_plans()
+        # 프로세스 로컬 계획 캐시도 커밋 후에 비운다 — commit 전 클리어 창에 폴링이
+        # 미커밋 구 행으로 재적재할 수 있다.
+        await defer_redis_write_until_commit(session, self._clear_live_plans_deferred)
 
         # proxy 가 읽는 건 rl:config:* 뿐이지만, _set_rate_limit 이 쓰는
         # ratelimit:config:* 도 대칭으로 지워 stale 상태를 남기지 않는다.
@@ -278,8 +282,20 @@ class RateLimitService:
     #: 최대 이 시간 늦게 반영된다(표시 전용 — 집행은 gateway 가 한다).
     _LIVE_PLAN_TTL_S = 15.0
 
+    #: 프로세스 로컬 계획 캐시 — app.state 의 싱글턴 외에 user_team_service(팀 이관의
+    #: USER RL 비활성화)처럼 서비스를 거치지 않는 경로도 비울 수 있게 클래스 속성으로 둔다.
+    _live_plans: ClassVar[dict] = {}
+
+    @classmethod
+    def clear_live_plans(cls) -> None:
+        cls._live_plans.clear()
+
     def _invalidate_live_plans(self) -> None:
-        self.__dict__.setdefault("_live_plans", {}).clear()
+        self.clear_live_plans()
+
+    async def _clear_live_plans_deferred(self) -> None:
+        """``defer_redis_write_until_commit`` 용 awaitable — 커밋 후 계획 캐시를 비운다."""
+        self.clear_live_plans()
 
     async def _live_plan(
         self, session: AsyncSession | None, sc: str, scope_id: str
@@ -295,7 +311,7 @@ class RateLimitService:
         """
         import time
 
-        plans: dict = self.__dict__.setdefault("_live_plans", {})
+        plans: dict = self._live_plans
         ck = (sc, scope_id)
         hit = plans.get(ck)
         now = time.monotonic()
@@ -541,7 +557,7 @@ class RateLimitService:
         request_id: str = "",
     ) -> RateLimitResponse:
         repo = RateLimitConfigRepository(session)
-        self._invalidate_live_plans()
+        await defer_redis_write_until_commit(session, self._clear_live_plans_deferred)
 
         config = RateLimitConfig(
             id=uuid.uuid4(),
@@ -565,8 +581,6 @@ class RateLimitService:
             "cpm": str(data.cpm) if data.cpm else None,
             "cph": str(data.cph) if data.cph else None,
         })
-        from app.core.budget_cache import defer_redis_write_until_commit
-
         await defer_redis_write_until_commit(
             session,
             lambda: self._cache_mgr._redis.set(cache_key, config_json),

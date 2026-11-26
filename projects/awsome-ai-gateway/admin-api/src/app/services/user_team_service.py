@@ -33,6 +33,7 @@ from app.schemas.users import (
     UserSearchItem,
 )
 from app.services.key_service import KeyService
+from app.services.rate_limit_service import RateLimitService
 
 logger = structlog.get_logger()
 
@@ -205,6 +206,13 @@ async def collect_team_transfer_side_effects(
                     await s3.commit()
 
             ops.append(_swap)
+
+    async def _clear_live_plans() -> None:
+        # USER 스코프 RL 행이 비활성화됐으므로 같은 파드의 live RPM 계획 캐시도
+        # 비운다 — 커밋 후 op 라 미커밋 재적재 창이 없다(표시 전용, 15s TTL).
+        RateLimitService.clear_live_plans()
+
+    ops.append(_clear_live_plans)
     return keys, patterns, ops
 
 

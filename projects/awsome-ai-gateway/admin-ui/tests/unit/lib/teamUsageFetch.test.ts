@@ -21,7 +21,7 @@ function respond(body: object, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 }
 
-function stub(handler: (u: URL) => Response) {
+function stub(handler: (_u: URL) => Response) {
   const f = vi.fn(async (input: RequestInfo | URL) => handler(new URL(String(input), 'http://x')));
   vi.stubGlobal('fetch', f);
   return f;
