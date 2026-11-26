@@ -118,7 +118,24 @@ class FakeRedis:
             yield k
 
     def pipeline(self, *a, **kw):
-        raise NotImplementedError
+        redis = self
+
+        class _Pipe:
+            def __init__(self):
+                self._ops = []
+
+            def srem(self, k, *vs):
+                self._ops.append(("srem", k, vs))
+                return self
+
+            def sadd(self, k, *vs):
+                self._ops.append(("sadd", k, vs))
+                return self
+
+            async def execute(self):
+                return [await getattr(redis, name)(k, *vs) for name, k, vs in self._ops]
+
+        return _Pipe()
 
 
 @pytest.fixture(scope="module")
@@ -368,11 +385,11 @@ def _cu(username, sub, email, *, enabled=True, status="CONFIRMED", groups=None, 
     return {"Username": username, "Attributes": attrs, "Enabled": enabled, "UserStatus": status}
 
 
-def _stub_sync(stub, username, sub, email, *, enabled=True, groups="Claude_Platform"):
+def _stub_sync(stub, username, sub, email, *, enabled=True, groups="Claude_Platform", name="Kim"):
     stub.add_response("admin_get_user", {
         "Username": username, "Enabled": enabled, "UserStatus": "CONFIRMED",
         "UserAttributes": [{"Name": "sub", "Value": sub}, {"Name": "email", "Value": email},
-                           {"Name": "email_verified", "Value": "true"}, {"Name": "name", "Value": "Kim"},
+                           {"Name": "email_verified", "Value": "true"}, {"Name": "name", "Value": name},
                            {"Name": "custom:groups", "Value": groups}],
     }, {"UserPoolId": POOL, "Username": username})
     stub.add_response("admin_list_groups_for_user", {"Groups": []},
@@ -1361,3 +1378,426 @@ async def test_seed_budget_spent_protected_targets_refused_and_normal_user_ok(en
     assert len(rows) == 1 and Decimal(str(rows[0][0])) == Decimal("12.5000")
     assert (await _budget_table_counts(sm))[0] == before_counts[0] + 1
     assert redis.eval_calls, "정상 시드는 commit 후 Redis 델타를 시도해야 한다"
+
+
+# ── cognito sync ADMIN guard (AICM mirror + last human admin) ───────────────
+
+
+def _guard_cu(username, sub, email, *, enabled=True, groups=None, name="U"):
+    """sync 테스트용 Cognito user record — DB seed 의 display_name('U')과 맞춰
+    cosmetic update 가 count 를 오염시키지 않게 한다."""
+    attrs = [
+        {"Name": "sub", "Value": sub},
+        {"Name": "email", "Value": email},
+        {"Name": "email_verified", "Value": "true"},
+        {"Name": "name", "Value": name},
+    ]
+    if groups is not None:
+        attrs.append({"Name": "custom:groups", "Value": groups})
+    return {"Username": username, "Attributes": attrs, "Enabled": enabled, "UserStatus": "CONFIRMED"}
+
+
+def _patch_boto3_cognito(monkeypatch, cognito_client):
+    import boto3
+
+    real_client = boto3.client
+
+    def _client(service_name, *args, **kwargs):
+        if service_name == "cognito-idp":
+            return cognito_client
+        return real_client(service_name, *args, **kwargs)
+
+    monkeypatch.setattr(boto3, "client", _client)
+
+
+async def _retire_human_admins(sm) -> None:
+    """이 모듈의 공유 proof DB 에 남은 예전 ADMIN fixture 가 '마지막 사람 ADMIN'
+    판정을 오염시키지 않게 한다. system user 0010/0011 는 정의상 사람 admin 수에
+    들어가지 않으므로 건드리지 않는다."""
+    from sqlalchemy import text
+
+    async with sm() as s:
+        await s.execute(text(
+            "UPDATE auth.users SET is_active=false "
+            "WHERE role=CAST('ADMIN' AS auth.user_role) "
+            "AND id NOT IN ('00000000-0000-4000-a000-000000000010', "
+            "'00000000-0000-4000-a000-000000000011')"
+        ))
+        await s.commit()
+
+
+async def _retire_non_system_users(sm) -> None:
+    """full sync 의 stale-team 정리는 전역이므로, 앞선 테스트의 활성 사용자가
+    이번 검증의 audit/count 를 오염시키지 않게 proof DB 안에서만 비활성화한다."""
+    from sqlalchemy import text
+
+    async with sm() as s:
+        await s.execute(text(
+            "UPDATE auth.users SET is_active=false "
+            "WHERE id NOT IN ('00000000-0000-4000-a000-000000000010', "
+            "'00000000-0000-4000-a000-000000000011')"
+        ))
+        await s.commit()
+
+
+async def _user_state(sm, uid):
+    rows = await _q(
+        sm,
+        "SELECT role::text, is_active, team_id, display_name FROM auth.users WHERE id=:i",
+        i=uid,
+    )
+    return rows[0]
+
+
+async def _skip_audits(sm, action: str, uid) -> list[dict]:
+    rows = await _q(
+        sm,
+        "SELECT actor_user_id, actor_role, result, changes::text FROM audit.audit_logs "
+        "WHERE action=:a AND resource_id=:r ORDER BY timestamp",
+        a=action, r=str(uid),
+    )
+    return [
+        {
+            "actor_user_id": row[0],
+            "actor_role": row[1],
+            "result": row[2],
+            "changes": json.loads(row[3]),
+        }
+        for row in rows
+    ]
+
+
+async def test_mirror_sync_user_admin_disabled_group_removed_is_skipped_and_audited(env, monkeypatch):
+    """AICM single-user sync: ADMIN 그룹 제거 + Cognito disable 여도 DB ADMIN 은
+    role/team/active/VK 가 그대로고, skip 감사 1건만 남는다."""
+    from app.core.config import get_settings
+
+    provider = f"oidc-guard-{uuid.uuid4().hex[:8]}"
+    monkeypatch.setattr(get_settings(), "OIDC_PROVIDER_NAME", provider)
+    c, sm, stub = env["client"], env["sm"], env["stub"]
+    _patch_boto3_cognito(monkeypatch, env["cognito_client"])
+
+    team = await _mk_team(sm, f"Skip{uuid.uuid4().hex[:8]}")
+    email = f"guard-admin-{uuid.uuid4().hex[:8]}@corp.example"
+    uid, sub = await _mk_user(sm, team_id=team, role="ADMIN", provider=provider, keys=1, email=email)
+    _stub_sync(stub, email, sub, email, enabled=False, groups="", name="U")
+
+    tok = await _issue_mirror(c, scopes=["users:sync"])
+    h = {"Authorization": f"Bearer {tok['token']}", "X-Forwarded-For": "10.0.0.3"}
+    r = await c.post(f"/aicm/v1/admin/users/sync-cognito/user/{email}", headers=h)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert set(body) == {"username", "user_id", "users_created", "users_updated", "users_deactivated", "errors"}
+    assert body["users_created"] == 0
+    assert body["users_updated"] == 0
+    assert body["users_deactivated"] == 0
+    assert body["errors"] == []
+
+    role, active, team_id, _name = await _user_state(sm, uid)
+    assert (role, active, team_id) == ("ADMIN", True, team)
+    assert (await _q(sm, "SELECT status::text FROM auth.virtual_keys WHERE user_id=:i", i=uid))[0][0] == "ACTIVE"
+
+    audits = await _skip_audits(sm, "AICM_SYNC_ADMIN_CHANGE_SKIPPED", uid)
+    assert len(audits) == 1
+    audit = audits[0]
+    assert audit["actor_user_id"] == uuid.UUID("00000000-0000-4000-a000-000000000011")
+    assert audit["actor_role"] == "ADMIN" and audit["result"] == "SUCCESS"
+    skipped = audit["changes"]["skipped_changes"]
+    assert {"role", "is_active", "team_id"} <= set(skipped)
+    assert audit["changes"]["cognito"]["enabled"] is False
+    assert audit["changes"]["_integration"] == "aicm"
+    assert audit["changes"]["_service_token_id"] == tok["id"]
+    stub.assert_no_pending_responses()
+
+
+async def test_mirror_sync_user_missing_admin_is_not_deactivated(env, monkeypatch):
+    """AICM 이 'Cognito 에 없음'을 보내도 기존 ADMIN 은 비활성화/VK 폐기되지 않는다."""
+    from app.core.config import get_settings
+
+    provider = f"oidc-guard-{uuid.uuid4().hex[:8]}"
+    monkeypatch.setattr(get_settings(), "OIDC_PROVIDER_NAME", provider)
+    c, sm, stub = env["client"], env["sm"], env["stub"]
+    _patch_boto3_cognito(monkeypatch, env["cognito_client"])
+
+    email = f"missing-admin-{uuid.uuid4().hex[:8]}@corp.example"
+    uid, sub = await _mk_user(sm, role="ADMIN", provider=provider, keys=1, email=email)
+    stub.add_client_error(
+        "admin_get_user", service_error_code="UserNotFoundException",
+        service_message="missing", http_status_code=400,
+    )
+    stub.add_response(
+        "list_users", {"Users": []},
+        {"UserPoolId": POOL, "Filter": f'sub = "{sub}"', "Limit": 1},
+    )
+
+    tok = await _issue_mirror(c, scopes=["users:sync"])
+    h = {"Authorization": f"Bearer {tok['token']}", "X-Forwarded-For": "10.0.0.3"}
+    r = await c.post(f"/aicm/v1/admin/users/sync-cognito/user/{email}", headers=h)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["user_id"] == str(uid)
+    assert body["users_updated"] == 0 and body["users_deactivated"] == 0
+
+    role, active, _team_id, _name = await _user_state(sm, uid)
+    assert (role, active) == ("ADMIN", True)
+    assert (await _q(sm, "SELECT status::text FROM auth.virtual_keys WHERE user_id=:i", i=uid))[0][0] == "ACTIVE"
+    audits = await _skip_audits(sm, "AICM_SYNC_ADMIN_CHANGE_SKIPPED", uid)
+    assert len(audits) == 1
+    assert audits[0]["changes"]["skipped_changes"]["is_active"]["to"] is False
+    assert audits[0]["changes"]["cognito"]["missing"] is True
+    stub.assert_no_pending_responses()
+
+
+async def test_mirror_sync_group_skips_admin_but_still_updates_normal_member(env, monkeypatch):
+    """같은 group sync 안에서 ADMIN 변경만 skip 되고 일반 멤버의 disable/강등은 유지된다."""
+    from app.core.config import get_settings
+
+    provider = f"oidc-guard-{uuid.uuid4().hex[:8]}"
+    monkeypatch.setattr(get_settings(), "OIDC_PROVIDER_NAME", provider)
+    c, sm, stub = env["client"], env["sm"], env["stub"]
+    _patch_boto3_cognito(monkeypatch, env["cognito_client"])
+
+    suffix = uuid.uuid4().hex[:8]
+    team_name = f"Grp{suffix}"
+    group = f"Claude_{team_name}"
+    team = await _mk_team(sm, team_name)
+    admin_email = f"grp-admin-{suffix}@corp.example"
+    normal_email = f"grp-user-{suffix}@corp.example"
+    admin_uid, admin_sub = await _mk_user(
+        sm, team_id=team, role="ADMIN", provider=provider, keys=1, email=admin_email,
+    )
+    normal_uid, normal_sub = await _mk_user(
+        sm, team_id=team, role="DEVELOPER", provider=provider, keys=1, email=normal_email,
+    )
+    stub.add_response("list_users_in_group", {"Users": [
+        _guard_cu(admin_email, admin_sub, admin_email, enabled=False),
+        _guard_cu(normal_email, normal_sub, normal_email, enabled=False),
+    ]}, {"UserPoolId": POOL, "GroupName": group, "Limit": 60})
+
+    tok = await _issue_mirror(c, scopes=["users:sync"])
+    h = {"Authorization": f"Bearer {tok['token']}", "X-Forwarded-For": "10.0.0.3"}
+    r = await c.post(f"/aicm/v1/admin/users/sync-cognito/group/{group}", headers=h)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert set(body) == {"groupname", "groups_synced", "users_created", "users_updated", "errors"}
+    assert body["groups_synced"] == 1
+    assert body["users_created"] == 0
+    assert body["users_updated"] == 1  # 일반 멤버만 — ADMIN skip 은 count 되지 않는다
+    assert body["errors"] == []
+
+    assert (await _user_state(sm, admin_uid))[:2] == ("ADMIN", True)
+    assert (await _user_state(sm, normal_uid))[:2] == ("DEVELOPER", False)
+    statuses = {
+        row[0]: row[1]
+        for row in await _q(
+            sm,
+            "SELECT user_id, status::text FROM auth.virtual_keys WHERE user_id IN (:a, :n)",
+            a=admin_uid, n=normal_uid,
+        )
+    }
+    assert statuses[admin_uid] == "ACTIVE"
+    assert statuses[normal_uid] == "REVOKED"
+
+    assert await _skip_audits(sm, "AICM_SYNC_ADMIN_CHANGE_SKIPPED", normal_uid) == []
+    audits = await _skip_audits(sm, "AICM_SYNC_ADMIN_CHANGE_SKIPPED", admin_uid)
+    assert len(audits) == 1
+    assert {"role", "is_active"} <= set(audits[0]["changes"]["skipped_changes"])
+    stub.assert_no_pending_responses()
+
+
+async def test_mirror_sync_all_skips_present_and_missing_admins_but_reconciles_normal_users(env, monkeypatch):
+    """full sync: present-disabled ADMIN 과 missing ADMIN 둘 다 보호하고, 같은 실행의
+    일반 사용자 disable/missing reconcile 은 기존대로 적용한다."""
+    from app.core.config import get_settings
+
+    provider = f"oidc-guard-{uuid.uuid4().hex[:8]}"
+    settings = get_settings()
+    monkeypatch.setattr(settings, "OIDC_PROVIDER_NAME", provider)
+    monkeypatch.setattr(settings, "COGNITO_SYNC_DEACTIVATE_MISSING", True)
+    c, sm, stub = env["client"], env["sm"], env["stub"]
+    _patch_boto3_cognito(monkeypatch, env["cognito_client"])
+    await _retire_non_system_users(sm)
+
+    suffix = uuid.uuid4().hex[:8]
+    team = await _mk_team(sm, f"Full{suffix}")
+    admin_present_email = f"full-admin-p-{suffix}@corp.example"
+    admin_missing_email = f"full-admin-m-{suffix}@corp.example"
+    normal_present_email = f"full-user-p-{suffix}@corp.example"
+    normal_missing_email = f"full-user-m-{suffix}@corp.example"
+    admin_present, admin_present_sub = await _mk_user(
+        sm, team_id=team, role="ADMIN", provider=provider, keys=1, email=admin_present_email,
+    )
+    admin_missing, _ = await _mk_user(
+        sm, team_id=team, role="ADMIN", provider=provider, keys=1, email=admin_missing_email,
+    )
+    normal_present, normal_present_sub = await _mk_user(
+        sm, team_id=team, role="DEVELOPER", provider=provider, keys=1, email=normal_present_email,
+    )
+    normal_missing, _ = await _mk_user(
+        sm, team_id=team, role="DEVELOPER", provider=provider, keys=1, email=normal_missing_email,
+    )
+
+    stub.add_response("list_groups", {"Groups": []}, {"UserPoolId": POOL, "Limit": 60})
+    stub.add_response("list_users", {"Users": [
+        _guard_cu(admin_present_email, admin_present_sub, admin_present_email, enabled=False),
+        _guard_cu(normal_present_email, normal_present_sub, normal_present_email, enabled=False),
+    ]}, {"UserPoolId": POOL, "Limit": 60})
+
+    tok = await _issue_mirror(c, scopes=["users:sync"])
+    h = {"Authorization": f"Bearer {tok['token']}", "X-Forwarded-For": "10.0.0.3"}
+    r = await c.post("/aicm/v1/admin/users/sync-cognito", headers=h)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert set(body) == {"groups_synced", "users_created", "users_updated", "users_deactivated", "teams_deleted", "errors"}
+    assert body["users_created"] == 0
+    assert body["users_updated"] == 1       # present normal 만
+    assert body["users_deactivated"] == 1   # missing normal 만 — 두 ADMIN skip 은 제외
+    assert body["errors"] == []
+
+    for uid in (admin_present, admin_missing):
+        role, active, team_id, _name = await _user_state(sm, uid)
+        assert (role, active, team_id) == ("ADMIN", True, team)
+        assert (await _q(sm, "SELECT status::text FROM auth.virtual_keys WHERE user_id=:i", i=uid))[0][0] == "ACTIVE"
+    assert (await _user_state(sm, normal_present))[:2] == ("DEVELOPER", False)
+    assert (await _user_state(sm, normal_missing))[:2] == ("DEVELOPER", False)
+    normal_statuses = {
+        row[0]: row[1]
+        for row in await _q(
+            sm,
+            "SELECT user_id, status::text FROM auth.virtual_keys WHERE user_id IN (:a, :b)",
+            a=normal_present, b=normal_missing,
+        )
+    }
+    assert normal_statuses == {normal_present: "REVOKED", normal_missing: "REVOKED"}
+
+    for uid in (admin_present, admin_missing):
+        audits = await _skip_audits(sm, "AICM_SYNC_ADMIN_CHANGE_SKIPPED", uid)
+        assert len(audits) == 1
+        assert "is_active" in audits[0]["changes"]["skipped_changes"]
+    stub.assert_no_pending_responses()
+
+
+async def test_human_sync_user_never_demotes_or_deactivates_last_human_admin(env, monkeypatch):
+    """사람 admin 호출은 기존 동작을 유지하되, 마지막 활성 사람 ADMIN 의 강등/비활성화만 skip."""
+    from app.core.config import get_settings
+
+    provider = f"oidc-guard-{uuid.uuid4().hex[:8]}"
+    monkeypatch.setattr(get_settings(), "OIDC_PROVIDER_NAME", provider)
+    c, sm, stub = env["client"], env["sm"], env["stub"]
+    _patch_boto3_cognito(monkeypatch, env["cognito_client"])
+    await _retire_human_admins(sm)
+
+    suffix = uuid.uuid4().hex[:8]
+    team_name = f"Hum{suffix}"
+    team = await _mk_team(sm, team_name)
+    email = f"last-admin-{suffix}@corp.example"
+    uid, sub = await _mk_user(sm, team_id=team, role="ADMIN", provider=provider, keys=1, email=email)
+    _stub_sync(stub, email, sub, email, enabled=False, groups=f"Claude_{team_name}", name="U")
+
+    r = await c.post(f"/admin/users/sync-cognito/user/{email}", headers=HUMAN)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["users_updated"] == 0 and body["users_deactivated"] == 0
+    role, active, team_id, _name = await _user_state(sm, uid)
+    assert (role, active, team_id) == ("ADMIN", True, team)
+    assert (await _q(sm, "SELECT status::text FROM auth.virtual_keys WHERE user_id=:i", i=uid))[0][0] == "ACTIVE"
+
+    audits = await _skip_audits(sm, "HUMAN_SYNC_LAST_ADMIN_CHANGE_SKIPPED", uid)
+    assert len(audits) == 1
+    assert audits[0]["actor_user_id"] == HUMAN_ADMIN
+    assert {"role", "is_active"} <= set(audits[0]["changes"]["skipped_changes"])
+    assert "_integration" not in audits[0]["changes"]
+    stub.assert_no_pending_responses()
+
+
+async def test_human_sync_user_with_two_admins_keeps_existing_behavior(env, monkeypatch):
+    """활성 사람 ADMIN 이 2명 이상이면 기존 강등/비활성화/VK 폐기 동작이 그대로다."""
+    from app.core.config import get_settings
+
+    provider = f"oidc-guard-{uuid.uuid4().hex[:8]}"
+    monkeypatch.setattr(get_settings(), "OIDC_PROVIDER_NAME", provider)
+    c, sm, stub = env["client"], env["sm"], env["stub"]
+    _patch_boto3_cognito(monkeypatch, env["cognito_client"])
+    await _retire_human_admins(sm)
+
+    suffix = uuid.uuid4().hex[:8]
+    team_name = f"Two{suffix}"
+    team = await _mk_team(sm, team_name)
+    target_email = f"target-admin-{suffix}@corp.example"
+    other_email = f"other-admin-{suffix}@corp.example"
+    target, target_sub = await _mk_user(sm, team_id=team, role="ADMIN", provider=provider, keys=1, email=target_email)
+    await _mk_user(sm, team_id=team, role="ADMIN", provider=provider, email=other_email)
+    _stub_sync(stub, target_email, target_sub, target_email, enabled=False, groups=f"Claude_{team_name}", name="U")
+
+    r = await c.post(f"/admin/users/sync-cognito/user/{target_email}", headers=HUMAN)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["users_updated"] == 1 and body["users_deactivated"] == 0
+    assert (await _user_state(sm, target))[:2] == ("DEVELOPER", False)
+    assert (await _q(sm, "SELECT status::text FROM auth.virtual_keys WHERE user_id=:i", i=target))[0][0] == "REVOKED"
+    assert await _skip_audits(sm, "HUMAN_SYNC_LAST_ADMIN_CHANGE_SKIPPED", target) == []
+    stub.assert_no_pending_responses()
+
+
+async def test_human_concurrent_syncs_cannot_remove_the_last_two_admins(env, monkeypatch):
+    """두 사람-admin sync 가 동시에 마지막 두 ADMIN 을 겨냥해도 한 명은 활성 ADMIN 으로 남는다."""
+    import copy
+    import time
+
+    from app.core.config import get_settings
+
+    provider = f"oidc-guard-{uuid.uuid4().hex[:8]}"
+    monkeypatch.setattr(get_settings(), "OIDC_PROVIDER_NAME", provider)
+    c, sm = env["client"], env["sm"]
+    await _retire_human_admins(sm)
+
+    suffix = uuid.uuid4().hex[:8]
+    team_name = f"Conc{suffix}"
+    team = await _mk_team(sm, team_name)
+    emails = [f"conc-a-{suffix}@corp.example", f"conc-b-{suffix}@corp.example"]
+    ids_and_subs = [
+        await _mk_user(sm, team_id=team, role="ADMIN", provider=provider, email=emails[0]),
+        await _mk_user(sm, team_id=team, role="ADMIN", provider=provider, email=emails[1]),
+    ]
+
+    def _record(username, sub):
+        return {
+            "Username": username,
+            "Enabled": False,
+            "UserStatus": "CONFIRMED",
+            "UserAttributes": [
+                {"Name": "sub", "Value": sub},
+                {"Name": "email", "Value": username},
+                {"Name": "email_verified", "Value": "true"},
+                {"Name": "name", "Value": "U"},
+                {"Name": "custom:groups", "Value": f"Claude_{team_name}"},
+            ],
+        }
+
+    records = {email: _record(email, sub) for email, (_uid, sub) in zip(emails, ids_and_subs)}
+
+    class _ConcurrentCognito:
+        def admin_get_user(self, *, UserPoolId, Username):  # noqa: N803 — boto3 호출 형태
+            time.sleep(0.05)  # 두 요청의 트랜잭션이 겹치게 한다 (읽기 전용 immutable record).
+            return copy.deepcopy(records[Username])
+
+        def admin_list_groups_for_user(self, **kwargs):
+            return {"Groups": []}
+
+    _patch_boto3_cognito(monkeypatch, _ConcurrentCognito())
+
+    responses = await asyncio.gather(*[
+        c.post(f"/admin/users/sync-cognito/user/{email}", headers=HUMAN)
+        for email in emails
+    ])
+    assert [r.status_code for r in responses] == [200, 200]
+
+    states = [(await _user_state(sm, uid))[:2] for uid, _sub in ids_and_subs]
+    assert sum(1 for role, active in states if role == "ADMIN" and active) == 1
+    assert sum(1 for role, active in states if role != "ADMIN" or not active) == 1
+    assert sorted(r.json()["users_updated"] for r in responses) == [0, 1]
+
+    all_audits = []
+    for uid, _sub in ids_and_subs:
+        all_audits.extend(await _skip_audits(sm, "HUMAN_SYNC_LAST_ADMIN_CHANGE_SKIPPED", uid))
+    assert len(all_audits) == 1
