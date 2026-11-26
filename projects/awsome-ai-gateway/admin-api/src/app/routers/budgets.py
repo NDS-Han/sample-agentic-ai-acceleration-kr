@@ -9,6 +9,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import CurrentUser, require_admin, require_admin_or_team_leader, require_human_admin, require_human_admin_or_team_leader
 from app.core.db import get_db_session
+from app.core.exceptions import ForbiddenError
+from app.models.auth import UserRole
 from app.models.budget import BudgetScope
 from app.services.budget_service import BudgetService
 from app.schemas.budgets import (
@@ -376,8 +378,22 @@ async def get_usage_by_app(
     from app.services import usage_reads, usage_rollup as ur
 
     dr = ur.month_range(period)
+    teams = None
+    if user.role == UserRole.TEAM_LEADER:
+        # budget summary 와 같은 리더 범위 — 소속 팀 + leader_user_id 로 리드하는 팀.
+        # 빈 집합을 RollupScope 에 넣으면 fail-closed ValueError(500)가 되므로,
+        # 좁힐 팀을 해석할 수 없는 경우만 여기서 403으로 끊는다.
+        from app.services.analytics_service import _leader_allowed_team_ids
+
+        allowed = await _leader_allowed_team_ids(user, session)
+        if not allowed:
+            raise ForbiddenError(
+                "Team leader has no team assigned — cannot scope usage by app"
+            )
+        teams = tuple(sorted(allowed))
     rows = await usage_reads.client_share(
-        session, ur.RollupScope(start=dr.start, end=dr.end, billable_only=True)
+        session,
+        ur.RollupScope(start=dr.start, end=dr.end, teams=teams, billable_only=True),
     )
     return UsageByAppResponse(
         period=period,

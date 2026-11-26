@@ -24,11 +24,10 @@ from app.core.integration_auth import (
     RL_WRITE,
     require_integration,
 )
-from app.models.auth import UserRole
 from app.repositories.user_repository import UserRepository
 from app.routers import budgets, models, service_tokens, users
 from app.services.integration_token_service import SERVICE_TOKEN_PREFIX
-from app.services.user_lifecycle_service import _SYSTEM_USER_IDS
+from app.services.protected_targets import protected_user_target_code
 
 logger = structlog.get_logger()
 
@@ -88,13 +87,7 @@ async def guard_user_target(
     user = await UserRepository(session).get_user(user_id)
     if user is None:
         return  # 실제 handler 와 같은 404 semantics 유지
-    code = None
-    if user_id in _SYSTEM_USER_IDS:
-        code = "target_is_system_user"
-    elif getattr(user, "is_service_account", False):
-        code = "target_is_service_account"
-    elif user.role == UserRole.ADMIN:
-        code = "target_is_admin"
+    code = protected_user_target_code(user_id, user)
     if code is None:
         return
     principal = getattr(request.state, "integration_principal", None)

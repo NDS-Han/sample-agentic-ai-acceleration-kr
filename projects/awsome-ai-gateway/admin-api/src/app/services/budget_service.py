@@ -29,12 +29,13 @@ from app.core.exceptions import (
     ValidationError,
 )
 from app.core.usage_filters import current_kst_period
-from app.models.auth import Team, UserRole
+from app.models.auth import Team, User, UserRole
 from app.models.budget import BudgetConfig, BudgetPolicy, BudgetScope, BudgetUsage, DowngradePolicy, PeriodType, UserAppGroupBudget
 
 from app.repositories._locks import advisory_xact_lock
 from app.repositories.budget_repository import BudgetRepository, DowngradePolicyRepository
 from app.repositories.user_repository import UserRepository
+from app.services.protected_targets import protected_user_target_code
 from app.schemas.budgets import (
     AllocationEntry,
     AllocateBudgetRequest,
@@ -228,6 +229,77 @@ class BudgetService:
         """
     )
 
+    async def _refuse_protected_seed_targets(
+        self,
+        session: AsyncSession,
+        *,
+        items: list[SeedSpentItem],
+        actor: CurrentUser,
+        ip_address: str,
+        request_id: str,
+    ) -> None:
+        """USER scope 시드 대상이 ADMIN/system/service-account 면 전체 요청을 거부.
+
+        ``PUT /admin/budgets/spent`` 는 item 단위 partial failure 를 허용하지만 보호
+        대상 거부는 예외다 — 보호 대상이 하나라도 섞인 배치의 정상 item 까지 쓰면
+        호출자가 거부 사실을 놓친 채 예산 상태를 바꿀 수 있다. 따라서 어떤 budget
+        행이나 Redis 키도 만지기 전에 대상 USER 행을 먼저 잠그고 분류한다.
+        분류 순서는 ``aicm_admin.guard_user_target`` 과 같다(system → service
+        account → ADMIN). 거부 감사는 요청 rollback 과 함께 사라지면 안 되므로
+        queue_only 다.
+        """
+        user_ids: set[uuid.UUID] = set()
+        for item in items:
+            if item.scope.upper() != "USER":
+                continue
+            try:
+                user_ids.add(uuid.UUID(item.scope_id))
+            except (TypeError, ValueError):
+                # malformed UUID 는 기존처럼 item error 로 처리한다 — 보호 판정을
+                # 위해 전체 요청을 바꾸지 않는다.
+                continue
+        if not user_ids:
+            return
+
+        rows = (
+            await session.execute(
+                sa_select(User.id, User.role, User.is_service_account)
+                .where(User.id.in_(sorted(user_ids)))
+                .order_by(User.id)
+                .with_for_update()
+            )
+        ).all()
+        users = {r.id: r for r in rows}
+        for user_id in sorted(user_ids):
+            target = users.get(user_id)
+            code = protected_user_target_code(user_id, target)
+            if code is None:
+                continue
+            await audit_logger.log(
+                session,
+                actor_user_id=actor.user_id,
+                actor_role=actor.role.value,
+                service_token_id=getattr(actor, "service_token_id", None),
+                action="AICM_ADMIN_TARGET_REFUSED",
+                resource_type="User",
+                resource_id=str(user_id),
+                result="FAILURE",
+                changes={"after": {
+                    "code": code,
+                    "operation": "SEED_BUDGET_SPENT",
+                    "scope": "USER",
+                    "scope_id": str(user_id),
+                }},
+                ip_address=ip_address,
+                request_id=request_id,
+                queue_only=True,
+            )
+            raise BudgetRuleError(
+                f"{code}: cannot seed budget spent for gateway admins, system users, or service accounts",
+                code,
+                403,
+            )
+
     async def seed_spent(
         self,
         session: AsyncSession,
@@ -246,6 +318,9 @@ class BudgetService:
         others proceed.
         """
         _require_admin_actor(actor)
+        await self._refuse_protected_seed_targets(
+            session, items=items, actor=actor, ip_address=ip_address, request_id=request_id
+        )
         results: list[SeedSpentResult] = []
         user_repo = UserRepository(session)
         # 성공한 item 의 (redis_key, value) — outer commit 까지 지연한다.

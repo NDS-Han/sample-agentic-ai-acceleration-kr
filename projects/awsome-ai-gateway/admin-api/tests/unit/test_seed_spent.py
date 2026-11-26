@@ -202,7 +202,7 @@ async def test_seed_applies_delta_not_overwrite():
     # upsert 에 delta=50 이 전달됐다
     upsert_calls = [
         c for c in session.execute.call_args_list
-        if isinstance(c.args[1], dict) and "delta" in c.args[1]
+        if len(c.args) > 1 and isinstance(c.args[1], dict) and "delta" in c.args[1]
     ]
     assert len(upsert_calls) == 1
     assert upsert_calls[0].args[1]["delta"] == "50"

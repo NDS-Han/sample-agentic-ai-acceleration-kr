@@ -83,5 +83,7 @@ AICM surface receives 403 `integration_surface_forbidden`.
 ## Admin/system target protection
 
 AICM cannot modify gateway ADMIN users, service accounts, or system users through user or user-budget
-mutations. Refusals return 403 and are audited. Cognito sync also refuses admin-group/admin-account
-demotion or alteration through the existing lifecycle protections.
+mutations, including USER-scope `PUT /admin/budgets/spent` seeds. A batch containing any protected
+USER scope is refused atomically before budget tables or Redis are touched. Refusals return 403 and
+are audited. Cognito sync also refuses admin-group/admin-account demotion or alteration through the
+existing lifecycle protections.
