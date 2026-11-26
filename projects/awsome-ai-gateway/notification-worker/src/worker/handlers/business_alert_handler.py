@@ -10,7 +10,7 @@ pending sweeper recovery path.
 from __future__ import annotations
 
 import hashlib
-import time
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 
@@ -36,10 +36,31 @@ BUSINESS_ALERT_EVENT_TYPES = (
 SLACK_RECIPIENT_SLOT = "slack-business-alerts"
 
 
-def delivery_event_id(dedupe_key: str, repeat_window: int) -> str:
-    """Deterministic delivery slot for one (check, period) in one repeat window."""
-    digest = hashlib.sha256(f"{dedupe_key}|{repeat_window}".encode()).hexdigest()[:32]
+def delivery_slot_prefix(dedupe_key: str) -> str:
+    """Stable prefix for every delivery attempt of one (check, period) condition."""
+    digest = hashlib.sha256(dedupe_key.encode()).hexdigest()[:32]
     return f"biz-{digest}"
+
+
+def delivery_event_id(dedupe_key: str, repeat_index: int) -> str:
+    """Deterministic unique slot for one repeat ordinal of one (check, period) condition."""
+    return f"{delivery_slot_prefix(dedupe_key)}-{max(0, int(repeat_index)):06d}"
+
+
+def _repeat_index_from_event_id(event_id: str, prefix: str) -> int:
+    marker = f"{prefix}-"
+    if not event_id.startswith(marker):
+        return -1
+    try:
+        return int(event_id[len(marker):])
+    except ValueError:
+        return -1
+
+
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
 def _mrkdwn(value: object, limit: int = 240) -> str:
@@ -98,6 +119,7 @@ class BusinessAlertHandler:
         retry_executor: RetryExecutor,
         metrics: WorkerMetrics | None = None,
         repeat_interval_seconds: int = 6 * 3600,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._config_cache = config_cache
@@ -105,6 +127,10 @@ class BusinessAlertHandler:
         self._retry_executor = retry_executor
         self._metrics = metrics
         self._repeat_interval_seconds = repeat_interval_seconds
+        self._clock = clock or (lambda: datetime.now(UTC))
+
+    def _now(self) -> datetime:
+        return _as_utc(self._clock())
 
     def _delivery_metric(self, event: NotificationEvent, status: str) -> None:
         if self._metrics:
@@ -120,14 +146,63 @@ class BusinessAlertHandler:
         config = self._config_cache.get(event_type)
         return bool(config is not None and config.enabled)
 
+    async def _latest_slot_row(self, session: AsyncSession, event_type: str, prefix: str):
+        return (
+            await session.execute(
+                select(NotificationLog)
+                .where(
+                    NotificationLog.event_id.like(f"{prefix}-%"),
+                    NotificationLog.event_type == event_type,
+                    NotificationLog.channel == Channel.SLACK.value,
+                    NotificationLog.recipient_email == SLACK_RECIPIENT_SLOT,
+                )
+                .order_by(NotificationLog.created_at.desc(), NotificationLog.event_id.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+
+    def _repeat_gate(
+        self,
+        *,
+        prefix: str,
+        latest_row,
+        now: datetime,
+    ) -> tuple[bool, int, datetime | None]:
+        """Return (may_send, next_repeat_index, reference_time).
+
+        Successful sends use ``resolved_at`` as ``last_sent``. If no send has succeeded yet,
+        the latest attempt timestamp is only a backoff reference so a permanently broken
+        webhook cannot cause a tight insert/send loop; the pending sweeper still performs
+        its normal faster retry path for retryable failures.
+        """
+        if latest_row is None:
+            return True, 0, None
+        if latest_row.status in {"sent", "mocked"}:
+            reference = (
+                latest_row.resolved_at or latest_row.last_attempt_at or latest_row.created_at
+            )
+        else:
+            reference = (
+                latest_row.last_attempt_at or latest_row.resolved_at or latest_row.created_at
+            )
+        if reference is not None:
+            elapsed = (now - _as_utc(reference)).total_seconds()
+            if elapsed < float(self._repeat_interval_seconds):
+                return False, -1, reference
+        previous = _repeat_index_from_event_id(str(latest_row.event_id), prefix)
+        # A malformed legacy/manual row must not fork a parallel slot sequence. Falling back
+        # to zero collides with the existing unique slot and suppresses safely instead.
+        return True, previous + 1 if previous >= 0 else 0, reference
+
     async def handle(self, event: NotificationEvent) -> None:
-        """Deliver one active alert if this repeat window has no delivery slot yet."""
+        """Deliver one active alert if ``now - last_sent`` is at least the repeat interval."""
         if not self._enabled(event.type.value):
             logger.info("business_alert_disabled", event_type=event.type.value)
             self._delivery_metric(event, "disabled")
             return
         if self._slack_sender is None:
-            logger.warning("business_alert_slack_not_configured", event_type=event.type.value)
+            # Startup logs the missing/invalid webhook once. Repeating a warning on every
+            # poll/sweep would be noise; metrics retain the per-check dropout count.
             self._delivery_metric(event, "no_webhook")
             return
 
@@ -135,17 +210,38 @@ class BusinessAlertHandler:
         check = str(payload.get("check") or event.type.value)
         period = str(payload.get("period") or "unknown")
         dedupe_key = str(payload.get("dedupe_key") or f"{check}:{period}")
-        window = int(time.time() // self._repeat_interval_seconds)
-        delivery_id = delivery_event_id(dedupe_key, window)
-        payload.update({
-            "check": check,
-            "period": period,
-            "dedupe_key": dedupe_key,
-            "repeat_window": window,
-        })
-        delivery_event = event.model_copy(update={"event_id": delivery_id, "payload": payload})
+        now = self._now()
+        prefix = delivery_slot_prefix(dedupe_key)
 
         async with self._session_factory() as session:
+            latest_row = await self._latest_slot_row(session, event.type.value, prefix)
+            may_send, repeat_index, reference = self._repeat_gate(
+                prefix=prefix,
+                latest_row=latest_row,
+                now=now,
+            )
+            if not may_send:
+                logger.info(
+                    "business_alert_repeat_suppressed",
+                    event_type=event.type.value,
+                    dedupe_key=dedupe_key,
+                    last_reference_at=(
+                        reference.isoformat(timespec="seconds") if reference else None
+                    ),
+                    repeat_interval_seconds=self._repeat_interval_seconds,
+                )
+                suppressed_event = event.model_copy(update={"payload": payload})
+                self._delivery_metric(suppressed_event, "suppressed")
+                return
+
+            delivery_id = delivery_event_id(dedupe_key, repeat_index)
+            payload.update({
+                "check": check,
+                "period": period,
+                "dedupe_key": dedupe_key,
+                "repeat_index": repeat_index,
+            })
+            delivery_event = event.model_copy(update={"event_id": delivery_id, "payload": payload})
             log = NotificationLog(
                 event_id=delivery_id,
                 event_type=event.type.value,
@@ -166,7 +262,7 @@ class BusinessAlertHandler:
                     "business_alert_repeat_suppressed",
                     event_type=event.type.value,
                     dedupe_key=dedupe_key,
-                    repeat_window=window,
+                    repeat_index=repeat_index,
                 )
                 self._delivery_metric(delivery_event, "suppressed")
                 return
@@ -184,7 +280,7 @@ class BusinessAlertHandler:
                             NotificationLog.status == "pending",
                             NotificationLog.last_attempt_at == claimed_at,
                         )
-                        .values(last_attempt_at=datetime.now(UTC))
+                        .values(last_attempt_at=self._now())
                         .returning(NotificationLog.id)
                     )
                 ).scalar_one_or_none()
@@ -204,7 +300,7 @@ class BusinessAlertHandler:
             def skip(reason: str) -> None:
                 log.status = "skipped"
                 log.error_message = f"resend_skipped_{reason}"
-                log.resolved_at = datetime.now(UTC)
+                log.resolved_at = self._now()
 
             if log.channel != Channel.SLACK.value:
                 skip("not_slack")
@@ -226,7 +322,7 @@ class BusinessAlertHandler:
                 return
             if self._slack_sender is None:
                 # 인프라/설정 일시 상태로 보고 pending 을 유지한다 — 다음 sweeper 가 재시도.
-                logger.warning("business_alert_resend_no_webhook", log_id=log_id)
+                # webhook 부재 경고는 startup 에서 한 번만 남긴다.
                 return
 
             payload = dict(log.event_payload or {})
@@ -239,7 +335,7 @@ class BusinessAlertHandler:
             event = NotificationEvent(
                 event_id=log.event_id,
                 type=event_type,
-                timestamp=datetime.now(UTC),
+                timestamp=self._now(),
                 source=ServiceSource.NOTIFICATION_WORKER,
                 payload=payload,
             )
@@ -257,7 +353,7 @@ class BusinessAlertHandler:
         except ValueError as exc:
             log.status = "rejected"
             log.error_message = str(exc)
-            log.resolved_at = datetime.now(UTC)
+            log.resolved_at = self._now()
             self._delivery_metric(event, "rejected")
         else:
             try:
@@ -269,7 +365,7 @@ class BusinessAlertHandler:
                     "mocked" if getattr(self._slack_sender, "mocked", False) is True else "sent"
                 )
                 log.error_message = None
-                log.resolved_at = datetime.now(UTC)
+                log.resolved_at = self._now()
                 self._delivery_metric(event, log.status)
             except Exception as exc:
                 log.status = (
@@ -278,7 +374,7 @@ class BusinessAlertHandler:
                     else "rejected"
                 )
                 log.error_message = str(exc)[:1000]
-                log.resolved_at = datetime.now(UTC)
+                log.resolved_at = self._now()
                 self._delivery_metric(event, log.status)
                 logger.error(
                     "business_alert_slack_send_failed",
@@ -286,7 +382,7 @@ class BusinessAlertHandler:
                     error=str(exc)[:300],
                 )
 
-        log.last_attempt_at = datetime.now(UTC)
+        log.last_attempt_at = self._now()
         try:
             await session.commit()
         except Exception as exc:

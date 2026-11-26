@@ -1149,6 +1149,12 @@ notificationWorker:
     enabled: false
     pollIntervalSeconds: 300
     repeatIntervalSeconds: 21600  # 같은 (check, period) 활성 상태의 반복 알림 간격(6시간)
+    reconciliationMismatchMaxAgeSeconds: 129600  # 최신 reconciliation run 이 이보다 오래되면 stale 로만 기록
+    thresholds:                  # notification_configs.config 의 min_count/min_pct/max_age_seconds 가 env보다 우선
+      reconciliationMismatchMinCount: 1
+      reconciliationMismatchMinPct: 0      # 비용 drift pct trigger; 0이면 절대 건수만 사용(기존 동작)
+      deadLetterMinCount: 1
+      pricingMissingMinCount: 1
     checks:
       reconciliationMismatch: false
       deadLetterGrowth: false

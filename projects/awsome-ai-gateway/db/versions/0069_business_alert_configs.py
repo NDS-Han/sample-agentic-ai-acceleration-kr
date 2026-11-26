@@ -1,7 +1,7 @@
 # Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
 """business Slack alerts — notification config seed + read grants + dead-letter growth index
 
-Revision ID: 0064
+Revision ID: 0069
 Revises: 0063
 Create Date: 2026-11-25
 
@@ -9,8 +9,10 @@ Create Date: 2026-11-25
 1. business alert 3종을 ``notification.notification_configs`` 에 **enabled=false** 로 시드한다.
    운영자가 켜기 전까지 notification-worker 가 아무 Slack 알림도 보내지 않는다. recipient_roles 는
    빈 배열이다 — business alert 는 사용자 이메일이 아니라 운영 Slack webhook 으로 간다.
-2. notification-worker 가 읽는 usage 테이블 3개에 최소 SELECT 권한을 준다.
-3. ``usage.cost_dead_letters(created_at)`` 인덱스를 추가한다. dead-letter "growth" 는 replayed 여부와
+2. 같은 테이블에 optional ``config`` JSONB 컬럼을 추가한다. business alert 의 임계값 override
+   (예: ``{"min_count": 3}``)를 운영 DB에서 바꿀 수 있게 하며 기본 ``{}`` 는 env/코드 기본값을 쓴다.
+3. notification-worker 가 읽는 usage 테이블 3개에 최소 SELECT 권한을 준다.
+4. ``usage.cost_dead_letters(created_at)`` 인덱스를 추가한다. dead-letter "growth" 는 replayed 여부와
    무관하게 최근 insert 를 본다. 테이블은 작게 유지되는 것이 목표지만 장애 시 커질 수 있으므로
    CONCURRENTLY 로 만든다.
 
@@ -26,7 +28,7 @@ from alembic import op
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 
-revision = "0064"
+revision = "0069"
 down_revision = "0063"
 branch_labels = None
 depends_on = None
@@ -83,7 +85,7 @@ def _exec_retry(bind, stmt: str) -> None:
         except DBAPIError as exc:
             if not _is_lock_timeout(exc) or attempt == MAX_ATTEMPTS:
                 raise
-            print(f"[0064] lock timeout (attempt {attempt}) — retrying: "
+            print(f"[0069] lock timeout (attempt {attempt}) — retrying: "
                   f"{' '.join(stmt.split())[:80]}", flush=True)
             time.sleep(min(2 ** attempt, 20))
 
@@ -106,6 +108,11 @@ def _upgrade_all() -> None:
     previous = bind.execute(text("SHOW lock_timeout")).scalar()
     bind.execute(text(f"SET lock_timeout = '{LOCK_TIMEOUT}'"))
     try:
+        _exec_retry(
+            bind,
+            "ALTER TABLE notification.notification_configs "
+            "ADD COLUMN IF NOT EXISTS config JSONB NOT NULL DEFAULT '{}'::jsonb",
+        )
         _exec_retry(bind, _CONFIG_INSERT)
         for stmt in _GRANTS:
             _exec_retry(bind, stmt)
@@ -125,6 +132,10 @@ def _downgrade_all() -> None:
     bind.execute(text(f"SET lock_timeout = '{LOCK_TIMEOUT}'"))
     try:
         _exec_retry(bind, "DROP INDEX CONCURRENTLY IF EXISTS usage.idx_cost_dead_letters_created")
+        _exec_retry(
+            bind,
+            "ALTER TABLE notification.notification_configs DROP COLUMN IF EXISTS config",
+        )
         for stmt in _REVOKE:
             _exec_retry(bind, stmt)
         _exec_retry(bind, _DELETE_CONFIGS)

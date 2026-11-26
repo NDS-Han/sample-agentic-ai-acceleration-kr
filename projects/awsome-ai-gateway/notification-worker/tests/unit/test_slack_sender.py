@@ -77,6 +77,15 @@ async def test_slack_errors_do_not_leak_webhook_url() -> None:
 def test_slack_sender_rejects_non_http_url() -> None:
     with pytest.raises(ValueError):
         SlackWebhookSender(SecretStr("ftp://example.invalid/hook"))
+    with pytest.raises(ValueError):
+        SlackWebhookSender(SecretStr("https://"))
+
+
+def test_slack_sender_factory_invalid_url_disables_slack_instead_of_raising() -> None:
+    sender = create_slack_sender(Settings(slack_webhook_url=SecretStr("http://example.invalid/hook")))
+    assert sender is None
+    assert create_slack_sender(Settings(slack_webhook_url=SecretStr("https://"))) is None
+    assert create_slack_sender(Settings(slack_webhook_url=SecretStr("not a url"))) is None
 
 
 async def test_retry_executor_does_not_repeat_permanent_slack_failure(monkeypatch) -> None:

@@ -146,6 +146,16 @@ spec:
               value: {{ .Values.notificationWorker.businessAlerts.pollIntervalSeconds | quote }}
             - name: BUSINESS_ALERT_REPEAT_INTERVAL_SECONDS
               value: {{ .Values.notificationWorker.businessAlerts.repeatIntervalSeconds | quote }}
+            - name: BUSINESS_ALERT_RECONCILIATION_MISMATCH_MAX_AGE_SECONDS
+              value: {{ .Values.notificationWorker.businessAlerts.reconciliationMismatchMaxAgeSeconds | quote }}
+            - name: BUSINESS_ALERT_RECONCILIATION_MISMATCH_MIN_COUNT
+              value: {{ .Values.notificationWorker.businessAlerts.thresholds.reconciliationMismatchMinCount | quote }}
+            - name: BUSINESS_ALERT_RECONCILIATION_MISMATCH_MIN_PCT
+              value: {{ .Values.notificationWorker.businessAlerts.thresholds.reconciliationMismatchMinPct | quote }}
+            - name: BUSINESS_ALERT_DEAD_LETTER_MIN_COUNT
+              value: {{ .Values.notificationWorker.businessAlerts.thresholds.deadLetterMinCount | quote }}
+            - name: BUSINESS_ALERT_PRICING_MISSING_MIN_COUNT
+              value: {{ .Values.notificationWorker.businessAlerts.thresholds.pricingMissingMinCount | quote }}
             {{- if .Values.notificationWorker.businessAlerts.slack.webhookSecretName }}
             - name: SLACK_WEBHOOK_URL
               valueFrom:

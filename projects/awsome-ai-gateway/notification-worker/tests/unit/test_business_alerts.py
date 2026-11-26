@@ -3,7 +3,7 @@
 """business Slack alert — 설정 기본값, dedupe/repeat, 감사 로그, 데이터 해석."""
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 
 from sqlalchemy.exc import IntegrityError
@@ -38,7 +38,7 @@ def test_business_alerts_are_off_by_default(monkeypatch) -> None:
     assert settings.business_alert_repeat_interval_seconds > 0
 
 
-def test_delivery_event_id_is_stable_per_check_period_and_repeat_window() -> None:
+def test_delivery_event_id_is_stable_per_check_period_and_repeat_ordinal() -> None:
     key = "pricing_missing:2026-11"
     first = delivery_event_id(key, 100)
     assert first == delivery_event_id(key, 100)
@@ -97,6 +97,15 @@ def _factory(*, commit_exc: Exception | None = None, existing_row=None):
     return factory
 
 
+def _config_cache(*, enabled: bool = True, config: dict | None = None):
+    row = MagicMock()
+    row.enabled = enabled
+    row.config = config or {}
+    cache = MagicMock()
+    cache.get.return_value = row
+    return cache
+
+
 def _payload(check: str = "pricing_missing", period: str = "2026-11") -> dict:
     return {
         "check": check,
@@ -123,7 +132,13 @@ def _event(payload: dict | None = None) -> NotificationEvent:
     )
 
 
-def _handler(*, commit_exc: Exception | None = None, existing_row=None, enabled: bool = True):
+def _handler(
+    *,
+    commit_exc: Exception | None = None,
+    existing_row=None,
+    enabled: bool = True,
+    clock=None,
+):
     config = MagicMock()
     config.enabled = enabled
     config_cache = MagicMock()
@@ -146,6 +161,7 @@ def _handler(*, commit_exc: Exception | None = None, existing_row=None, enabled:
         retry_executor=retry_executor,
         metrics=None,
         repeat_interval_seconds=3600,
+        clock=clock,
     )
     return handler, sender, factory
 
@@ -320,6 +336,7 @@ async def test_poll_once_hands_active_pricing_finding_to_handler() -> None:
         handler=handler,
         settings=settings,
         metrics=None,
+        config_cache=_config_cache(),
     )
 
     count = await task.poll_once(now=datetime(2026, 11, 25, 3, 0, tzinfo=UTC))
@@ -347,9 +364,223 @@ async def test_poll_once_master_switch_off_does_not_query_or_deliver() -> None:
         handler=handler,
         settings=Settings(),
         metrics=None,
+        config_cache=_config_cache(),
     )
     assert await task.poll_once() == 0
     assert not session.statements
+    handler.handle.assert_not_awaited()
+
+
+async def test_poll_once_disabled_config_does_not_execute_that_check() -> None:
+    session = _QuerySession([])
+    handler = MagicMock()
+    handler.handle = AsyncMock()
+    settings = Settings(
+        business_alerts_enabled=True,
+        business_alert_pricing_missing_enabled=True,
+        reporting_timezone="UTC",
+    )
+    task = BusinessAlertTask(
+        session_factory=lambda: session,
+        handler=handler,
+        settings=settings,
+        metrics=None,
+        config_cache=_config_cache(enabled=False),
+    )
+
+    assert await task.poll_once(now=datetime(2026, 11, 25, 3, 0, tzinfo=UTC)) == 0
+    assert not session.statements
+    handler.handle.assert_not_awaited()
+
+
+async def test_poll_once_per_check_env_off_does_not_execute_that_check() -> None:
+    session = _QuerySession([])
+    handler = MagicMock()
+    handler.handle = AsyncMock()
+    settings = Settings(
+        business_alerts_enabled=True,
+        business_alert_pricing_missing_enabled=False,
+        reporting_timezone="UTC",
+    )
+    task = BusinessAlertTask(
+        session_factory=lambda: session,
+        handler=handler,
+        settings=settings,
+        metrics=None,
+        config_cache=_config_cache(enabled=True),
+    )
+
+    assert await task.poll_once(now=datetime(2026, 11, 25, 3, 0, tzinfo=UTC)) == 0
+    assert not session.statements
+    handler.handle.assert_not_awaited()
+
+
+async def test_dead_letter_min_count_threshold_suppresses_small_growth() -> None:
+    now = datetime(2026, 11, 25, 3, 0, tzinfo=UTC)
+    session = _QuerySession([
+        [{"count": 2, "latest_at": now}],
+    ])
+    handler = MagicMock()
+    handler.handle = AsyncMock()
+    settings = Settings(
+        business_alerts_enabled=True,
+        business_alert_dead_letter_growth_enabled=True,
+        business_alert_dead_letter_min_count=3,
+        reporting_timezone="UTC",
+    )
+    task = BusinessAlertTask(
+        session_factory=lambda: session,
+        handler=handler,
+        settings=settings,
+        metrics=None,
+        config_cache=_config_cache(),
+    )
+
+    assert await task.poll_once(now=now) == 0
+    handler.handle.assert_not_awaited()
+    # count 쿼리만 실행하고 threshold 미만이면 reason breakdown 쿼리는 하지 않는다.
+    assert len(session.statements) == 1
+
+
+async def test_notification_config_json_overrides_env_threshold() -> None:
+    now = datetime(2026, 11, 25, 3, 0, tzinfo=UTC)
+    session = _QuerySession([
+        [{"count": 2, "latest_at": now}],
+        [{"reason": "numeric", "count": 2}],
+    ])
+    handler = MagicMock()
+    handler.handle = AsyncMock()
+    settings = Settings(
+        business_alerts_enabled=True,
+        business_alert_dead_letter_growth_enabled=True,
+        business_alert_dead_letter_min_count=3,
+        reporting_timezone="UTC",
+    )
+    task = BusinessAlertTask(
+        session_factory=lambda: session,
+        handler=handler,
+        settings=settings,
+        metrics=None,
+        config_cache=_config_cache(config={"min_count": 2}),
+    )
+
+    assert await task.poll_once(now=now) == 1
+    handler.handle.assert_awaited_once()
+
+
+async def test_pricing_missing_min_count_threshold_suppresses_small_backlog() -> None:
+    now = datetime(2026, 11, 25, 3, 0, tzinfo=UTC)
+    session = _QuerySession([
+        [{"count": 4, "latest_at": now}],
+    ])
+    handler = MagicMock()
+    handler.handle = AsyncMock()
+    settings = Settings(
+        business_alerts_enabled=True,
+        business_alert_pricing_missing_enabled=True,
+        business_alert_pricing_missing_min_count=5,
+        reporting_timezone="UTC",
+    )
+    task = BusinessAlertTask(
+        session_factory=lambda: session,
+        handler=handler,
+        settings=settings,
+        metrics=None,
+        config_cache=_config_cache(),
+    )
+
+    assert await task.poll_once(now=now) == 0
+    handler.handle.assert_not_awaited()
+    assert len(session.statements) == 1
+
+
+def test_reconciliation_absolute_or_cost_pct_thresholds() -> None:
+    row = {
+        "status": "mismatch",
+        "mismatch_count": 3,
+        "report_date": date(2026, 11, 24),
+        "period": "2026-11",
+        "finished_at": datetime(2026, 11, 25, 1, 0, tzinfo=UTC),
+        "checks": {
+            "budget_vs_raw": {
+                "mismatches": 3,
+                "ledger_minus_expected": "4.000000",
+                "raw_charged_total": "200.000000",
+            },
+        },
+    }
+    assert reconciliation_finding(row, min_count=4, min_pct=3.0) is None
+    assert reconciliation_finding(row, min_count=4, min_pct=2.0) is not None  # pct trigger
+    assert reconciliation_finding(row, min_count=3, min_pct=3.0) is not None  # abs trigger
+
+
+async def test_stale_latest_reconciliation_run_does_not_alert_and_records_stale_metric() -> None:
+    now = datetime(2026, 11, 25, 3, 0, tzinfo=UTC)
+    old = now - timedelta(hours=37)
+    session = _QuerySession([
+        [{
+            "status": "mismatch",
+            "mismatch_count": 8,
+            "report_date": date(2026, 11, 23),
+            "period": "2026-11",
+            "started_at": old,
+            "finished_at": old,
+            "checks": {"budget_vs_raw": {"mismatches": 8}},
+        }],
+    ])
+    handler = MagicMock()
+    handler.handle = AsyncMock()
+    metrics = MagicMock()
+    settings = Settings(
+        business_alerts_enabled=True,
+        business_alert_reconciliation_mismatch_enabled=True,
+        reporting_timezone="UTC",
+    )
+    task = BusinessAlertTask(
+        session_factory=lambda: session,
+        handler=handler,
+        settings=settings,
+        metrics=metrics,
+        config_cache=_config_cache(),
+    )
+
+    assert await task.poll_once(now=now) == 0
+    handler.handle.assert_not_awaited()
+    metrics.business_alerts_checked_total.add.assert_any_call(
+        1, {"check": "reconciliation_mismatch", "result": "stale"}
+    )
+
+
+async def test_reconciliation_max_age_config_json_overrides_env_default() -> None:
+    now = datetime(2026, 11, 25, 3, 0, tzinfo=UTC)
+    two_hours_old = now - timedelta(hours=2)
+    session = _QuerySession([
+        [{
+            "status": "mismatch",
+            "mismatch_count": 1,
+            "report_date": date(2026, 11, 24),
+            "period": "2026-11",
+            "started_at": two_hours_old,
+            "finished_at": two_hours_old,
+            "checks": {"budget_vs_raw": {"mismatches": 1}},
+        }],
+    ])
+    handler = MagicMock()
+    handler.handle = AsyncMock()
+    settings = Settings(
+        business_alerts_enabled=True,
+        business_alert_reconciliation_mismatch_enabled=True,
+        reporting_timezone="UTC",
+    )
+    task = BusinessAlertTask(
+        session_factory=lambda: session,
+        handler=handler,
+        settings=settings,
+        metrics=None,
+        config_cache=_config_cache(config={"max_age_seconds": 3600}),
+    )
+
+    assert await task.poll_once(now=now) == 0
     handler.handle.assert_not_awaited()
 
 

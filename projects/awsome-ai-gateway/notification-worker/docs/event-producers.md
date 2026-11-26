@@ -123,8 +123,24 @@ producer 외에 아래 4곳이 **모두** 갱신돼야 한다 — 하나라도 �
 - 채널은 `slack` 이며 수신자는 사용자 이메일이 아니라 운영 Slack incoming webhook 하나다.
   따라서 `recipient_roles` seed 는 `[]` 이고 HTML 템플릿은 없다. Slack 본문에 필요한 값은
   `notification_logs.event_payload` 에 자급자족 형태로 저장되어 sweeper 재발송도 같은 메시지를 쓴다.
-- dedupe key 는 `(check, period)` 이고 deterministic event_id 는 repeat window 를 포함한다.
-  `notification_logs` 의 `(event_id,event_type,recipient_email)` unique 슬롯이 replica 중복 발송을 막는다.
+- dedupe key 는 `(check, period)` 이다. deterministic event_id 는 그 key 의 stable hash 에
+  repeat ordinal(000000, 000001, …)을 붙인다. UTC 고정 epoch bucket 이 아니라 가장 최근 성공
+  발송 시각을 `last_sent` 로 보고 `now - last_sent` 가 repeat interval 이상일 때만 다음 ordinal 을
+  만든다(아직 성공이 없거나 진행/실패 row 가 더 최신이면 그 시도 시각을 backoff 기준으로 쓴다).
+  `notification_logs` 의 `(event_id,event_type,recipient_email)` unique 슬롯이 replica 동시 claim 중
+  1건만 통과시킨다. UTC 고정 epoch bucket 으로 경계 직후 다시 발송하지 않는다.
+- `notification_configs.enabled=false`(또는 행 없음)이면 해당 check 는 usage DB count 쿼리조차
+  실행하지 않는다. 최신 reconciliation run 이 `max_age_seconds`(기본 36h)보다 오래됐으면 알림을
+  만들지 않고 `worker_business_alerts_checked_total{result="stale"}` 과 `business_alert_reconciliation_stale`
+  로그만 남긴다.
+- threshold 는 env 기본값 위에 `notification_configs.config` JSON 의 키가 우선한다
+  (`{"min_count": 3}` 형태). `dead_letter_growth`/`pricing_missing` 은 `min_count`,
+  `reconciliation_mismatch` 는 `min_count`, `min_pct`, `max_age_seconds` 를 지원한다.
+  reconciliation 의 `min_pct` 는 checks JSON 에 총액 denominator 가 있는 검사(`raw_vs_daily` 의
+  `cost_diff/raw_cost`, `budget_vs_raw` 의 `ledger_minus_expected/raw_charged_total`) 중 가장 큰
+  절대 비용 drift 비율이다. count 또는 pct 둘 중 하나가 threshold 에 도달하면 알림이다.
+  DB config 에 키가 없으면 env 값, env 도 없으면 코드 기본값을 쓴다(즉 precedence 는
+  DB config JSON > env > code default). 잘못된 타입/범위는 한 번만 warning 하고 env/default 로 fallback 한다.
 - 모든 쿼리는 bounded/index-friendly 해야 하고 `request_id`, `user_id`, 원본 payload 는 Slack 이나
   audit payload 에 복사하지 않는다(집계와 모델 alias 등 운영 메타데이터만).
 - infra alert(CPU, pod, Redis/DB 연결)는 계속 Alertmanager 담당이다. 이 3종은 비용/정산 correctness 의

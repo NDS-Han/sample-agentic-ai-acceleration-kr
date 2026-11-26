@@ -101,6 +101,19 @@ def _configure_logging(log_level: str, log_format: str) -> None:
     )
 
 
+def create_delivery_senders(settings):
+    """Build email and Slack senders for worker startup.
+
+    Slack is optional: create_slack_sender disables only that channel on a missing/invalid
+    webhook, while the existing email sender remains available for budget/key/security events.
+    """
+    email_sender = create_email_sender(settings)
+    # master off 면 webhook 값을 검증/해석하지 않는다 — 선택 기능의 잘못된 secret 이
+    # 기존 email notification worker 기동을 막지 않게 한다.
+    slack_sender = create_slack_sender(settings) if settings.business_alerts_enabled else None
+    return email_sender, slack_sender
+
+
 async def main() -> None:  # noqa: PLR0915  (복잡도 예외: lifespan 특성상 길이 필요)
     settings = get_settings()
     _configure_logging(settings.log_level, settings.log_format)
@@ -151,10 +164,7 @@ async def main() -> None:  # noqa: PLR0915  (복잡도 예외: lifespan 특성�
     notification_buffer.set_metrics(worker_metrics.errors_total)
 
     # ── 8. EmailSender / Slack sender ─────────────────────────────────────────
-    email_sender = create_email_sender(settings)
-    # master off 면 webhook 값을 검증/해석하지 않는다 — 선택 기능의 잘못된 secret 이
-    # 기존 email notification worker 기동을 막지 않게 한다.
-    slack_sender = create_slack_sender(settings) if settings.business_alerts_enabled else None
+    email_sender, slack_sender = create_delivery_senders(settings)
 
     # ── 9. TemplateEngine ─────────────────────────────────────────────────────
     init_template_engine()
@@ -258,6 +268,7 @@ async def main() -> None:  # noqa: PLR0915  (복잡도 예외: lifespan 특성�
             handler=business_alert_handler,
             settings=settings,
             metrics=worker_metrics,
+            config_cache=config_cache,
         )
         supervisor.register("business_alerts", business_alert_task)
 

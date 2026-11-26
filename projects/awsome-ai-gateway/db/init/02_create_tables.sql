@@ -1423,7 +1423,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_cost_dead_letters_request
     ON usage.cost_dead_letters (request_id) WHERE request_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_cost_dead_letters_open
     ON usage.cost_dead_letters (created_at) WHERE replayed_at IS NULL;
--- migration 0064: dead-letter growth 알림은 replayed 여부와 무관하게 최근 insert 를 본다.
+-- migration 0069: dead-letter growth 알림은 replayed 여부와 무관하게 최근 insert 를 본다.
 CREATE INDEX IF NOT EXISTS idx_cost_dead_letters_created
     ON usage.cost_dead_letters (created_at DESC);
 

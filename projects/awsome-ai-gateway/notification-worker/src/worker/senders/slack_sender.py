@@ -43,9 +43,17 @@ class SlackWebhookSender:
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self._webhook_url = webhook_url.get_secret_value().strip()
-        scheme = urlparse(self._webhook_url).scheme.lower()
-        if scheme != "https":
-            raise ValueError("SLACK_WEBHOOK_URL must use https")
+        parsed = urlparse(self._webhook_url)
+        try:
+            host = parsed.hostname
+        except ValueError:
+            host = None
+        if (
+            parsed.scheme.lower() != "https"
+            or not host
+            or any(ch.isspace() for ch in self._webhook_url)
+        ):
+            raise ValueError("SLACK_WEBHOOK_URL must be a valid https URL")
         self._timeout_seconds = timeout_seconds
         self._transport = transport
 
@@ -92,12 +100,20 @@ def create_slack_sender(settings) -> SlackWebhookSender | MockSlackSender | None
     """
     secret = getattr(settings, "slack_webhook_url", None)
     if secret is None:
+        logger.warning("slack_webhook_missing_channel_disabled")
         return None
     url = secret.get_secret_value().strip()
     if not url:
+        logger.warning("slack_webhook_missing_channel_disabled")
         return None
     if url == "mock://slack":
         return MockSlackSender()
-    return SlackWebhookSender(
-        SecretStr(url), timeout_seconds=float(settings.slack_send_timeout_seconds)
-    )
+    try:
+        return SlackWebhookSender(
+            SecretStr(url), timeout_seconds=float(settings.slack_send_timeout_seconds)
+        )
+    except (TypeError, ValueError) as exc:
+        # URL 은 secret 이므로 로그/에러에 절대 싣지 않는다. 잘못된 Slack 설정 하나가
+        # 기존 email notification worker 기동을 막지 않고 Slack 채널만 비활성화한다.
+        logger.warning("slack_webhook_invalid_channel_disabled", error_type=type(exc).__name__)
+        return None

@@ -119,8 +119,17 @@ class Settings(BaseSettings):
     business_alert_pricing_missing_enabled: bool = False
     business_alert_poll_interval_seconds: int = 300
     # 같은 (check, period) 활성 상태의 반복 알림 간격. notification_logs 의
-    # deterministic event_id 슬롯이 이 창 안의 중복 발송을 막는다.
+    # deterministic event_id 슬롯이 이 간격 안의 중복 발송을 막는다.
     business_alert_repeat_interval_seconds: int = 6 * 3600
+    # Alert firing thresholds. notification_configs.config 의 같은 이름 키(min_count,
+    # min_pct, max_age_seconds)가 있으면 그 DB 값이 env 값보다 우선한다.
+    business_alert_dead_letter_min_count: int = 1
+    business_alert_pricing_missing_min_count: int = 1
+    business_alert_reconciliation_mismatch_min_count: int = 1
+    # pct 는 reconciliation checks JSON 에 총액이 있는 검사의 최대 절대 비용 drift 비율이다.
+    # 0 이면 pct trigger 를 끈다(기본은 절대 건수 1 이상이면 알림 — 기존 동작).
+    business_alert_reconciliation_mismatch_min_pct: float = 0.0
+    business_alert_reconciliation_mismatch_max_age_seconds: int = 36 * 3600
 
     # Reliability
     notification_buffer_max: int = 1_000
@@ -144,12 +153,31 @@ class Settings(BaseSettings):
     @field_validator(
         "business_alert_poll_interval_seconds",
         "business_alert_repeat_interval_seconds",
+        "business_alert_reconciliation_mismatch_max_age_seconds",
         "slack_send_timeout_seconds",
     )
     @classmethod
     def _positive_seconds(cls, v: float) -> float:
         if v <= 0:
             raise ValueError("business alert/Slack timeout intervals must be positive")
+        return v
+
+    @field_validator(
+        "business_alert_dead_letter_min_count",
+        "business_alert_pricing_missing_min_count",
+        "business_alert_reconciliation_mismatch_min_count",
+    )
+    @classmethod
+    def _positive_count(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError("business alert count thresholds must be >= 1")
+        return v
+
+    @field_validator("business_alert_reconciliation_mismatch_min_pct")
+    @classmethod
+    def _pct_range(cls, v: float) -> float:
+        if not 0 <= v <= 100:
+            raise ValueError("business alert reconciliation min pct must be between 0 and 100")
         return v
 
     @field_validator("reporting_timezone")

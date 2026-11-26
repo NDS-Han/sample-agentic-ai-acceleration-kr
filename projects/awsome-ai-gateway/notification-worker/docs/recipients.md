@@ -106,6 +106,13 @@ redis-cli -u "$REDIS_URL" PUBLISH notifications:config_reload '{}'
 따라서 이 3종에 `admin` 역할을 추가해도 이메일은 발송되지 않는다 — 운영 Slack webhook secret 과
 notification_configs.enabled, env 스위치로 제어한다.
 
+이 3종의 `notification_configs.config` JSON 은 수신자가 아니라 threshold override 다.
+예를 들어 `dead_letter_growth` 행에 `UPDATE ... SET config='{"min_count": 3}'` 를 하면 env
+`BUSINESS_ALERT_DEAD_LETTER_MIN_COUNT` 보다 그 DB 값이 우선한다. 지원 키는
+`min_count`(3종 공통), `min_pct`·`max_age_seconds`(reconciliation 만)이며, 없는 키는
+env 값, env도 없으면 코드 기본값을 쓴다. webhook 이 없거나 malformed/non-https 이면 startup 에
+URL 없이 한 번만 warning 하고 Slack 채널만 끈다 — budget/key/security email notification 은 계속 동작한다.
+
 ## 5. 안티패턴
 
 - ❌ 수신자를 코드(`RecipientResolver`)에서 하드코딩으로 추가 — 설정이 DB에

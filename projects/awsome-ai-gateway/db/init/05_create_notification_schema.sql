@@ -15,6 +15,9 @@ CREATE TABLE IF NOT EXISTS notification.notification_configs (
     event_type      VARCHAR(50)  NOT NULL UNIQUE,
     recipient_roles JSONB        NOT NULL DEFAULT '[]',
     enabled         BOOLEAN      NOT NULL DEFAULT true,
+    -- Optional per-event config JSON. Business alerts use keys such as min_count,
+    -- min_pct, max_age_seconds; '{}' means env/code defaults apply.
+    config          JSONB        NOT NULL DEFAULT '{}',
     created_at      TIMESTAMPTZ  NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ  NOT NULL DEFAULT now()
 );
