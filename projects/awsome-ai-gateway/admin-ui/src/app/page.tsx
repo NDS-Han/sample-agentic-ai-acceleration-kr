@@ -91,13 +91,16 @@ async function DashboardKPIs({ period, client }: { period: string; client: strin
         </h2>
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
           {(() => {
-            // 요청 카드: 값은 성공 수(비용·토큰 KPI 와 같은 모집단), 서브라인에
-            // 전체·에러를 싣는다. 에러가 있으면 상세는 모니터링이 맞는 목적지다.
+            // 요청 카드 값은 성공+취소 수(cancelled 도 프로바이더 처리·과금 행).
+            // 서브라인의 에러율 모집단은 기존 정책대로 성공+에러다(cancelled 는 장애가 아니다).
             const err = errorRateInfo(kpi?.total_requests ?? 0, kpi?.error_requests ?? 0);
+            const countedRequests = kpi
+              ? kpi.total_requests + (kpi.cancelled_requests ?? 0)
+              : 0;
             return (
               <KPICard
                 title={t('totalRequests')}
-                value={kpi ? kpi.total_requests.toLocaleString() : '—'}
+                value={kpi ? countedRequests.toLocaleString() : '—'}
                 icon={<Activity size={18} aria-hidden="true" />}
                 alertLevel={err.warn ? AlertLevel.WARNING : AlertLevel.NORMAL}
                 alertLabel={err.warn ? t('errorRateLabel', { rate: err.rate.toFixed(1) }) : undefined}
@@ -320,6 +323,9 @@ async function ClientDistribution({ period }: { period: string }) {
       </h2>
       <div className="glass glass-hover rounded-apple p-5">
         {share ? <ClientShareDonutClient data={data} /> : <ErrorState compact />}
+        <p className="mt-4 text-center text-xs text-muted-foreground" data-testid="client-share-model-only">
+          {t('clientShareModelOnly')}
+        </p>
       </div>
     </section>
   );
