@@ -42,6 +42,7 @@ ACTION_GROUPS: dict[str, tuple[str, ...]] = {
         "COGNITO_SYNC_ALL",
         "COGNITO_SYNC_USER",
         "COGNITO_SYNC_GROUP",
+        "AICM_ADMIN_TARGET_REFUSED",
     ),
     "access_policy": (
         "SET_TEAM_ALLOWED_MODELS",
@@ -77,6 +78,8 @@ ACTION_GROUPS: dict[str, tuple[str, ...]] = {
         "DELETE_TEAM_BUDGET",
         "DELETE_USER_BUDGET",
         "CLEAR_USER_CLIENT_BUDGET",
+        "SET_USER_APP_GROUP_BUDGET",
+        "CLEAR_USER_APP_GROUP_BUDGET",
         "SEED_BUDGET_SPENT",
         "SET_AUTO_DOWNGRADE",
         "DELETE_AUTO_DOWNGRADE",

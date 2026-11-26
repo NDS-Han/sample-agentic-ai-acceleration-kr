@@ -1,0 +1,161 @@
+{
+  "source": ".agent-work/aicm-design/AICM_CLIENT_CONTRACT.md",
+  "endpoints": [
+    {
+      "number": 1,
+      "method": "POST",
+      "path": "/admin/users/sync-cognito/user/{username}",
+      "semantics": "AICM waits up to 10 min; response may include `users_deactivated`"
+    },
+    {
+      "number": 2,
+      "method": "POST",
+      "path": "/admin/users/sync-cognito/group/{groupname}",
+      "semantics": ""
+    },
+    {
+      "number": 3,
+      "method": "POST",
+      "path": "/admin/users/sync-cognito",
+      "semantics": "response counts `groups_synced`, `users_created`, `users_updated`, `users_deactivated`"
+    },
+    {
+      "number": 4,
+      "method": "PUT",
+      "path": "/admin/users/{id}/allowed-clients",
+      "semantics": "`[]` means allow-all; AICM never sends `[]`"
+    },
+    {
+      "number": 5,
+      "method": "PUT",
+      "path": "/admin/users/{id}/allowed-models",
+      "semantics": "same as 4"
+    },
+    {
+      "number": 6,
+      "method": "DELETE",
+      "path": "/admin/users/{id}/allowed-clients",
+      "semantics": "204"
+    },
+    {
+      "number": 7,
+      "method": "DELETE",
+      "path": "/admin/users/{id}/allowed-models",
+      "semantics": "204"
+    },
+    {
+      "number": 8,
+      "method": "GET",
+      "path": "/admin/users/{id}/allowed-clients",
+      "semantics": ""
+    },
+    {
+      "number": 9,
+      "method": "GET",
+      "path": "/admin/users/{id}/allowed-models",
+      "semantics": ""
+    },
+    {
+      "number": 10,
+      "method": "GET",
+      "path": "/admin/users",
+      "semantics": "exact match"
+    },
+    {
+      "number": 11,
+      "method": "GET",
+      "path": "/admin/teams/{team_id}/allowed-models",
+      "semantics": ""
+    },
+    {
+      "number": 12,
+      "method": "PUT",
+      "path": "/admin/budgets/user/{id}",
+      "semantics": "`max_budget_usd` as a 4-decimal string"
+    },
+    {
+      "number": 13,
+      "method": "PUT",
+      "path": "/admin/budgets/user/{id}/app/{client}",
+      "semantics": "clients `claude-code`, `cowork`, `codex`"
+    },
+    {
+      "number": 14,
+      "method": "PUT",
+      "path": "/admin/budgets/user/{id}/app-group/{group}",
+      "semantics": ""
+    },
+    {
+      "number": 15,
+      "method": "PUT",
+      "path": "/admin/budgets/team/{team_id}",
+      "semantics": "`'unlimited'` unlocks the team-level block"
+    },
+    {
+      "number": 16,
+      "method": "PUT",
+      "path": "/admin/budgets/spent",
+      "semantics": "seeds cumulative spent (absolute)"
+    },
+    {
+      "number": 17,
+      "method": "GET",
+      "path": "/admin/budgets/user/{user_id}/apps",
+      "semantics": "includes `has_total_budget`"
+    },
+    {
+      "number": 18,
+      "method": "GET",
+      "path": "/admin/budgets/user/{id}/app-groups",
+      "semantics": ""
+    },
+    {
+      "number": 19,
+      "method": "DELETE",
+      "path": "/admin/budgets/user/{id}/app-group/{group}",
+      "semantics": ""
+    },
+    {
+      "number": 20,
+      "method": "GET",
+      "path": "/admin/budgets/summary",
+      "semantics": ""
+    },
+    {
+      "number": 21,
+      "method": "GET",
+      "path": "/admin/budgets/summary/team/{team_id}/users",
+      "semantics": "single page"
+    },
+    {
+      "number": 22,
+      "method": "GET",
+      "path": "/admin/budgets/summary",
+      "semantics": ""
+    },
+    {
+      "number": 23,
+      "method": "GET",
+      "path": "/admin/budgets/usage-by-app",
+      "semantics": ""
+    },
+    {
+      "number": 24,
+      "method": "POST",
+      "path": "/admin/service-tokens/rotate",
+      "semantics": "never retried by AICM"
+    },
+    {
+      "number": 25,
+      "method": "GET",
+      "path": "/admin/service-tokens",
+      "semantics": ""
+    },
+    {
+      "number": 26,
+      "method": "GET",
+      "path": "/admin/models",
+      "semantics": ""
+    }
+  ]
+}

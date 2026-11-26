@@ -337,6 +337,9 @@ class Settings(BaseSettings):
     AICM_RL_READ_PER_MIN: int = 600
     AICM_RL_WRITE_PER_MIN: int = 120
     AICM_RL_LIFECYCLE_PER_MIN: int = 30
+    # sync-cognito 는 오래 걸리는 제어면 배치다 — read/write 와 분리해 sync 폭주가
+    # 일반 예산/정책 쓰기 예산을 소진하지 않게 한다.
+    AICM_RL_SYNC_PER_MIN: int = 10
     # 통합이 쓰는 Cognito 호출 몫(초당, 전 replica 합산 — Redis 공유 버킷). Cognito 쿼터는
     # 계정·리전 단위라 로그인 보강·sync 와 공유한다(UserUpdate 25 RPS, UserList 30 RPS 는
     # 조정 불가). Redis 장애 시 프로세스 로컬 버킷 cap // DIVISOR(=replica 수 가정).

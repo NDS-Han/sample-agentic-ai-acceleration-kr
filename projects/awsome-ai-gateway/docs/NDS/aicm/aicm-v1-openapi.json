@@ -258,6 +258,12 @@
             ],
             "title": "Expiry Days"
           },
+          "legacy_lifecycle_token": {
+            "default": false,
+            "description": "true 면 legacy /aicm/v1 lifecycle 전용 itg- 토큰. 기본 false 는 admin mirror 용 svc-",
+            "title": "Legacy Lifecycle Token",
+            "type": "boolean"
+          },
           "name": {
             "maxLength": 128,
             "minLength": 1,
@@ -282,7 +288,7 @@
             "items": {
               "type": "string"
             },
-            "maxItems": 8,
+            "maxItems": 16,
             "minItems": 1,
             "title": "Scopes",
             "type": "array"
@@ -486,6 +492,343 @@
         "title": "AicmTokenListResponse",
         "type": "object"
       },
+      "AllowedClientsBody": {
+        "properties": {
+          "clients": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Clients",
+            "type": "array"
+          }
+        },
+        "required": [
+          "clients"
+        ],
+        "title": "AllowedClientsBody",
+        "type": "object"
+      },
+      "AllowedClientsResponse": {
+        "properties": {
+          "clients": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Clients",
+            "type": "array"
+          },
+          "user_id": {
+            "format": "uuid",
+            "title": "User Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "user_id",
+          "clients"
+        ],
+        "title": "AllowedClientsResponse",
+        "type": "object"
+      },
+      "AllowedModelsResponse": {
+        "properties": {
+          "model_aliases": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Model Aliases",
+            "type": "array"
+          },
+          "team_id": {
+            "title": "Team Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "team_id",
+          "model_aliases"
+        ],
+        "title": "AllowedModelsResponse",
+        "type": "object"
+      },
+      "AllowedModelsSetRequest": {
+        "description": "Replace-all semantics: provided list becomes the new full whitelist.\n\n빈 리스트 = 전체 허용 (엔트리 전부 삭제).",
+        "properties": {
+          "model_aliases": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Model Aliases",
+            "type": "array"
+          }
+        },
+        "title": "AllowedModelsSetRequest",
+        "type": "object"
+      },
+      "ApiFormatEnum": {
+        "enum": [
+          "BEDROCK_NATIVE",
+          "OPENAI_COMPATIBLE",
+          "ANTHROPIC_MESSAGES",
+          "OPENAI_RESPONSES"
+        ],
+        "title": "ApiFormatEnum",
+        "type": "string"
+      },
+      "AppBudgetItem": {
+        "properties": {
+          "client": {
+            "title": "Client",
+            "type": "string"
+          },
+          "max_budget_usd": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Max Budget Usd",
+            "type": "string"
+          },
+          "policy": {
+            "$ref": "#/components/schemas/BudgetPolicy"
+          }
+        },
+        "required": [
+          "client",
+          "max_budget_usd",
+          "policy"
+        ],
+        "title": "AppBudgetItem",
+        "type": "object"
+      },
+      "AppGroupBudgetItem": {
+        "properties": {
+          "alert_thresholds": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Alert Thresholds",
+            "type": "array"
+          },
+          "group": {
+            "title": "Group",
+            "type": "string"
+          },
+          "max_budget_usd": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Max Budget Usd",
+            "type": "string"
+          },
+          "policy": {
+            "$ref": "#/components/schemas/BudgetPolicy"
+          }
+        },
+        "required": [
+          "group",
+          "max_budget_usd",
+          "policy"
+        ],
+        "title": "AppGroupBudgetItem",
+        "type": "object"
+      },
+      "BudgetPolicy": {
+        "enum": [
+          "HARD_BLOCK",
+          "SOFT_WARNING",
+          "THROTTLE"
+        ],
+        "title": "BudgetPolicy",
+        "type": "string"
+      },
+      "BudgetSummaryItem": {
+        "properties": {
+          "alert_thresholds": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Alert Thresholds"
+          },
+          "cap_source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cap Source"
+          },
+          "default_user_cap_usd": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Default User Cap Usd"
+          },
+          "department_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Department Id"
+          },
+          "department_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Department Name"
+          },
+          "downgrade_enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Downgrade Enabled"
+          },
+          "downgrade_rule_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Downgrade Rule Count"
+          },
+          "is_active": {
+            "default": true,
+            "title": "Is Active",
+            "type": "boolean"
+          },
+          "limit_usd": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Limit Usd"
+          },
+          "remaining_usd": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Remaining Usd"
+          },
+          "target_id": {
+            "title": "Target Id",
+            "type": "string"
+          },
+          "target_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Name"
+          },
+          "target_type": {
+            "title": "Target Type",
+            "type": "string"
+          },
+          "team_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Team Id"
+          },
+          "usage_pct": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Usage Pct"
+          },
+          "used_usd": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Used Usd",
+            "type": "string"
+          }
+        },
+        "required": [
+          "target_type",
+          "target_id",
+          "limit_usd",
+          "used_usd",
+          "remaining_usd",
+          "usage_pct"
+        ],
+        "title": "BudgetSummaryItem",
+        "type": "object"
+      },
+      "BudgetSummaryResponse": {
+        "properties": {
+          "period": {
+            "title": "Period",
+            "type": "string"
+          },
+          "summary": {
+            "items": {
+              "$ref": "#/components/schemas/BudgetSummaryItem"
+            },
+            "title": "Summary",
+            "type": "array"
+          }
+        },
+        "required": [
+          "period",
+          "summary"
+        ],
+        "title": "BudgetSummaryResponse",
+        "type": "object"
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -498,6 +841,965 @@
         },
         "title": "HTTPValidationError",
         "type": "object"
+      },
+      "ModelListResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ModelResponse"
+            },
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "ModelListResponse",
+        "type": "object"
+      },
+      "ModelPricingResponse": {
+        "properties": {
+          "cache_creation_1h_price_per_1k_tokens": {
+            "default": "0",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Cache Creation 1H Price Per 1K Tokens",
+            "type": "string"
+          },
+          "cache_creation_5m_price_per_1k_tokens": {
+            "default": "0",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Cache Creation 5M Price Per 1K Tokens",
+            "type": "string"
+          },
+          "cache_read_price_per_1k_tokens": {
+            "default": "0",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Cache Read Price Per 1K Tokens",
+            "type": "string"
+          },
+          "effective_from": {
+            "format": "date-time",
+            "title": "Effective From",
+            "type": "string"
+          },
+          "effective_until": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Effective Until"
+          },
+          "input_price_per_1k_tokens": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Input Price Per 1K Tokens",
+            "type": "string"
+          },
+          "long_context_cache_creation_1h_price_per_1k_tokens": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Long Context Cache Creation 1H Price Per 1K Tokens"
+          },
+          "long_context_cache_creation_5m_price_per_1k_tokens": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Long Context Cache Creation 5M Price Per 1K Tokens"
+          },
+          "long_context_cache_read_price_per_1k_tokens": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Long Context Cache Read Price Per 1K Tokens"
+          },
+          "long_context_input_price_per_1k_tokens": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Long Context Input Price Per 1K Tokens"
+          },
+          "long_context_output_price_per_1k_tokens": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Long Context Output Price Per 1K Tokens"
+          },
+          "long_context_threshold_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Long Context Threshold Tokens"
+          },
+          "output_price_per_1k_tokens": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Output Price Per 1K Tokens",
+            "type": "string"
+          }
+        },
+        "required": [
+          "input_price_per_1k_tokens",
+          "output_price_per_1k_tokens",
+          "effective_from"
+        ],
+        "title": "ModelPricingResponse",
+        "type": "object"
+      },
+      "ModelResponse": {
+        "properties": {
+          "account_role_arn": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Account Role Arn"
+          },
+          "alias": {
+            "title": "Alias",
+            "type": "string"
+          },
+          "allowed_clients": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Allowed Clients"
+          },
+          "api_format": {
+            "$ref": "#/components/schemas/ApiFormatEnum"
+          },
+          "context_window": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context Window"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "current_pricing": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ModelPricingResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "display_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Display Name"
+          },
+          "endpoint_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Endpoint Url"
+          },
+          "external_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "External Id"
+          },
+          "max_output_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Output Tokens"
+          },
+          "provider": {
+            "$ref": "#/components/schemas/ProviderEnum"
+          },
+          "provider_model_id": {
+            "title": "Provider Model Id",
+            "type": "string"
+          },
+          "region": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Region"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "alias",
+          "provider",
+          "provider_model_id",
+          "api_format",
+          "status",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "ModelResponse",
+        "type": "object"
+      },
+      "PaginationMeta": {
+        "properties": {
+          "cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cursor"
+          },
+          "has_more": {
+            "title": "Has More",
+            "type": "boolean"
+          },
+          "limit": {
+            "title": "Limit",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "limit",
+          "has_more"
+        ],
+        "title": "PaginationMeta",
+        "type": "object"
+      },
+      "ProviderEnum": {
+        "enum": [
+          "BEDROCK",
+          "OPENMODEL",
+          "BEDROCK_MANTLE",
+          "BEDROCK_MANTLE_OPENAI",
+          "BEDROCK_RUNTIME_OPENAI"
+        ],
+        "title": "ProviderEnum",
+        "type": "string"
+      },
+      "SeedSpentItem": {
+        "properties": {
+          "client": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Client"
+          },
+          "period": {
+            "title": "Period",
+            "type": "string"
+          },
+          "scope": {
+            "title": "Scope",
+            "type": "string"
+          },
+          "scope_id": {
+            "title": "Scope Id",
+            "type": "string"
+          },
+          "spent_usd": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d{0,4}0*$",
+                "type": "string"
+              }
+            ],
+            "title": "Spent Usd"
+          }
+        },
+        "required": [
+          "scope",
+          "scope_id",
+          "period",
+          "spent_usd"
+        ],
+        "title": "SeedSpentItem",
+        "type": "object"
+      },
+      "SeedSpentRequest": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/SeedSpentItem"
+            },
+            "maxItems": 500,
+            "minItems": 1,
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "SeedSpentRequest",
+        "type": "object"
+      },
+      "SeedSpentResponse": {
+        "properties": {
+          "failed": {
+            "title": "Failed",
+            "type": "integer"
+          },
+          "results": {
+            "items": {
+              "$ref": "#/components/schemas/SeedSpentResult"
+            },
+            "title": "Results",
+            "type": "array"
+          },
+          "succeeded": {
+            "title": "Succeeded",
+            "type": "integer"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "total",
+          "succeeded",
+          "failed",
+          "results"
+        ],
+        "title": "SeedSpentResponse",
+        "type": "object"
+      },
+      "SeedSpentResult": {
+        "properties": {
+          "after_usd": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "After Usd"
+          },
+          "before_usd": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Before Usd"
+          },
+          "client": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Client"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "period": {
+            "title": "Period",
+            "type": "string"
+          },
+          "scope": {
+            "title": "Scope",
+            "type": "string"
+          },
+          "scope_id": {
+            "title": "Scope Id",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "scope",
+          "scope_id",
+          "period",
+          "status"
+        ],
+        "title": "SeedSpentResult",
+        "type": "object"
+      },
+      "ServiceTokenCreateResponse": {
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "token": {
+            "description": "Plaintext token — returned only on issue/rotate",
+            "title": "Token",
+            "type": "string"
+          },
+          "token_prefix": {
+            "title": "Token Prefix",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "token_prefix",
+          "created_at",
+          "expires_at",
+          "token"
+        ],
+        "title": "ServiceTokenCreateResponse",
+        "type": "object"
+      },
+      "ServiceTokenItem": {
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "revoked_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revoked At"
+          },
+          "rotated_from": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rotated From"
+          },
+          "token_prefix": {
+            "title": "Token Prefix",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "token_prefix",
+          "created_at",
+          "expires_at"
+        ],
+        "title": "ServiceTokenItem",
+        "type": "object"
+      },
+      "ServiceTokenListResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ServiceTokenItem"
+            },
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "ServiceTokenListResponse",
+        "type": "object"
+      },
+      "SetBudgetRequest": {
+        "properties": {
+          "alert_thresholds": {
+            "default": [
+              80,
+              90,
+              100
+            ],
+            "description": "Budget usage % thresholds for alert notifications (1-100; empty = no alerts)",
+            "items": {
+              "maximum": 100.0,
+              "minimum": 1.0,
+              "type": "integer"
+            },
+            "title": "Alert Thresholds",
+            "type": "array"
+          },
+          "confirm": {
+            "default": false,
+            "title": "Confirm",
+            "type": "boolean"
+          },
+          "default_user_cap_usd": {
+            "anyOf": [
+              {
+                "maximum": 99999999.9999,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Default User Cap Usd"
+          },
+          "max_budget_usd": {
+            "anyOf": [
+              {
+                "maximum": 99999999.9999,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              }
+            ],
+            "title": "Max Budget Usd"
+          },
+          "policy": {
+            "$ref": "#/components/schemas/BudgetPolicy",
+            "default": "HARD_BLOCK"
+          }
+        },
+        "required": [
+          "max_budget_usd"
+        ],
+        "title": "SetBudgetRequest",
+        "type": "object"
+      },
+      "TeamUserBudgetSummaryPage": {
+        "properties": {
+          "has_more": {
+            "title": "Has More",
+            "type": "boolean"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/BudgetSummaryItem"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "limit": {
+            "title": "Limit",
+            "type": "integer"
+          },
+          "offset": {
+            "title": "Offset",
+            "type": "integer"
+          },
+          "period": {
+            "title": "Period",
+            "type": "string"
+          },
+          "team_id": {
+            "title": "Team Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "period",
+          "team_id",
+          "items",
+          "limit",
+          "offset",
+          "has_more"
+        ],
+        "title": "TeamUserBudgetSummaryPage",
+        "type": "object"
+      },
+      "UsageByAppItem": {
+        "properties": {
+          "call_count": {
+            "title": "Call Count",
+            "type": "integer"
+          },
+          "client": {
+            "title": "Client",
+            "type": "string"
+          },
+          "used_usd": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Used Usd",
+            "type": "string"
+          },
+          "ws_cost_usd": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ws Cost Usd"
+          },
+          "ws_queries": {
+            "default": 0,
+            "title": "Ws Queries",
+            "type": "integer"
+          },
+          "ws_untracked": {
+            "default": 0,
+            "title": "Ws Untracked",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "client",
+          "used_usd",
+          "call_count"
+        ],
+        "title": "UsageByAppItem",
+        "type": "object"
+      },
+      "UsageByAppResponse": {
+        "properties": {
+          "apps": {
+            "items": {
+              "$ref": "#/components/schemas/UsageByAppItem"
+            },
+            "title": "Apps",
+            "type": "array"
+          },
+          "period": {
+            "title": "Period",
+            "type": "string"
+          }
+        },
+        "required": [
+          "period",
+          "apps"
+        ],
+        "title": "UsageByAppResponse",
+        "type": "object"
+      },
+      "UserAllowedModelsResponse": {
+        "properties": {
+          "model_aliases": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Model Aliases",
+            "type": "array"
+          },
+          "user_id": {
+            "format": "uuid",
+            "title": "User Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "user_id",
+          "model_aliases"
+        ],
+        "title": "UserAllowedModelsResponse",
+        "type": "object"
+      },
+      "UserAppBudgetsResponse": {
+        "properties": {
+          "apps": {
+            "items": {
+              "$ref": "#/components/schemas/AppBudgetItem"
+            },
+            "title": "Apps",
+            "type": "array"
+          },
+          "has_total_budget": {
+            "default": false,
+            "title": "Has Total Budget",
+            "type": "boolean"
+          },
+          "user_id": {
+            "title": "User Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "user_id",
+          "apps"
+        ],
+        "title": "UserAppBudgetsResponse",
+        "type": "object"
+      },
+      "UserAppGroupBudgetsResponse": {
+        "properties": {
+          "app_groups": {
+            "items": {
+              "$ref": "#/components/schemas/AppGroupBudgetItem"
+            },
+            "title": "App Groups",
+            "type": "array"
+          },
+          "user_id": {
+            "title": "User Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "user_id",
+          "app_groups"
+        ],
+        "title": "UserAppGroupBudgetsResponse",
+        "type": "object"
+      },
+      "UserListResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/UserResponse"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "pagination": {
+            "$ref": "#/components/schemas/PaginationMeta"
+          }
+        },
+        "required": [
+          "items",
+          "pagination"
+        ],
+        "title": "UserListResponse",
+        "type": "object"
+      },
+      "UserResponse": {
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "display_name": {
+            "title": "Display Name",
+            "type": "string"
+          },
+          "email": {
+            "title": "Email",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "is_active": {
+            "title": "Is Active",
+            "type": "boolean"
+          },
+          "is_service_account": {
+            "default": false,
+            "title": "Is Service Account",
+            "type": "boolean"
+          },
+          "role": {
+            "$ref": "#/components/schemas/UserRole"
+          },
+          "team_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Team Id"
+          },
+          "team_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Team Name"
+          }
+        },
+        "required": [
+          "id",
+          "email",
+          "display_name",
+          "role",
+          "is_active",
+          "created_at"
+        ],
+        "title": "UserResponse",
+        "type": "object"
+      },
+      "UserRole": {
+        "enum": [
+          "ADMIN",
+          "TEAM_LEADER",
+          "DEVELOPER"
+        ],
+        "title": "UserRole",
+        "type": "string"
       },
       "ValidationError": {
         "properties": {
@@ -546,20 +1848,1367 @@
         "scheme": "bearer",
         "type": "http"
       },
-      "integrationToken": {
+      "integrationTokenLegacy": {
         "bearerFormat": "itg-<64 hex>",
+        "scheme": "bearer",
+        "type": "http"
+      },
+      "integrationTokenSvc": {
+        "bearerFormat": "svc-<64 hex>, AICM scoped",
         "scheme": "bearer",
         "type": "http"
       }
     }
   },
   "info": {
-    "description": "admin-api 의 /aicm/v1 라우터(AICM_API_ENABLED=true 일 때만 존재). 인증: Authorization: Bearer itg-<64 hex>(scope 지정 통합 토큰). 오류 봉투: {\"error\": {\"type\", \"code\", \"message\", \"details\"?}}. 안내서: docs/NDS/aicm/README.md",
+    "description": "admin-api /aicm/v1 라우터(AICM_API_ENABLED=true 일 때만 존재). /aicm/v1/admin mirror: Authorization: Bearer svc-<64 hex>(AICM scoped). legacy lifecycle routes: Bearer itg-<64 hex>. 오류 봉투: {\"error\": {\"type\", \"code\", \"message\", \"details\"?}}. 안내서: docs/NDS/aicm/README.md",
     "title": "LLM Gateway — AICM integration API",
     "version": "1.0.0"
   },
   "openapi": "3.1.0",
   "paths": {
+    "/aicm/v1/admin/budgets/spent": {
+      "put": {
+        "description": "Batch-inject absolute spent (USD) per scope for migration burn-rate continuation.\n\nOverwrites used_usd in DB + Redis. Idempotent. Per-item partial failure reported.",
+        "operationId": "aicm_seed_budget_spent",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SeedSpentRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SeedSpentResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "integrationTokenSvc": []
+          }
+        ],
+        "summary": "Aicm Seed Budget Spent",
+        "tags": [
+          "AICM Admin Mirror",
+          "AICM Admin Mirror"
+        ]
+      }
+    },
+    "/aicm/v1/admin/budgets/summary": {
+      "get": {
+        "operationId": "aicm_get_budget_summary",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "scope",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Scope"
+            }
+          },
+          {
+            "in": "query",
+            "name": "target_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Target Id"
+            }
+          },
+          {
+            "description": "YYYY-MM",
+            "in": "query",
+            "name": "period",
+            "required": true,
+            "schema": {
+              "description": "YYYY-MM",
+              "title": "Period",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BudgetSummaryResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "integrationTokenSvc": []
+          }
+        ],
+        "summary": "Aicm Get Budget Summary",
+        "tags": [
+          "AICM Admin Mirror",
+          "AICM Admin Mirror"
+        ]
+      }
+    },
+    "/aicm/v1/admin/budgets/summary/team/{team_id}/users": {
+      "get": {
+        "description": "팀 멤버 USER summary single-page 조회 — AICM 은 limit=10000 으로 한 페이지를 요청한다.",
+        "operationId": "aicm_get_team_user_budget_summary",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "team_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Team Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "YYYY-MM",
+            "in": "query",
+            "name": "period",
+            "required": true,
+            "schema": {
+              "description": "YYYY-MM",
+              "title": "Period",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 10000,
+              "maximum": 10000,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TeamUserBudgetSummaryPage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "integrationTokenSvc": []
+          }
+        ],
+        "summary": "Aicm Get Team User Budget Summary",
+        "tags": [
+          "AICM Admin Mirror",
+          "AICM Admin Mirror"
+        ]
+      }
+    },
+    "/aicm/v1/admin/budgets/team/{team_id}": {
+      "put": {
+        "operationId": "aicm_set_team_budget",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "team_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Team Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetBudgetRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "integrationTokenSvc": []
+          }
+        ],
+        "summary": "Aicm Set Team Budget",
+        "tags": [
+          "AICM Admin Mirror",
+          "AICM Admin Mirror"
+        ]
+      }
+    },
+    "/aicm/v1/admin/budgets/usage-by-app": {
+      "get": {
+        "description": "앱(client)별 청구 사용량 — usage_rollup 하이브리드 소스의 client_share 와 같은 정의.",
+        "operationId": "aicm_get_usage_by_app",
+        "parameters": [
+          {
+            "description": "YYYY-MM",
+            "in": "query",
+            "name": "period",
+            "required": true,
+            "schema": {
+              "description": "YYYY-MM",
+              "title": "Period",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UsageByAppResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "integrationTokenSvc": []
+          }
+        ],
+        "summary": "Aicm Get Usage By App",
+        "tags": [
+          "AICM Admin Mirror",
+          "AICM Admin Mirror"
+        ]
+      }
+    },
+    "/aicm/v1/admin/budgets/user/{user_id}": {
+      "put": {
+        "operationId": "aicm_set_user_budget",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "User Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetBudgetRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "integrationTokenSvc": []
+          }
+        ],
+        "summary": "Aicm Set User Budget",
+        "tags": [
+          "AICM Admin Mirror",
+          "AICM Admin Mirror"
+        ]
+      }
+    },
+    "/aicm/v1/admin/budgets/user/{user_id}/app-group/{group}": {
+      "delete": {
+        "operationId": "aicm_clear_user_app_group_budget",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "User Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "group",
+            "required": true,
+            "schema": {
+              "title": "Group",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "integrationTokenSvc": []
+          }
+        ],
+        "summary": "Aicm Clear User App Group Budget",
+        "tags": [
+          "AICM Admin Mirror",
+          "AICM Admin Mirror"
+        ]
+      },
+      "put": {
+        "description": "advisory app-group budget upsert. gateway enforcement 는 바꾸지 않는다.",
+        "operationId": "aicm_set_user_app_group_budget",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "User Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "group",
+            "required": true,
+            "schema": {
+              "title": "Group",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetBudgetRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "integrationTokenSvc": []
+          }
+        ],
+        "summary": "Aicm Set User App Group Budget",
+        "tags": [
+          "AICM Admin Mirror",
+          "AICM Admin Mirror"
+        ]
+      }
+    },
+    "/aicm/v1/admin/budgets/user/{user_id}/app-groups": {
+      "get": {
+        "operationId": "aicm_get_user_app_group_budgets",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "User Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserAppGroupBudgetsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "integrationTokenSvc": []
+          }
+        ],
+        "summary": "Aicm Get User App Group Budgets",
+        "tags": [
+          "AICM Admin Mirror",
+          "AICM Admin Mirror"
+        ]
+      }
+    },
+    "/aicm/v1/admin/budgets/user/{user_id}/app/{client}": {
+      "put": {
+        "description": "Set a per-app (client) budget for a user.",
+        "operationId": "aicm_set_user_client_budget",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "User Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "client",
+            "required": true,
+            "schema": {
+              "title": "Client",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetBudgetRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "integrationTokenSvc": []
+          }
+        ],
+        "summary": "Aicm Set User Client Budget",
+        "tags": [
+          "AICM Admin Mirror",
+          "AICM Admin Mirror"
+        ]
+      }
+    },
+    "/aicm/v1/admin/budgets/user/{user_id}/apps": {
+      "get": {
+        "description": "Read active per-app (client) budgets for a user, for UI prefill.",
+        "operationId": "aicm_get_user_app_budgets",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "User Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserAppBudgetsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "integrationTokenSvc": []
+          }
+        ],
+        "summary": "Aicm Get User App Budgets",
+        "tags": [
+          "AICM Admin Mirror",
+          "AICM Admin Mirror"
+        ]
+      }
+    },
+    "/aicm/v1/admin/models": {
+      "get": {
+        "operationId": "aicm_list_models",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "integrationTokenSvc": []
+          }
+        ],
+        "summary": "Aicm List Models",
+        "tags": [
+          "AICM Admin Mirror",
+          "AICM Admin Mirror"
+        ]
+      }
+    },
+    "/aicm/v1/admin/service-tokens": {
+      "get": {
+        "description": "목록 — prefix만, 원문 없음.",
+        "operationId": "aicm_list_service_tokens",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceTokenListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "integrationTokenSvc": []
+          }
+        ],
+        "summary": "Aicm List Service Tokens",
+        "tags": [
+          "AICM Admin Mirror",
+          "AICM Admin Mirror"
+        ]
+      }
+    },
+    "/aicm/v1/admin/service-tokens/rotate": {
+      "post": {
+        "description": "self-rotate — service token 호출자만. 자기 자신을 교체, 구 토큰 24h grace.",
+        "operationId": "aicm_rotate_service_token",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceTokenCreateResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "integrationTokenSvc": []
+          }
+        ],
+        "summary": "Aicm Rotate Service Token",
+        "tags": [
+          "AICM Admin Mirror",
+          "AICM Admin Mirror"
+        ]
+      }
+    },
+    "/aicm/v1/admin/teams/{team_id}/allowed-models": {
+      "get": {
+        "operationId": "aicm_list_team_allowed_models",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "team_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Team Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AllowedModelsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "integrationTokenSvc": []
+          }
+        ],
+        "summary": "Aicm List Team Allowed Models",
+        "tags": [
+          "AICM Admin Mirror",
+          "AICM Admin Mirror"
+        ]
+      }
+    },
+    "/aicm/v1/admin/users": {
+      "get": {
+        "description": "사용자 목록 조회. email 필터는 exact 매칭(대소문자 무시) — Cognito username\n(= gateway email) 으로 단일 유저를 찾는 용도. unique 컬럼이라 0/1건.",
+        "operationId": "aicm_list_users",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "team_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Team Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "department_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Department Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "is_active",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Is Active"
+            }
+          },
+          {
+            "in": "query",
+            "name": "email",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Email"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "description": "페이지 크기. 경계를 벗어나면 422 — 예전엔 무제한이라 ?limit=1000000 이 테이블 전체를 끌어왔고 ?limit=0/-1 은 PostgreSQL 이 거부해 500 이 됐다.",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "description": "페이지 크기. 경계를 벗어나면 422 — 예전엔 무제한이라 ?limit=1000000 이 테이블 전체를 끌어왔고 ?limit=0/-1 은 PostgreSQL 이 거부해 500 이 됐다.",
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "integrationTokenSvc": []
+          }
+        ],
+        "summary": "Aicm List Users",
+        "tags": [
+          "AICM Admin Mirror",
+          "AICM Admin Mirror"
+        ]
+      }
+    },
+    "/aicm/v1/admin/users/sync-cognito": {
+      "post": {
+        "description": "Cognito User Pool 에서 그룹/사용자를 가져와 DB 동기화.\n\nAdmin 전용. Cognito ListUsers/ListGroups API 를 호출하여\n로컬 조직 구조를 최신 상태로 갱신합니다.",
+        "operationId": "aicm_sync_cognito",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "integrationTokenSvc": []
+          }
+        ],
+        "summary": "Aicm Sync Cognito",
+        "tags": [
+          "AICM Admin Mirror",
+          "AICM Admin Mirror"
+        ]
+      }
+    },
+    "/aicm/v1/admin/users/sync-cognito/group/{groupname}": {
+      "post": {
+        "description": "단일 그룹만 동기화: 팀 확보 + 그 그룹 멤버 upsert. 전역 정리 미수행.",
+        "operationId": "aicm_sync_cognito_group",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "groupname",
+            "required": true,
+            "schema": {
+              "title": "Groupname",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "integrationTokenSvc": []
+          }
+        ],
+        "summary": "Aicm Sync Cognito Group",
+        "tags": [
+          "AICM Admin Mirror",
+          "AICM Admin Mirror"
+        ]
+      }
+    },
+    "/aicm/v1/admin/users/sync-cognito/user/{username}": {
+      "post": {
+        "description": "단일 사용자만 Cognito 와 동기화 (260626_comm_customer 항목1-a).\n\n사내 관리서비스가 Cognito 신규 생성 직후 호출 — DB 에 없어도 신규 생성된다.\nCognito 에 없으면(AI도구 미사용 전환으로 삭제된 케이스) DB 에서 email 로 찾아\nis_active=False 로 soft-delete 한다(OIDC 유저 한정). 응답의 user_id 로 후속\n처리(개인별 allowed_clients/allowed_models)를 이어갈 수 있다.\n동기 처리(단일 사용자 ~sub-second). 전역 reconciliation 미수행.\nsvc- 서비스 토큰 또는 admin JWT 로 호출 가능(require_admin).",
+        "operationId": "aicm_sync_cognito_user",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "username",
+            "required": true,
+            "schema": {
+              "title": "Username",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "integrationTokenSvc": []
+          }
+        ],
+        "summary": "Aicm Sync Cognito User",
+        "tags": [
+          "AICM Admin Mirror",
+          "AICM Admin Mirror"
+        ]
+      }
+    },
+    "/aicm/v1/admin/users/{user_id}/allowed-clients": {
+      "delete": {
+        "operationId": "aicm_clear_allowed_clients",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "User Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "integrationTokenSvc": []
+          }
+        ],
+        "summary": "Aicm Clear Allowed Clients",
+        "tags": [
+          "AICM Admin Mirror",
+          "AICM Admin Mirror"
+        ]
+      },
+      "get": {
+        "operationId": "aicm_get_allowed_clients",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "User Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AllowedClientsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "integrationTokenSvc": []
+          }
+        ],
+        "summary": "Aicm Get Allowed Clients",
+        "tags": [
+          "AICM Admin Mirror",
+          "AICM Admin Mirror"
+        ]
+      },
+      "put": {
+        "operationId": "aicm_set_allowed_clients",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "User Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AllowedClientsBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AllowedClientsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "integrationTokenSvc": []
+          }
+        ],
+        "summary": "Aicm Set Allowed Clients",
+        "tags": [
+          "AICM Admin Mirror",
+          "AICM Admin Mirror"
+        ]
+      }
+    },
+    "/aicm/v1/admin/users/{user_id}/allowed-models": {
+      "delete": {
+        "operationId": "aicm_clear_user_allowed_models",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "User Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "integrationTokenSvc": []
+          }
+        ],
+        "summary": "Aicm Clear User Allowed Models",
+        "tags": [
+          "AICM Admin Mirror",
+          "AICM Admin Mirror"
+        ]
+      },
+      "get": {
+        "operationId": "aicm_get_user_allowed_models",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "User Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserAllowedModelsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "integrationTokenSvc": []
+          }
+        ],
+        "summary": "Aicm Get User Allowed Models",
+        "tags": [
+          "AICM Admin Mirror",
+          "AICM Admin Mirror"
+        ]
+      },
+      "put": {
+        "operationId": "aicm_set_user_allowed_models",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "User Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AllowedModelsSetRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserAllowedModelsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "integrationTokenSvc": []
+          }
+        ],
+        "summary": "Aicm Set User Allowed Models",
+        "tags": [
+          "AICM Admin Mirror",
+          "AICM Admin Mirror"
+        ]
+      }
+    },
     "/aicm/v1/service-tokens": {
       "get": {
         "description": "호출 토큰과 같은 rotate 계보의 토큰만(다른 통합/계보는 보이지 않는다).",
@@ -578,7 +3227,7 @@
         },
         "security": [
           {
-            "integrationToken": []
+            "integrationTokenLegacy": []
           }
         ],
         "summary": "List Integration Tokens",
@@ -663,7 +3312,7 @@
         },
         "security": [
           {
-            "integrationToken": []
+            "integrationTokenLegacy": []
           }
         ],
         "summary": "Rotate Integration Token",
@@ -723,7 +3372,7 @@
         },
         "security": [
           {
-            "integrationToken": []
+            "integrationTokenLegacy": []
           }
         ],
         "summary": "Provision User",
@@ -793,7 +3442,7 @@
         },
         "security": [
           {
-            "integrationToken": []
+            "integrationTokenLegacy": []
           }
         ],
         "summary": "Deactivate User",

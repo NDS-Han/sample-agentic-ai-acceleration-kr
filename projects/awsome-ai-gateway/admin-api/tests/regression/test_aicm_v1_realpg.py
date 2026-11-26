@@ -170,9 +170,10 @@ async def env(owned_dsn, monkeypatch, cognito):
     from app.core.db import install_commit_before_response
     from app.core.encryption import AESEncryptionService
     from app.main import register_exception_handlers
-    from app.routers import aicm, service_tokens, users
+    from app.routers import aicm, aicm_admin, budgets, models, service_tokens, users
     from app.services.budget_service import BudgetService
     from app.services.key_service import KeyService
+    from app.services.model_service import ModelService
     from app.services.service_token_service import ServiceTokenService
     from app.services.user_team_service import UserTeamService
 
@@ -181,6 +182,7 @@ async def env(owned_dsn, monkeypatch, cognito):
         "COGNITO_USER_POOL_ID": POOL, "OIDC_PROVIDER_NAME": "oidc", "OIDC_GROUP_PREFIX": "Claude_",
         "ADMIN_GROUPS": ["ClaudeAdmin"], "ADMIN_EMAILS": [], "OIDC_GROUPS_CLAIM": "custom:groups",
         "COGNITO_FEDERATED_PROVIDER_NAME": "ADFS", "AICM_PROVISION_GROUPS_ATTRIBUTE": "custom:groups",
+        "AICM_API_ENABLED": True,
     }.items():
         monkeypatch.setattr(s, k, v)
 
@@ -210,6 +212,9 @@ async def env(owned_dsn, monkeypatch, cognito):
     app.include_router(aicm.router)
     app.include_router(service_tokens.router)
     app.include_router(users.router)
+    app.include_router(budgets.router)
+    app.include_router(models.router)
+    app.include_router(aicm_admin.router)
     install_commit_before_response(app)
     app.state.jwt_verifier = _JWT()
     app.state.service_token_service = ServiceTokenService()
@@ -217,6 +222,7 @@ async def env(owned_dsn, monkeypatch, cognito):
     app.state.cache_mgr = cache_mgr
     app.state.key_service = key_service
     app.state.budget_service = BudgetService(cache_mgr=cache_mgr)
+    app.state.model_service = ModelService(cache_mgr=cache_mgr)
     app.state.user_team_service = UserTeamService(cache_mgr=cache_mgr, key_service=key_service)
     app.state.aicm_cognito_client = cognito[0]
     app.state.oidc_verifier = None
@@ -250,7 +256,7 @@ def _h(tok: str, key: str | None = None) -> dict:
 
 
 async def _issue(client, scopes=None, **kw) -> dict:
-    body = {"name": "aicm-ops", "scopes": scopes or ALL_SCOPES, **kw}
+    body = {"name": "aicm-ops", "scopes": scopes or ALL_SCOPES, "legacy_lifecycle_token": True, **kw}
     r = await client.post("/aicm/v1/service-tokens", json=body, headers=HUMAN)
     assert r.status_code == 200, r.text
     return r.json()
@@ -1020,3 +1026,144 @@ async def test_idempotency_rows_expire(env):
     r = await c.post(f"/aicm/v1/users/{uid}/deactivate", json={"reason": "x"}, headers=_h(t["token"], "new-1"))
     assert r.status_code == 200
     assert not await _q(sm, "SELECT 1 FROM auth.integration_idempotency_keys WHERE idem_key='old-1'")
+
+
+
+# ── option A admin mirror: scoped svc- 실 DB 검증 ────────────────────────────
+
+MIRROR_SCOPES = [
+    "users:read", "users:write", "users:sync", "budgets:read", "budgets:write",
+    "models:read", "tokens:read", "tokens:rotate",
+]
+
+
+async def _issue_mirror(client, scopes=None, **kw) -> dict:
+    body = {"name": "aicm-mirror", "scopes": scopes or MIRROR_SCOPES, **kw}
+    r = await client.post("/aicm/v1/service-tokens", json=body, headers=HUMAN)
+    assert r.status_code == 200, r.text
+    assert r.json()["token"].startswith("svc-")
+    return r.json()
+
+
+async def test_mirror_svc_token_auth_matrix_and_real_admin_rejection(env):
+    c = env["client"]
+    t = await _issue_mirror(c)
+    h = {"Authorization": f"Bearer {t['token']}", "X-Forwarded-For": "10.0.0.3"}
+
+    r = await c.get("/aicm/v1/admin/service-tokens", headers=h)
+    assert r.status_code == 200, r.text
+    # 같은 scoped svc- 는 real /admin 표면에서 무효다(401).
+    r = await c.get("/admin/service-tokens", headers=h)
+    assert r.status_code == 401, r.text
+    # 사람 JWT/무토큰은 mirror 에서 인증되지 않는다.
+    assert (await c.get("/aicm/v1/admin/service-tokens", headers=HUMAN)).status_code == 401
+    assert (await c.get("/aicm/v1/admin/service-tokens")).status_code == 401
+    # allowlist 밖 admin 경로는 mount 자체가 없다.
+    assert (await c.get("/aicm/v1/admin/rate-limits", headers=h)).status_code == 404
+
+
+async def test_mirror_scoped_rotate_preserves_svc_prefix_and_integration_scope(env):
+    c, sm = env["client"], env["sm"]
+    t = await _issue_mirror(c, scopes=["tokens:read", "tokens:rotate"])
+    old = t["token"]
+    r = await c.post("/aicm/v1/admin/service-tokens/rotate", headers={
+        "Authorization": f"Bearer {old}", "X-Forwarded-For": "10.0.0.3",
+    })
+    assert r.status_code == 200, r.text
+    new = r.json()["token"]
+    assert new.startswith("svc-")
+    rows = await _q(sm, "SELECT token_id, scopes FROM auth.integration_tokens ORDER BY created_at DESC LIMIT 1")
+    assert rows and set(rows[0].scopes) == {"tokens:read", "tokens:rotate"}
+    r = await c.get("/aicm/v1/admin/service-tokens", headers={
+        "Authorization": f"Bearer {new}", "X-Forwarded-For": "10.0.0.3",
+    })
+    assert r.status_code == 200, r.text
+
+
+async def test_mirror_allowed_clients_write_and_admin_target_refusal(env):
+    c, sm = env["client"], env["sm"]
+    t = await _issue_mirror(c)
+    h = {"Authorization": f"Bearer {t['token']}", "X-Forwarded-For": "10.0.0.3"}
+    uid, _ = await _mk_user(sm, provider="sts", keys=1)
+    env["redis"].deleted.clear()
+    r = await c.put(f"/aicm/v1/admin/users/{uid}/allowed-clients", json={"clients": ["claude-code"]}, headers=h)
+    assert r.status_code == 200, r.text
+    assert r.json()["clients"] == ["claude-code"]
+    # admin UI 경로와 같은 post-commit VK auth cache invalidation 이 일어난다.
+    assert any(k.startswith("key:cache:vk:") for k in env["redis"].deleted), env["redis"].deleted
+    # real /admin 과 같은 스키마/본문이다.
+    r2 = await c.get(f"/aicm/v1/admin/users/{uid}/allowed-clients", headers=h)
+    assert r2.status_code == 200 and r2.json() == {"user_id": str(uid), "clients": ["claude-code"]}
+
+    # ADMIN/system/service-account 대상 mutation 은 integration 에게 403 + audit.
+    admin_id = HUMAN_ADMIN
+    r = await c.put(f"/aicm/v1/admin/users/{admin_id}/allowed-clients", json={"clients": ["claude-code"]}, headers=h)
+    assert r.status_code == 403 and ("target_is_admin" in r.text or "target_is_system_user" in r.text)
+    # refusal 은 rollback 에 같이 버려지면 안 되므로 queue_only audit 다. 이 테스트 앱은
+    # lifespan 밖이라 consumer 를 띄우지 않고 큐 내용을 직접 본다(운영 main 은 consumer 가 flush).
+    from app.core.audit import audit_logger
+    entries = []
+    while not audit_logger._queue.empty():
+        entries.append(audit_logger._queue.get_nowait())
+    assert any(e["action"] == "AICM_ADMIN_TARGET_REFUSED" and e["resource_id"] == str(admin_id)
+               and e["result"] == "FAILURE" for e in entries)
+
+
+async def test_mirror_app_group_budget_crud_and_has_total_budget(env):
+    c, sm = env["client"], env["sm"]
+    t = await _issue_mirror(c)
+    h = {"Authorization": f"Bearer {t['token']}", "X-Forwarded-For": "10.0.0.3"}
+    uid, tid = await _mk_user(sm, provider="sts")
+    # app-group 은 advisory 제어plane — 부모 총액 없이도 저장된다.
+    r = await c.put(
+        f"/aicm/v1/admin/budgets/user/{uid}/app-group/ide",
+        json={"max_budget_usd": "12.3456"}, headers=h,
+    )
+    assert r.status_code == 200, r.text
+    r = await c.get(f"/aicm/v1/admin/budgets/user/{uid}/app-groups", headers=h)
+    assert r.status_code == 200, r.text
+    assert r.json()["app_groups"][0]["group"] == "ide"
+    assert r.json()["app_groups"][0]["max_budget_usd"] in ("12.3456", 12.3456)
+    r = await c.get(f"/aicm/v1/admin/budgets/user/{uid}/apps", headers=h)
+    assert r.status_code == 200 and r.json()["has_total_budget"] is False
+    r = await c.delete(f"/aicm/v1/admin/budgets/user/{uid}/app-group/ide", headers=h)
+    assert r.status_code == 204, r.text
+
+
+async def test_mirror_team_unlimited_and_four_decimal_budget(env):
+    c, sm = env["client"], env["sm"]
+    t = await _issue_mirror(c)
+    h = {"Authorization": f"Bearer {t['token']}", "X-Forwarded-For": "10.0.0.3"}
+    tid = await _mk_team(sm, f"Mir{uuid.uuid4().hex[:6]}")
+    r = await c.put(
+        f"/aicm/v1/admin/budgets/team/{tid}",
+        json={"max_budget_usd": "unlimited", "confirm": True}, headers=h,
+    )
+    assert r.status_code == 200, r.text
+    assert any(k == f"budget:config:team:{{{tid}}}" for k in env["redis"].deleted), env["redis"].deleted
+    rows = await _q(sm, "SELECT max_budget_usd FROM budget.budget_configs WHERE scope='TEAM' AND scope_id=:i", i=tid)
+    assert str(rows[0].max_budget_usd) == "99999999.9999"
+
+    uid, _ = await _mk_user(sm, provider="sts", team_id=tid)
+    r = await c.put(
+        f"/aicm/v1/admin/budgets/user/{uid}",
+        json={"max_budget_usd": "10.0001", "confirm": True}, headers=h,
+    )
+    assert r.status_code == 200, r.text
+
+
+
+async def test_mirror_read_endpoints_summary_team_users_usage_and_models(env):
+    c, sm = env["client"], env["sm"]
+    t = await _issue_mirror(c)
+    h = {"Authorization": f"Bearer {t['token']}", "X-Forwarded-For": "10.0.0.3"}
+    tid = await _mk_team(sm, f"Read{uuid.uuid4().hex[:6]}")
+    period = datetime.now(timezone.utc).strftime("%Y-%m")
+    for path in (
+        f"/aicm/v1/admin/budgets/summary?period={period}&scope=TEAM",
+        f"/aicm/v1/admin/budgets/summary/team/{tid}/users?period={period}&limit=10000",
+        f"/aicm/v1/admin/budgets/usage-by-app?period={period}",
+        "/aicm/v1/admin/models",
+    ):
+        r = await c.get(path, headers=h)
+        assert r.status_code == 200, (path, r.text)
