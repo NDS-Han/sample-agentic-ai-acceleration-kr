@@ -51,6 +51,13 @@ def _routes(router):
     return [r for r in router.routes if isinstance(r, APIRoute)]
 
 
+def _plain_request():
+    req = MagicMock()
+    req.url.path = "/admin/x"
+    req.state.integration_principal = None
+    return req
+
+
 @pytest.mark.parametrize(
     "router_path",
     [
@@ -117,12 +124,12 @@ def _svc_admin():
 async def test_require_human_admin_rejects_svc_and_passes_human():
     svc = _svc_admin()
     with pytest.raises(ForbiddenError):
-        await require_human_admin(admin=svc)
+        await require_human_admin(request=_plain_request(), admin=svc)
 
     human = _svc_admin()
     human.is_service_token = False
     human.service_token_id = None
-    assert await require_human_admin(admin=human) is human
+    assert await require_human_admin(request=_plain_request(), admin=human) is human
 
 
 @pytest.mark.asyncio
@@ -130,16 +137,16 @@ async def test_require_human_admin_or_team_leader():
     """리더 스코프 mutation 의 사람 게이트 — svc 는 차단, admin/leader 는 통과."""
     svc = _svc_admin()
     with pytest.raises(ForbiddenError):
-        await require_human_admin_or_team_leader(user=svc)
+        await require_human_admin_or_team_leader(request=_plain_request(), user=svc)
 
     leader = _svc_admin()
     leader.is_service_token = False
     leader.service_token_id = None
     leader.role = UserRole.TEAM_LEADER
     leader.team_id = uuid.uuid4()
-    assert await require_human_admin_or_team_leader(user=leader) is leader
+    assert await require_human_admin_or_team_leader(request=_plain_request(), user=leader) is leader
 
     admin = _svc_admin()
     admin.is_service_token = False
     admin.service_token_id = None
-    assert await require_human_admin_or_team_leader(user=admin) is admin
+    assert await require_human_admin_or_team_leader(request=_plain_request(), user=admin) is admin

@@ -741,9 +741,11 @@ def create_app() -> FastAPI:
     # (tests/unit/test_aicm_flag_off.py).
     if settings.AICM_API_ENABLED:
         from app.routers.aicm import router as aicm_router
+        from app.routers.aicm_admin import router as aicm_admin_router
 
         app.include_router(aicm_router)
-        logger.info("aicm.router_mounted", prefix="/aicm/v1")
+        app.include_router(aicm_admin_router)
+        logger.info("aicm.router_mounted", prefix="/aicm/v1", admin_mirror=True)
 
     # Bedrock invocation log ↔ usage_logs 대조(runtime plane 본문 감사). 설정이 비어 있으면
     # 엔드포인트는 존재하되 503 으로 "미설정" 을 알린다 — 라우터를 조건부로 빼면 UI 가

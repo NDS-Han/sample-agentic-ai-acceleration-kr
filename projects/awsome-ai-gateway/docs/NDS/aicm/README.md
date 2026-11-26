@@ -1,44 +1,92 @@
-# AICM `/aicm/v1` 통합 가이드 (phase 0a)
+# AICM integration guide — `/aicm/v1`
 
-이 디렉터리의 `aicm-v1-openapi.json`이 계약서다. phase 0a 범위는 다음 다섯 경로뿐이다.
+`aicm-v1-openapi.json` in this directory is the machine-readable contract. The feature is
+mounted only when `AICM_API_ENABLED=true`.
 
-- `POST /aicm/v1/service-tokens` — 사람 admin JWT로 통합 토큰 발급(평문 1회만 반환)
-- `GET /aicm/v1/service-tokens` — 호출 토큰과 같은 rotate 계보 목록
-- `POST /aicm/v1/service-tokens/rotate` — 토큰 자기 교체(구 토큰 24시간 grace)
-- `POST /aicm/v1/users/provision` — Cognito 생성/ADFS 연결 + 게이트웨이 사용자 동기화
-- `POST /aicm/v1/users/{user_id}/deactivate` — Cognito disable/sign-out + 사용자 비활성화 + VK 폐기
+## Option A admin mirror
 
-## 인증과 권한
+AICM only changes its gateway client base URL:
 
-`POST /service-tokens`을 제외한 모든 호출은 `Authorization: Bearer itg-...` 통합 토큰을 사용한다.
-기존 `svc-` 토큰과 사람 JWT는 통하지 않는다. 토큰은 발급 시 부여한 scope만 가진다.
+```text
+apiBase = https://<gateway-host>/aicm/v1
+```
 
-phase 0a scope:
+The existing paths stay `/admin/...` underneath. Exactly the allowlisted contract endpoints in
+`aicm-client-contract.json` are exposed as `/aicm/v1/admin/...`; no other admin path is mounted.
+The mirror reuses the same handlers and schemas as `/admin`, so request bodies, response bodies,
+status codes (including 204), error envelope, query parameters, and `x-request-id` propagation match.
 
-- `tokens:read`
-- `tokens:rotate`
-- `users:provision`
-- `users:lifecycle`
+Notable semantics:
 
-발급 시 `allowed_cidrs`를 지정하면 그 원천 대역만 허용된다. 토큰 계보(lineage)별로 read/write/lifecycle
-고정창 레이트리밋이 적용된다.
+- `[]` in allowed-clients/allowed-models means allow-all (the existing gateway semantics).
+- `max_budget_usd` accepts up to four decimal places.
+- Team budget `"unlimited"` is accepted for `PUT /admin/budgets/team/{team_id}`. It is stored as
+  the maximum `NUMERIC(12,4)` cap (`99999999.9999`) so the gateway hot path is unchanged; in
+  practice this unlocks team-level blocking. Do not use that literal as a normal cap.
+- `PUT /admin/budgets/spent` is an absolute cumulative seed. Reconciliation treats successful
+  `SEED_BUDGET_SPENT` audit deltas as expected ledger input, so a correct seed does not become a
+  reconciliation mismatch.
+- App-group budgets are advisory control-plane records only: they are stored and returned, but are
+  not enforced by gateway-proxy and are not included in spend reservations. This is intentional for
+  this deployment because only Claude Code is permitted; Cowork and Codex are not permitted. To
+  restrict or revoke access, use `allowed-clients`, the per-app budget for `claude-code`, or the user
+  total budget.
+- `GET /admin/budgets/summary/team/{team_id}/users?period=YYYY-MM&limit=10000` is the single-page
+  team member summary endpoint.
+- `POST /admin/service-tokens/rotate` is self-rotation and must never be retried. A replay does not
+  return the secret again.
 
-## 멱등성
+## Authentication and token lifecycle
 
-`rotate`, `provision`, `deactivate`는 `Idempotency-Key` 헤더가 필수다(1–128자 printable ASCII).
-같은 키와 같은 요청을 다시 보내면 저장된 응답이 `Idempotent-Replayed: true`와 함께 반환된다. 같은 키의
-다른 요청은 `422 idempotency_key_reused`, 진행 중이면 `409 idempotency_in_progress`다. 실패한 요청은
-저장하지 않으므로 같은 키로 재시도할 수 있다. rotate 응답의 새 토큰 원문은 저장하지 않으므로 재전송은
-`409 idempotency_secret_not_replayable`를 반환한다.
+Mirror calls use:
 
-## provision 의미
+```text
+Authorization: Bearer svc-<64 hex lowercase chars>
+```
 
-`groups`에는 팀으로 해석 가능한 게이트웨이 OIDC 그룹이 하나 이상 있어야 하며 admin 그룹은 거부된다.
-고객 Cognito 풀에 SAML IdP가 설정돼 있다면 `link`를 보내야 한다. 이미 ADFS로 로그인해 만들어진
-프로필(`UserStatus=EXTERNAL_PROVIDER`)은 삭제하거나 연결하지 않고 `state=already_federated`로 보고한다.
-Cognito 작업이 부분 성공한 뒤 실패하면 응답 `details.partial_state`를 보고 같은 요청을 재시도한다.
+This is not a generic service token. It must be an AICM-scoped integration token issued by a human
+admin through `POST /aicm/v1/service-tokens` (human admin JWT) or the admin UI path. The token carries
+scopes such as `users:read`, `users:write`, `users:sync`, `budgets:read`, `budgets:write`,
+`models:read`, `tokens:read`, and `tokens:rotate`.
 
-## 운영 설정
+AICM-scoped `svc-` tokens are accepted only on `/aicm/v1/admin/*` contract routes. They are rejected
+on every real `/admin/*` route. Generic `svc-` tokens and human JWTs are rejected on the mirror.
+Rotation preserves the AICM scopes, CIDR restrictions, lineage, and `svc-` prefix. Token issuance
+remains human-admin-only.
 
-기능은 `AICM_API_ENABLED=false`가 기본값이며 false일 때 라우터가 마운트되지 않는다. 필요한 환경 변수와
-IAM 권한은 wave의 `HANDOFF.md`를 참조한다.
+The legacy phase-0a lifecycle routes (`/aicm/v1/users/provision`, `/deactivate`, and legacy
+`/aicm/v1/service-tokens` operations) remain available for legacy `itg-` tokens. New option-A
+integrations should use the admin mirror for service-token list/rotate.
+
+## Rate limits and retries
+
+Per-token-lineage fixed-window rate limits are enforced in read/write/sync classes. HTTP 429 responses
+carry `Retry-After`. Recommended client behavior is the contract behavior:
+
+- 401: refresh/rotate credential state, then retry once.
+- 408, 429, or 5xx: exponential backoff, at most three tries.
+- Never retry `POST /admin/service-tokens/rotate` automatically.
+- Propagate `x-request-id` on every call.
+
+Cognito sync endpoints can be long-running. The service batches commits, uses a PostgreSQL advisory
+lock for whole-pool sync mutual exclusion, and database command timeouts bound individual statements.
+
+## Error format
+
+Errors use the admin-api envelope:
+
+```json
+{"error":{"type":"forbidden","code":"insufficient_scope","message":"token lacks required scope"}}
+```
+
+Validation failures use the same envelope with field details where available. Mirror calls to a path
+outside the contract allowlist are not mounted (404); a valid integration token used on the wrong
+AICM surface receives 403 `integration_surface_forbidden`.
+
+## Admin/system target protection
+
+AICM cannot modify gateway ADMIN users, service accounts, or system users through user or user-budget
+mutations, including USER-scope `PUT /admin/budgets/spent` seeds. A batch containing any protected
+USER scope is refused atomically before budget tables or Redis are touched. Refusals return 403 and
+are audited. Cognito sync also refuses admin-group/admin-account demotion or alteration through the
+existing lifecycle protections.

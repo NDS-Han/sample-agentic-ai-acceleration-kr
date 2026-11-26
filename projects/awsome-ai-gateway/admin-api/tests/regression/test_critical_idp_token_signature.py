@@ -110,6 +110,7 @@ def _request(token: str, *, oidc_verifier=None, oidc_http=None) -> MagicMock:
     static = JWTVerifier()
     static.load_configs([SEED_PLACEHOLDER])
     request = MagicMock()
+    request.url.path = "/admin/test"
     request.headers = {"Authorization": f"Bearer {token}"}
     request.app.state = SimpleNamespace(
         jwt_verifier=static, oidc_verifier=oidc_verifier, oidc_http=oidc_http
@@ -224,6 +225,7 @@ async def test_internal_admin_jwt_still_verified_with_static_keys_when_oidc_is_o
         algorithm="RS256",
     )
     request = MagicMock()
+    request.url.path = "/admin/test"
     request.headers = {"Authorization": f"Bearer {token}"}
     request.app.state = SimpleNamespace(
         jwt_verifier=static,

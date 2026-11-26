@@ -250,6 +250,22 @@ EXCEPTION WHEN unique_violation THEN
     RAISE WARNING 'idx_budget_usages_unique: 기존 중복 데이터로 유니크 인덱스 생성 건너뜀 — 운영 remediation 필요';
 END $$;
 
+-- AICM/admin 공용 advisory app-group 예산(0070). gateway hot path enforcement 에는
+-- 쓰이지 않는다 — 제어plane 정책 저장소이며 spend reservation 에도 포함되지 않는다.
+CREATE TABLE IF NOT EXISTS budget.user_app_group_budgets (
+    user_id           UUID                  NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+    app_group         VARCHAR(64)           NOT NULL,
+    max_budget_usd    NUMERIC(12,4)         NOT NULL,
+    policy            budget.budget_policy  NOT NULL DEFAULT 'HARD_BLOCK',
+    alert_thresholds  INTEGER[]             NOT NULL DEFAULT '{80,90,100}',
+    allocated_by      UUID                  NOT NULL REFERENCES auth.users(id),
+    created_at        TIMESTAMPTZ           NOT NULL DEFAULT now(),
+    updated_at        TIMESTAMPTZ           NOT NULL DEFAULT now(),
+    PRIMARY KEY (user_id, app_group),
+    CONSTRAINT ck_user_app_group_budget_name
+        CHECK (app_group ~ '^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$')
+);
+
 -- NOTE: budget.downgrade_policies는 model.model_aliases FK를 참조하므로
 --       model 스키마 블록 이후에 정의됨 (파일 하단 참조).
 

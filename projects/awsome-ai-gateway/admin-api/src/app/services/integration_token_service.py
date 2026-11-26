@@ -19,6 +19,7 @@ from app.models.auth import ServiceToken
 from app.models.integration import IntegrationToken
 from app.services.service_token_service import (
     INTEGRATION_TOKEN_PREFIX,
+    SERVICE_TOKEN_PREFIX,
     SERVICE_TOKEN_RANDOM_BYTES,
     ServiceTokenService,
     hash_token,
@@ -35,6 +36,14 @@ SCOPES: frozenset[str] = frozenset(
         "tokens:rotate",
         "users:provision",
         "users:lifecycle",
+        # /aicm/v1/admin mirror scopes (option A). 하나의 토큰이 필요한 표면만
+        # 갖도록 발급 시 선택한다 — 읽기/쓰기를 나눈 이유는 유출 시 폭발반경 때문.
+        "users:read",
+        "users:write",
+        "users:sync",
+        "budgets:read",
+        "budgets:write",
+        "models:read",
     }
 )
 
@@ -58,11 +67,17 @@ def _parse_cidrs(values) -> tuple:
     return tuple(out)
 
 
-def well_formed(raw: str) -> bool:
-    """DB 왕복 전 형식 검사 — ``itg-`` + 64 hex (svc- 경로와 같은 이유)."""
-    if not raw.startswith(INTEGRATION_TOKEN_PREFIX):
+def well_formed(raw: str, prefixes: tuple[str, ...] | None = None) -> bool:
+    """DB 왕복 전 형식 검사 — ``itg-``/``svc-`` + 64 hex.
+
+    phase 0a 는 ``itg-`` 를 발급했고, admin mirror(option A)는 ``svc-`` 접두사를 유지한
+    scoped integration 토큰을 쓴다. verify 의 호출자가 허용 접두사를 좁힌다.
+    """
+    prefixes = prefixes or (INTEGRATION_TOKEN_PREFIX, SERVICE_TOKEN_PREFIX)
+    prefix = next((p for p in prefixes if raw.startswith(p)), None)
+    if prefix is None:
         return False
-    body = raw[len(INTEGRATION_TOKEN_PREFIX):]
+    body = raw[len(prefix):]
     return len(body) == SERVICE_TOKEN_RANDOM_BYTES * 2 and all(c in "0123456789abcdef" for c in body)
 
 
@@ -102,6 +117,7 @@ class IntegrationTokenService:
         rate_limit_per_min: int | None,
         expiry_days: int | None,
         integration: str = INTEGRATION_AICM,
+        prefix: str = SERVICE_TOKEN_PREFIX,
     ):
         scopes = self.validate_scopes(scopes)
         cidrs = self.validate_cidrs(allowed_cidrs)
@@ -109,7 +125,10 @@ class IntegrationTokenService:
             raise ValidationError("rate_limit_per_min must be >= 1")
         resp = await self._base.issue(
             session, name=name, created_by=created_by, expiry_days=expiry_days,
-            prefix=INTEGRATION_TOKEN_PREFIX,
+            # option A mirror 는 ``Bearer svc-...`` 를 그대로 쓴다. integration grant 가
+            # 있으므로 이 svc- 는 real /admin 표면에서는 core/auth 가 거부한다.
+            # legacy lifecycle 유지용으로만 호출자가 명시적으로 itg- 를 고를 수 있다.
+            prefix=prefix,
         )
         tid = uuid.UUID(resp.id)
         session.add(
@@ -121,8 +140,14 @@ class IntegrationTokenService:
         await session.flush()
         return resp, scopes, cidrs
 
-    async def verify(self, session: AsyncSession, raw: str) -> IntegrationTokenRecord | None:
-        if not well_formed(raw):
+    async def verify(
+        self,
+        session: AsyncSession,
+        raw: str,
+        *,
+        prefixes: tuple[str, ...] | None = None,
+    ) -> IntegrationTokenRecord | None:
+        if not well_formed(raw, prefixes=prefixes):
             return None
         tok = await self._base.verify(session, hash_token(raw))
         if tok is None:
@@ -146,16 +171,8 @@ class IntegrationTokenService:
         grant = await session.get(IntegrationToken, token_id)
         if grant is None:
             raise ValidationError("not an integration token")
-        resp = await self._base.rotate(session, token_id=token_id, created_by=actor_user_id)
-        session.add(
-            IntegrationToken(
-                token_id=uuid.UUID(resp.id), integration=grant.integration, scopes=list(grant.scopes),
-                allowed_cidrs=[str(c) for c in grant.allowed_cidrs] if grant.allowed_cidrs else None,
-                rate_limit_per_min=grant.rate_limit_per_min, lineage_id=grant.lineage_id,
-            )
-        )
-        await session.flush()
-        return resp
+        # 권한 부속 행 복사는 ServiceTokenService.rotate 가 한 곳에서 한다.
+        return await self._base.rotate(session, token_id=token_id, created_by=actor_user_id)
 
     async def list_lineage(self, session: AsyncSession, lineage_id: uuid.UUID) -> list[dict]:
         rows = (

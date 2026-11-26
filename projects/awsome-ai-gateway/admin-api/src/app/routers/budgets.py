@@ -9,10 +9,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import CurrentUser, require_admin, require_admin_or_team_leader, require_human_admin, require_human_admin_or_team_leader
 from app.core.db import get_db_session
+from app.core.exceptions import ForbiddenError
+from app.models.auth import UserRole
 from app.models.budget import BudgetScope
 from app.services.budget_service import BudgetService
 from app.schemas.budgets import (
     AllocateBudgetRequest,
+    AppGroupBudgetItem,
     AutoDowngradeConfigRequest,
     AutoDowngradeConfigResponse,
     BudgetConfigDetailResponse,
@@ -23,7 +26,11 @@ from app.schemas.budgets import (
     SetBudgetRequest,
     SetDefaultCapRequest,
     TeamBudgetAllocation,
+    TeamUserBudgetSummaryPage,
+    UsageByAppItem,
+    UsageByAppResponse,
     UserAppBudgetsResponse,
+    UserAppGroupBudgetsResponse,
 )
 
 router = APIRouter(prefix="/admin/budgets", tags=["Budget Management"])
@@ -247,7 +254,10 @@ async def get_user_app_budgets(
 
     svc: BudgetService = request.app.state.budget_service
     apps = await svc.get_user_app_budgets(session, user_id=user_id, actor=user)
-    return UserAppBudgetsResponse(user_id=str(user_id), apps=apps)
+    has_total = await svc.has_user_total_budget(session, user_id=user_id)
+    return UserAppBudgetsResponse(
+        user_id=str(user_id), apps=apps, has_total_budget=has_total
+    )
 
 
 @router.get("/team/{team_id}/allocation", response_model=TeamBudgetAllocation | None)
@@ -290,6 +300,147 @@ async def allocate_team_budget(
         request_id=getattr(request.state, "request_id", "") or request.headers.get("x-request-id", ""),
     )
     return {"status": "ok"}
+
+
+@router.put("/user/{user_id}/app-group/{group}", dependencies=[Depends(require_human_admin_or_team_leader)])
+async def set_user_app_group_budget(
+    request: Request,
+    user_id: uuid.UUID,
+    group: str,
+    body: SetBudgetRequest,
+    user: CurrentUser = Depends(require_admin_or_team_leader),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """advisory app-group budget upsert. gateway enforcement 는 바꾸지 않는다."""
+    svc: BudgetService = request.app.state.budget_service
+    await svc.set_user_app_group_budget(
+        session,
+        user_id=user_id,
+        group=group,
+        data=body,
+        actor=user,
+        ip_address=request.client.host if request.client else "0.0.0.0",
+        request_id=getattr(request.state, "request_id", "") or request.headers.get("x-request-id", ""),
+    )
+    return {"status": "ok"}
+
+
+@router.get("/user/{user_id}/app-groups", response_model=UserAppGroupBudgetsResponse)
+async def get_user_app_group_budgets(
+    request: Request,
+    user_id: uuid.UUID,
+    user: CurrentUser = Depends(require_admin_or_team_leader),
+    session: AsyncSession = Depends(get_db_session),
+):
+    svc: BudgetService = request.app.state.budget_service
+    rows = await svc.list_user_app_group_budgets(session, user_id=user_id, actor=user)
+    return UserAppGroupBudgetsResponse(
+        user_id=str(user_id),
+        app_groups=[
+            AppGroupBudgetItem(
+                group=r.app_group,
+                max_budget_usd=r.max_budget_usd,
+                policy=r.policy,
+                alert_thresholds=list(r.alert_thresholds or []),
+            )
+            for r in rows
+        ],
+    )
+
+
+@router.delete("/user/{user_id}/app-group/{group}", status_code=204, dependencies=[Depends(require_human_admin_or_team_leader)])
+async def clear_user_app_group_budget(
+    request: Request,
+    user_id: uuid.UUID,
+    group: str,
+    user: CurrentUser = Depends(require_admin_or_team_leader),
+    session: AsyncSession = Depends(get_db_session),
+):
+    svc: BudgetService = request.app.state.budget_service
+    await svc.clear_user_app_group_budget(
+        session,
+        user_id=user_id,
+        group=group,
+        actor=user,
+        ip_address=request.client.host if request.client else "0.0.0.0",
+        request_id=getattr(request.state, "request_id", "") or request.headers.get("x-request-id", ""),
+    )
+
+
+@router.get("/usage-by-app", response_model=UsageByAppResponse)
+async def get_usage_by_app(
+    request: Request,
+    period: str = Query(description="YYYY-MM"),
+    user: CurrentUser = Depends(require_admin_or_team_leader),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """앱(client)별 청구 사용량 — usage_rollup 하이브리드 소스의 client_share 와 같은 정의."""
+    from app.services import usage_reads, usage_rollup as ur
+
+    dr = ur.month_range(period)
+    teams = None
+    if user.role == UserRole.TEAM_LEADER:
+        # budget summary 와 같은 리더 범위 — 소속 팀 + leader_user_id 로 리드하는 팀.
+        # 빈 집합을 RollupScope 에 넣으면 fail-closed ValueError(500)가 되므로,
+        # 좁힐 팀을 해석할 수 없는 경우만 여기서 403으로 끊는다.
+        from app.services.analytics_service import _leader_allowed_team_ids
+
+        allowed = await _leader_allowed_team_ids(user, session)
+        if not allowed:
+            raise ForbiddenError(
+                "Team leader has no team assigned — cannot scope usage by app"
+            )
+        teams = tuple(sorted(allowed))
+    rows = await usage_reads.client_share(
+        session,
+        ur.RollupScope(start=dr.start, end=dr.end, teams=teams, billable_only=True),
+    )
+    return UsageByAppResponse(
+        period=period,
+        apps=[
+            UsageByAppItem(
+                client=r.client,
+                used_usd=r.cost_usd,
+                call_count=int(r.call_count or 0),
+                ws_queries=int(r.ws_queries or 0),
+                ws_cost_usd=r.ws_cost,
+                ws_untracked=int(r.ws_untracked or 0),
+            )
+            for r in rows
+        ],
+    )
+
+
+@router.get("/summary/team/{team_id}/users", response_model=TeamUserBudgetSummaryPage)
+async def get_team_user_budget_summary(
+    request: Request,
+    team_id: uuid.UUID,
+    period: str = Query(description="YYYY-MM"),
+    limit: int = Query(10000, ge=1, le=10000),
+    offset: int = Query(0, ge=0),
+    user: CurrentUser = Depends(require_admin_or_team_leader),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """팀 멤버 USER summary single-page 조회 — AICM 은 limit=10000 으로 한 페이지를 요청한다."""
+    svc: BudgetService = request.app.state.budget_service
+    result = await svc.get_budget_summary(
+        session,
+        redis=request.app.state.redis,
+        scope="USER",
+        target_id=None,
+        period=period,
+        actor=user,
+    )
+    rows = [item for item in result.summary if item.team_id == str(team_id)]
+    page = rows[offset:offset + limit]
+    return TeamUserBudgetSummaryPage(
+        period=period,
+        team_id=str(team_id),
+        items=page,
+        limit=limit,
+        offset=offset,
+        has_more=(offset + len(page)) < len(rows),
+    )
 
 
 @router.get("/summary", response_model=BudgetSummaryResponse)

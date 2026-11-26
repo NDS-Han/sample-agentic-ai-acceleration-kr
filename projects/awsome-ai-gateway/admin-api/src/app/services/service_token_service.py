@@ -168,6 +168,24 @@ class ServiceTokenService:
             session, name=old.name, created_by=old.created_by, rotated_from=old.id,
             expires_at=new_expires_at, prefix=prefix,
         )
+        # integration grant(auth.integration_tokens)도 rotate 계보를 따라간다.
+        # 한 곳(여기)에서 복사해야 `/admin/service-tokens/rotate` mirror 와
+        # `/aicm/v1/service-tokens/rotate` legacy 경로가 같은 결과를 만든다.
+        from app.models.integration import IntegrationToken
+
+        grant = await session.get(IntegrationToken, old.id)
+        if grant is not None:
+            session.add(
+                IntegrationToken(
+                    token_id=uuid.UUID(resp.id),
+                    integration=grant.integration,
+                    scopes=list(grant.scopes or ()),
+                    allowed_cidrs=[str(c) for c in grant.allowed_cidrs] if grant.allowed_cidrs else None,
+                    rate_limit_per_min=grant.rate_limit_per_min,
+                    lineage_id=grant.lineage_id,
+                )
+            )
+            await session.flush()
         # grace — 구 토큰은 24h 간 진행 중 호출이 끊기지 않게 유효를 유지.
         # revoked_at != None 인 토큰은 위에서 이미 거부했으므로 이 값은 최초
         # 1회만 쓰인다(재rotate 불가 → grace 연장 루프 없음).

@@ -78,6 +78,8 @@ async def rotate_service_token(
     #    대상은 항상 호출 토큰 자신이며 요청 본문/경로에서 id 를 받지 않는다 —
     #    한 svc 토큰이 다른 토큰을 rotate 하는 경로가 없다.
     svc = request.app.state.service_token_service
+    # integration grant 가 있으면 ServiceTokenService.rotate 가 같은 scopes/CIDR/lineage 를
+    # 새 토큰에 복사한다 — mirror rotate 후에도 AICM scope 와 svc- prefix 가 유지된다.
     result = await svc.rotate(
         session, token_id=admin.service_token_id, created_by=admin.user_id
     )

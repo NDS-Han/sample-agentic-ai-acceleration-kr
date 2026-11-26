@@ -29,15 +29,10 @@ from app.models.auth import User, UserRole
 from app.repositories.user_repository import UserRepository
 from app.services.cognito_admin import USER_READ, CognitoAdmin, CognitoClientError, attr
 from app.services.cognito_sync_service import CognitoSyncService
+from app.services.protected_targets import SYSTEM_USER_IDS as _SYSTEM_USER_IDS
 from app.services.user_team_service import release_stale_leader_pointer
 
 logger = structlog.get_logger()
-
-#: 시스템 합성 사용자(03_seed_data.sql) — 통합이 비활성화할 수 없다.
-_SYSTEM_USER_IDS = frozenset({
-    uuid.UUID("00000000-0000-4000-a000-000000000010"),
-    uuid.UUID("00000000-0000-4000-a000-000000000011"),
-})
 
 _EMAIL_RE = re.compile(r"^[^@\s\"\\]{1,64}@[^@\s\"\\]{1,255}\.[^@\s\"\\]{1,63}$")
 _LINK_ATTR_RE = re.compile(r"^[A-Za-z0-9_:.\-]{1,64}$")
