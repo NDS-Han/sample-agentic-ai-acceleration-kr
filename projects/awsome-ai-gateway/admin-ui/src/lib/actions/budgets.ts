@@ -256,3 +256,26 @@ function toErrorMessage(err: unknown): string {
   }
   return 'An unexpected error occurred';
 }
+// ─── releaseManagedFieldAction ────────────────────────────────────────────────
+// AICM managed lock 해제. 사유는 필수이며 백엔드가 audit row 에 남긴다.
+// 해제 후에는 다음 AICM 쓰기가 다시 잠글 때까지 사람 편집이 가능하다.
+
+export async function releaseManagedFieldAction(
+  resourceType: 'user' | 'team',
+  resourceId: string,
+  field: string,
+  reason: string,
+): Promise<ActionResult<void>> {
+  if (!reason.trim()) return { success: false, error: 'Release reason is required' };
+  try {
+    await adminAPI.post(
+      `/admin/managed-fields/${encodeURIComponent(resourceType)}/${encodeURIComponent(resourceId)}/${encodeURIComponent(field)}/release`,
+      { reason: reason.trim() },
+    );
+    revalidatePath('/budgets');
+    revalidatePath('/users');
+    return { success: true, data: undefined };
+  } catch (err) {
+    return { success: false, error: toErrorMessage(err) };
+  }
+}

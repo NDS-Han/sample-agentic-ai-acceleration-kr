@@ -13,6 +13,14 @@ from app.core.exceptions import ForbiddenError
 from app.models.auth import UserRole
 from app.models.budget import BudgetScope
 from app.services.budget_service import BudgetService
+from app.services.managed_fields import (
+    FIELD_BUDGET,
+    FIELD_DEFAULT_CAP,
+    RESOURCE_TEAM,
+    RESOURCE_USER,
+    managed_info,
+    managed_rows,
+)
 from app.schemas.budgets import (
     AllocateBudgetRequest,
     AppGroupBudgetItem,
@@ -254,6 +262,15 @@ async def get_user_app_budgets(
 
     svc: BudgetService = request.app.state.budget_service
     apps = await svc.get_user_app_budgets(session, user_id=user_id, actor=user)
+    rows = await managed_rows(
+        session, resource_type=RESOURCE_USER, resource_ids=[user_id],
+        facets=[f"app-budget:{a.client}" for a in apps],
+    )
+    by_facet = {r.facet: r for r in rows}
+    for app in apps:
+        row = by_facet.get(f"app-budget:{app.client}")
+        if row:
+            app.managed_by = managed_info(row)
     has_total = await svc.has_user_total_budget(session, user_id=user_id)
     return UserAppBudgetsResponse(
         user_id=str(user_id), apps=apps, has_total_budget=has_total
@@ -273,12 +290,34 @@ async def get_team_allocation(
     svc: BudgetService = request.app.state.budget_service
     # KST 월(§59) — date.today() 는 pod TZ(UTC)라 월 경계 첫 9시간에 지난달이 된다.
     effective_period = period or current_kst_period()
-    return await svc.get_team_allocation(
+    resp = await svc.get_team_allocation(
         session,
         team_id=team_id,
         period=effective_period,
         actor=user,
     )
+    if resp is not None:
+        ids = []
+        for e in resp.entries:
+            if e.target_type == "USER":
+                try:
+                    ids.append(uuid.UUID(e.target_id))
+                except ValueError:
+                    pass
+        rows = await managed_rows(
+            session, resource_type=RESOURCE_USER, resource_ids=ids, facets=[FIELD_BUDGET]
+        ) if ids else []
+        by_id = {r.resource_id: r for r in rows}
+        for entry in resp.entries:
+            if entry.target_type != "USER":
+                continue
+            try:
+                row = by_id.get(uuid.UUID(entry.target_id))
+            except ValueError:
+                row = None
+            if row:
+                entry.managed_by = managed_info(row)
+    return resp
 
 
 @router.put("/team/{team_id}/allocate", dependencies=[Depends(require_human_admin_or_team_leader)])
@@ -334,6 +373,11 @@ async def get_user_app_group_budgets(
 ):
     svc: BudgetService = request.app.state.budget_service
     rows = await svc.list_user_app_group_budgets(session, user_id=user_id, actor=user)
+    mrows = await managed_rows(
+        session, resource_type=RESOURCE_USER, resource_ids=[user_id],
+        facets=[f"app-group-budget:{r.app_group}" for r in rows],
+    )
+    by_facet = {r.facet: r for r in mrows}
     return UserAppGroupBudgetsResponse(
         user_id=str(user_id),
         app_groups=[
@@ -342,6 +386,8 @@ async def get_user_app_group_budgets(
                 max_budget_usd=r.max_budget_usd,
                 policy=r.policy,
                 alert_thresholds=list(r.alert_thresholds or []),
+                **({"managed_by": managed_info(by_facet[f"app-group-budget:{r.app_group}"])}
+                   if f"app-group-budget:{r.app_group}" in by_facet else {}),
             )
             for r in rows
         ],
@@ -454,7 +500,7 @@ async def get_budget_summary(
 ):
     svc: BudgetService = request.app.state.budget_service
     redis = request.app.state.redis
-    return await svc.get_budget_summary(
+    resp = await svc.get_budget_summary(
         session,
         redis=redis,
         scope=scope,
@@ -462,6 +508,20 @@ async def get_budget_summary(
         period=period,
         actor=user,
     )
+    # managed_by 는 플래그 ON 에서만 채워진다 — OFF 이면 조회 없이 빈 목록.
+    ids = list({uuid.UUID(i.target_id) for i in resp.summary})
+    rows = await managed_rows(session, resource_ids=ids, facets=[FIELD_BUDGET, FIELD_DEFAULT_CAP]) if ids else []
+    by_key = {(r.resource_type, r.resource_id, r.facet): r for r in rows}
+    for item in resp.summary:
+        rtype = RESOURCE_USER if item.target_type == "USER" else RESOURCE_TEAM
+        rid = uuid.UUID(item.target_id)
+        row = by_key.get((rtype, rid, FIELD_BUDGET))
+        if row:
+            item.managed_by = managed_info(row)
+        row = by_key.get((rtype, rid, FIELD_DEFAULT_CAP))
+        if row:
+            item.default_cap_managed_by = managed_info(row)
+    return resp
 
 
 def _parse_scope(value: str) -> BudgetScope:
@@ -492,12 +552,24 @@ async def get_budget_config(
     금액만 고쳐 저장하면 정책이 조용히 리셋됐다(버그).
     """
     svc: BudgetService = request.app.state.budget_service
-    return await svc.get_budget_config(
+    scope_enum = _parse_scope(scope)
+    resp = await svc.get_budget_config(
         session,
-        scope=_parse_scope(scope),
+        scope=scope_enum,
         scope_id=scope_id,
         actor=user,
     )
+    rtype = RESOURCE_USER if scope_enum == BudgetScope.USER else RESOURCE_TEAM
+    rows = await managed_rows(
+        session, resource_type=rtype, resource_ids=[scope_id],
+        facets=[FIELD_BUDGET, FIELD_DEFAULT_CAP],
+    )
+    by_facet = {r.facet: r for r in rows}
+    if FIELD_BUDGET in by_facet:
+        resp.managed_by = managed_info(by_facet[FIELD_BUDGET])
+    if FIELD_DEFAULT_CAP in by_facet:
+        resp.default_cap_managed_by = managed_info(by_facet[FIELD_DEFAULT_CAP])
+    return resp
 
 
 @router.get("/{scope}/{scope_id}/downgrade", response_model=AutoDowngradeConfigResponse)

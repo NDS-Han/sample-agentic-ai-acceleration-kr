@@ -36,6 +36,16 @@ from app.repositories._locks import advisory_xact_lock
 from app.repositories.budget_repository import BudgetRepository, DowngradePolicyRepository
 from app.repositories.user_repository import UserRepository
 from app.services.protected_targets import protected_user_target_code
+from app.services.managed_fields import (
+    FIELD_BUDGET,
+    FIELD_DEFAULT_CAP,
+    RESOURCE_TEAM,
+    RESOURCE_USER,
+    app_budget_facet,
+    app_group_budget_facet,
+    assert_writable,
+    record_aicm_write,
+)
 from app.schemas.budgets import (
     AllocationEntry,
     AllocateBudgetRequest,
@@ -546,12 +556,18 @@ class BudgetService:
         if team is None:
             raise NotFoundError("Team", str(team_id))
 
+        managed_specs = [(RESOURCE_TEAM, team_id, FIELD_BUDGET)]
+        writes_default_cap = "default_user_cap_usd" in data.model_fields_set
+        if writes_default_cap:
+            managed_specs.append((RESOURCE_TEAM, team_id, FIELD_DEFAULT_CAP))
+        await assert_writable(session, managed_specs, actor=actor)
+
         repo = BudgetRepository(session)
 
         # §3-1: T 편집은 D 를 건드리지 않는다 — 키가 안 오면 직전 행(비활성 포함,
         # 예산 해제 후 재설정 경로)의 D 를 그대로 이어 쓴다.
         latest = await repo.get_latest_config(BudgetScope.TEAM, team_id)
-        if "default_user_cap_usd" in data.model_fields_set:
+        if writes_default_cap:
             new_cap = data.default_user_cap_usd
         else:
             new_cap = latest.default_user_cap_usd if latest else None
@@ -614,6 +630,15 @@ class BudgetService:
             is_active=True,
         )
         await repo.upsert_config(config)
+        await record_aicm_write(
+            session, resource_type=RESOURCE_TEAM, resource_id=team_id, facet=FIELD_BUDGET,
+            actor=actor, request_id=request_id,
+        )
+        if writes_default_cap:
+            await record_aicm_write(
+                session, resource_type=RESOURCE_TEAM, resource_id=team_id, facet=FIELD_DEFAULT_CAP,
+                actor=actor, request_id=request_id, cleared=new_cap is None,
+            )
 
         await invalidate_after_commit(
             session, self._cache_mgr, [f"budget:config:team:{{{team_id}}}"]
@@ -671,10 +696,18 @@ class BudgetService:
         if team is None:
             raise NotFoundError("Team", str(team_id))
 
+        await assert_writable(
+            session, [(RESOURCE_TEAM, team_id, FIELD_DEFAULT_CAP)], actor=actor
+        )
+
         repo = BudgetRepository(session)
         cfg = await repo.get_active_config(BudgetScope.TEAM, team_id)
         old_cap = cfg.default_user_cap_usd if cfg else None
         if old_cap == value:
+            await record_aicm_write(
+                session, resource_type=RESOURCE_TEAM, resource_id=team_id, facet=FIELD_DEFAULT_CAP,
+                actor=actor, request_id=request_id, cleared=value is None,
+            )
             # no-op 이어도 팀 캐시를 갱신 — stale/유실된 D 를 즉시 자가치유한다.
             await invalidate_after_commit(
                 session, self._cache_mgr, [f"budget:config:team:{{{team_id}}}"]
@@ -721,6 +754,11 @@ class BudgetService:
             cfg.default_user_cap_usd = value
             await session.flush()
 
+        await record_aicm_write(
+            session, resource_type=RESOURCE_TEAM, resource_id=team_id, facet=FIELD_DEFAULT_CAP,
+            actor=actor, request_id=request_id, cleared=value is None,
+        )
+
         # 캐시는 DEL 만 — commit 전 SET 은 미커밋 D 를 광고하고(§6-6 위반),
         # T=NULL 행의 limit_usd:null 을 미리 쓰면 gateway 가 unset 판정을 하기
         # 전에 위험하다. miss 시 gateway 가 커밋된 DB 행(D 포함)으로 재수화한다.
@@ -763,7 +801,14 @@ class BudgetService:
         _require_admin_actor(actor)
         repo = BudgetRepository(session)
         cfg = await repo.get_active_config(BudgetScope.TEAM, team_id)
+        await assert_writable(
+            session, [(RESOURCE_TEAM, team_id, FIELD_BUDGET)], actor=actor
+        )
         if cfg is None:
+            await record_aicm_write(
+                session, resource_type=RESOURCE_TEAM, resource_id=team_id, facet=FIELD_BUDGET,
+                actor=actor, request_id=request_id, cleared=True,
+            )
             return
 
         if not confirm:
@@ -780,6 +825,10 @@ class BudgetService:
 
         cfg.is_active = False
         await session.flush()
+        await record_aicm_write(
+            session, resource_type=RESOURCE_TEAM, resource_id=team_id, facet=FIELD_BUDGET,
+            actor=actor, request_id=request_id, cleared=True,
+        )
 
         await invalidate_after_commit(
             session, self._cache_mgr, [f"budget:config:team:{{{team_id}}}"]
@@ -842,6 +891,15 @@ class BudgetService:
                 "no team budget is set (equal_split_nothing_to_allocate).",
                 "equal_split_nothing_to_allocate",
             )
+
+        managed_specs = [(RESOURCE_TEAM, team_id, FIELD_DEFAULT_CAP)]
+        if clear_individual:
+            for m in members:
+                managed_specs.append((RESOURCE_USER, m.id, FIELD_BUDGET))
+                managed_specs.extend(
+                    (RESOURCE_USER, m.id, app_budget_facet(c)) for c in _ALLOWED_CLIENTS
+                )
+        await assert_writable(session, managed_specs, actor=actor)
 
         period = current_kst_period()
         warnings: list[dict] = []
@@ -993,6 +1051,10 @@ class BudgetService:
                     403,
                 )
 
+        await assert_writable(
+            session, [(RESOURCE_USER, user_id, FIELD_BUDGET)], actor=actor
+        )
+
         # 유저 단위 직렬화 — 총액·앱별 쓰기가 엇갈려 I-2(app_c ≤ A_u)가 깨지는 것을 막는다.
         await _lock_user_budget_key(session, user_id)
 
@@ -1052,6 +1114,10 @@ class BudgetService:
             is_active=True,
         )
         await repo.upsert_config(config)
+        await record_aicm_write(
+            session, resource_type=RESOURCE_USER, resource_id=user_id, facet=FIELD_BUDGET,
+            actor=actor, request_id=request_id,
+        )
 
         # H3: 이 키는 DEL-only 다 — 커밋 후 SET 으로 데우지 않는다.
         # ``budget:config:user:{uid}`` 는 총액 필드와 ``app_clients`` 게이트가
@@ -1117,11 +1183,20 @@ class BudgetService:
                     403,
                 )
 
+        delete_specs = [(RESOURCE_USER, user_id, FIELD_BUDGET)] + [
+            (RESOURCE_USER, user_id, app_budget_facet(c)) for c in _ALLOWED_CLIENTS
+        ]
+        await assert_writable(session, delete_specs, actor=actor)
+
         await _lock_user_budget_key(session, user_id)
 
         repo = BudgetRepository(session)
         existing = await repo.get_active_config(BudgetScope.USER, user_id)
         if existing is None:
+            await record_aicm_write(
+                session, resource_type=RESOURCE_USER, resource_id=user_id, facet=FIELD_BUDGET,
+                actor=actor, request_id=request_id, cleared=True,
+            )
             return
 
         # I-3 cascade 대상 — 확인 다이얼로그에 목록으로 보여준다.
@@ -1155,6 +1230,15 @@ class BudgetService:
         existing.is_active = False
         cascaded = await repo.deactivate_app_configs_for_user(user_id)
         await session.flush()
+        await record_aicm_write(
+            session, resource_type=RESOURCE_USER, resource_id=user_id, facet=FIELD_BUDGET,
+            actor=actor, request_id=request_id, cleared=True,
+        )
+        for client in cascaded:
+            await record_aicm_write(
+                session, resource_type=RESOURCE_USER, resource_id=user_id,
+                facet=app_budget_facet(client), actor=actor, request_id=request_id, cleared=True,
+            )
 
         invalidate_keys = [f"budget:config:user:{{{user_id}}}"]
         invalidate_keys += [f"budget:config:user:{{{user_id}}}:{c}" for c in cascaded]
@@ -1246,6 +1330,10 @@ class BudgetService:
                     403,
                 )
 
+        await assert_writable(
+            session, [(RESOURCE_USER, user_id, app_budget_facet(client))], actor=actor
+        )
+
         from app.services.user_allowed_client_service import UserAllowedClientService
 
         allowed = await UserAllowedClientService(session).get(user_id)
@@ -1322,6 +1410,10 @@ class BudgetService:
             is_active=True,
         )
         await repo.upsert_config(config)
+        await record_aicm_write(
+            session, resource_type=RESOURCE_USER, resource_id=user_id,
+            facet=app_budget_facet(client), actor=actor, request_id=request_id,
+        )
 
         # P0-③ durability + H3: 두 키 모두 DEL-only — 커밋 후 SET/refresh 로
         # 데우지 않는다. per-app SET 이나 app_clients refresh 가 다른 요청의
@@ -1400,13 +1492,25 @@ class BudgetService:
                     403,
                 )
 
+        await assert_writable(
+            session, [(RESOURCE_USER, user_id, app_budget_facet(client))], actor=actor
+        )
+
         repo = BudgetRepository(session)
         existing = await repo.get_active_app_config(BudgetScope.USER, user_id, client)
         if existing is None:
+            await record_aicm_write(
+                session, resource_type=RESOURCE_USER, resource_id=user_id,
+                facet=app_budget_facet(client), actor=actor, request_id=request_id, cleared=True,
+            )
             return
 
         existing.is_active = False
         await session.flush()
+        await record_aicm_write(
+            session, resource_type=RESOURCE_USER, resource_id=user_id,
+            facet=app_budget_facet(client), actor=actor, request_id=request_id, cleared=True,
+        )
 
         # P0-③ durability + H3: durably DEL both the per-app key and the parent
         # user-config key (app_clients list shrank). DEL-only — 게이트웨이가
@@ -1535,6 +1639,12 @@ class BudgetService:
                     )
 
         # D-1: ΣA_u ≤ T 합계 검증은 없다 — CAP 모델은 초과 약정을 허용한다.
+
+        await assert_writable(
+            session,
+            [(RESOURCE_USER, alloc.user_id, FIELD_BUDGET) for alloc in data.allocations],
+            actor=actor,
+        )
 
         # 데드락 방지: 유저 키를 정렬된 순서로 잠근다.
         sorted_allocs = sorted(data.allocations, key=lambda a: a.user_id)
@@ -2467,6 +2577,9 @@ class BudgetService:
         user = await UserRepository(session).get_user(user_id)
         if user is None:
             raise NotFoundError("User", str(user_id))
+        await assert_writable(
+            session, [(RESOURCE_USER, user_id, app_group_budget_facet(group))], actor=actor
+        )
         await _lock_user_budget_key(session, user_id)
         row = await session.get(UserAppGroupBudget, (user_id, group))
         before = None if row is None else {
@@ -2491,6 +2604,10 @@ class BudgetService:
             row.alert_thresholds = sorted(set(alert_thresholds))
             row.allocated_by = actor.user_id
         await session.flush()
+        await record_aicm_write(
+            session, resource_type=RESOURCE_USER, resource_id=user_id,
+            facet=app_group_budget_facet(group), actor=actor, request_id=request_id,
+        )
         await audit_logger.log(
             session,
             actor_user_id=actor.user_id,
@@ -2541,9 +2658,16 @@ class BudgetService:
         user = await UserRepository(session).get_user(user_id)
         if user is None:
             raise NotFoundError("User", str(user_id))
+        await assert_writable(
+            session, [(RESOURCE_USER, user_id, app_group_budget_facet(group))], actor=actor
+        )
         await _lock_user_budget_key(session, user_id)
         row = await session.get(UserAppGroupBudget, (user_id, group))
         if row is None:
+            await record_aicm_write(
+                session, resource_type=RESOURCE_USER, resource_id=user_id,
+                facet=app_group_budget_facet(group), actor=actor, request_id=request_id, cleared=True,
+            )
             return
         before = {
             "max_budget_usd": str(row.max_budget_usd),
@@ -2552,6 +2676,10 @@ class BudgetService:
         }
         await session.delete(row)
         await session.flush()
+        await record_aicm_write(
+            session, resource_type=RESOURCE_USER, resource_id=user_id,
+            facet=app_group_budget_facet(group), actor=actor, request_id=request_id, cleared=True,
+        )
         await audit_logger.log(
             session,
             actor_user_id=actor.user_id,

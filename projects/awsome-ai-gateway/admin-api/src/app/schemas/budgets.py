@@ -9,7 +9,7 @@ from typing import Annotated
 
 from pydantic import BaseModel, Field, field_validator
 
-from app.schemas.common import BudgetPolicy
+from app.schemas.common import BudgetPolicy, ManagedByInfo, managed_by_field
 
 
 # ── Requests ──
@@ -148,6 +148,8 @@ class BudgetSummaryItem(BaseModel):
     # 수 없어서, 다이얼로그를 다시 열면 항상 [80,90,100] 이 보였다. 예산 미설정 대상은
     # None(설정 자체가 없다)이고 빈 목록은 "알림 없음" 이라는 유효한 설정이다.
     alert_thresholds: list[int] | None = None
+    managed_by: ManagedByInfo | None = managed_by_field()
+    default_cap_managed_by: ManagedByInfo | None = managed_by_field()
 
 
 class BudgetSummaryResponse(BaseModel):
@@ -171,12 +173,15 @@ class BudgetConfigDetailResponse(BaseModel):
     policy: BudgetPolicy | None = None
     alert_thresholds: list[int] | None = None
     default_user_cap_usd: Decimal | None = None
+    managed_by: ManagedByInfo | None = managed_by_field()
+    default_cap_managed_by: ManagedByInfo | None = managed_by_field()
 
 
 class AppBudgetItem(BaseModel):
     client: str
     max_budget_usd: Decimal
     policy: BudgetPolicy
+    managed_by: ManagedByInfo | None = managed_by_field()
 
 
 class UserAppBudgetsResponse(BaseModel):
@@ -192,6 +197,7 @@ class AppGroupBudgetItem(BaseModel):
     max_budget_usd: Decimal
     policy: BudgetPolicy
     alert_thresholds: list[int] = Field(default_factory=list)
+    managed_by: ManagedByInfo | None = managed_by_field()
 
 
 class UserAppGroupBudgetsResponse(BaseModel):
@@ -241,6 +247,7 @@ class AllocationEntry(BaseModel):
     cap_source: str | None = None
     # USER 행만: 실효 cap = A_u ?? D. 개인 cap 이 없으면 None(팀 한도만 적용).
     effective_cap_usd: Decimal | None = None
+    managed_by: ManagedByInfo | None = managed_by_field()
 
 
 class TeamBudgetAllocation(BaseModel):

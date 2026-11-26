@@ -24,6 +24,7 @@ from app.core.config import get_settings
 from app.core.db import AsyncSessionLocal, create_engine, install_commit_before_response
 from app.core.encryption import AESEncryptionService
 from app.core.exceptions import (
+    ManagedFieldLockedError,
     AppError,
     BudgetExceededError,
     BudgetRuleError,
@@ -500,6 +501,20 @@ def register_exception_handlers(app: FastAPI) -> None:
             content={"error": {"type": "sts_verification_error", "message": exc.message, "code": exc.code}},
         )
 
+    @app.exception_handler(ManagedFieldLockedError)
+    async def managed_field_locked_handler(request: Request, exc: ManagedFieldLockedError):
+        return JSONResponse(
+            status_code=409,
+            content={
+                "error": {
+                    "type": "conflict",
+                    "message": exc.message,
+                    "code": exc.code,
+                    "details": exc.details,
+                }
+            },
+        )
+
     @app.exception_handler(AppError)
     async def app_error_handler(request: Request, exc: AppError):
         return JSONResponse(
@@ -710,7 +725,7 @@ def create_app() -> FastAPI:
     register_exception_handlers(app)
 
     # ── Register routers ──
-    from app.routers import analytics, apps, body_logs, budgets, cli, dashboard, internal, keys, models, monitoring, my, productivity, rate_limits, routing, service_accounts, service_tokens, settings as settings_router, users, web_search_quota
+    from app.routers import analytics, apps, body_logs, budgets, cli, dashboard, internal, keys, managed_fields, models, monitoring, my, productivity, rate_limits, routing, service_accounts, service_tokens, settings as settings_router, users, web_search_quota
 
     app.include_router(keys.router)
     app.include_router(budgets.router)
@@ -730,6 +745,7 @@ def create_app() -> FastAPI:
     app.include_router(internal.router)
     app.include_router(service_tokens.router)
     app.include_router(service_accounts.router)
+    app.include_router(managed_fields.router)
     from app.routers import auth_oidc
     app.include_router(auth_oidc.router)
 

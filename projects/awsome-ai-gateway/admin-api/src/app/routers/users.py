@@ -16,7 +16,16 @@ from app.core.exceptions import ForbiddenError
 from app.repositories._cursor import encode_cursor
 from app.services.user_allowed_client_service import UserAllowedClientService
 from app.services.user_allowed_model_service import UserAllowedModelService
+from app.services.managed_fields import (
+    FIELD_ALLOWED_CLIENTS,
+    FIELD_ALLOWED_MODELS,
+    RESOURCE_USER,
+    managed_info,
+    managed_rows,
+)
 from app.schemas.common import (
+    ManagedByInfo,
+    managed_by_field,
     PAGE_LIMIT_DEFAULT,
     PAGE_LIMIT_MAX,
     PAGE_LIMIT_MIN,
@@ -746,6 +755,7 @@ class AllowedClientsBody(BaseModel):
 class AllowedClientsResponse(BaseModel):
     user_id: uuid.UUID
     clients: list[str]   # [] = both allowed (default)
+    managed_by: ManagedByInfo | None = managed_by_field()
 
 
 @router.get("/users/{user_id}/allowed-clients", response_model=AllowedClientsResponse)
@@ -755,7 +765,13 @@ async def get_allowed_clients(
     session: AsyncSession = Depends(get_db_session),
 ):
     svc = UserAllowedClientService(session)
-    return AllowedClientsResponse(user_id=str(user_id), clients=await svc.get(user_id))
+    rows = await managed_rows(
+        session, resource_type=RESOURCE_USER, resource_ids=[user_id], facets=[FIELD_ALLOWED_CLIENTS]
+    )
+    return AllowedClientsResponse(
+        user_id=str(user_id), clients=await svc.get(user_id),
+        **({"managed_by": managed_info(rows[0])} if rows else {}),
+    )
 
 
 @router.put("/users/{user_id}/allowed-clients", response_model=AllowedClientsResponse, dependencies=[Depends(require_human_admin)])
@@ -774,7 +790,10 @@ async def set_allowed_clients(
         key_service=request.app.state.key_service,
     )
     try:
-        clients = await svc.set(user_id, body.clients, admin.user_id)
+        clients = await svc.set(
+            user_id, body.clients, admin.user_id, actor=admin,
+            request_id=getattr(request.state, "request_id", "") or request.headers.get("x-request-id", ""),
+        )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except LookupError as e:
@@ -811,7 +830,10 @@ async def clear_allowed_clients(
         cache_mgr=request.app.state.cache_mgr,
         key_service=request.app.state.key_service,
     )
-    await svc.clear(user_id, admin.user_id)
+    await svc.clear(
+            user_id, admin.user_id, actor=admin,
+            request_id=getattr(request.state, "request_id", "") or request.headers.get("x-request-id", ""),
+        )
     await session.commit()
     # 커밋 후 무효화 — set 경로와 같은 이유.
     await svc.invalidate_user_vk_cache(user_id)
@@ -836,6 +858,7 @@ async def clear_allowed_clients(
 class UserAllowedModelsResponse(BaseModel):
     user_id: uuid.UUID
     model_aliases: list[str]  # [] = override 없음 → 팀 정책으로 폴백
+    managed_by: ManagedByInfo | None = managed_by_field()
 
 
 @router.get("/users/{user_id}/allowed-models", response_model=UserAllowedModelsResponse)
@@ -845,8 +868,12 @@ async def get_user_allowed_models(
     session: AsyncSession = Depends(get_db_session),
 ):
     svc = UserAllowedModelService(session)
+    rows = await managed_rows(
+        session, resource_type=RESOURCE_USER, resource_ids=[user_id], facets=[FIELD_ALLOWED_MODELS]
+    )
     return UserAllowedModelsResponse(
-        user_id=str(user_id), model_aliases=await svc.get(user_id)
+        user_id=str(user_id), model_aliases=await svc.get(user_id),
+        **({"managed_by": managed_info(rows[0])} if rows else {}),
     )
 
 

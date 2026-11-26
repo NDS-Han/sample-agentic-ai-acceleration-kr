@@ -94,6 +94,8 @@ def _actor_for(rec: IntegrationTokenRecord) -> CurrentUser:
         team_id=None,
         is_service_token=True,
         service_token_id=rec.token_id,
+        integration=rec.integration,
+        integration_lineage_id=rec.lineage_id,
     )
 
 

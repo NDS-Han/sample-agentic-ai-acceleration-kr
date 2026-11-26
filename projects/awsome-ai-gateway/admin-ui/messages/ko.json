@@ -419,7 +419,12 @@
     "teamBudgetUnsetHint": "새 팀은 $0 예산 + 하드 차단으로 시작합니다. 예산을 설정하기 전까지 모든 요청이 거부됩니다.",
     "teamLimitFirst": "팀 한도가 먼저 적용됨",
     "teamLimitFirstHint": "이 사용자의 한도가 팀 한도({team})보다 큽니다. 게이트웨이는 두 한도를 모두 검사하므로 팀 한도에 도달하면 요청이 차단됩니다.",
-    "teamRemainingCaption": "팀 잔여"
+    "teamRemainingCaption": "팀 잔여",
+    "aicmManagedBadge": "AICM에서 관리됨",
+    "managedTooltip": "AICM이 마지막으로 설정한 필드입니다. 편집하려면 사유를 입력해 잠금을 해제하세요. 다음 AICM 쓰기에서 다시 잠깁니다.",
+    "releaseAction": "잠금 해제",
+    "releaseReasonPrompt": "AICM 관리 필드 잠금 해제 사유를 입력하세요:",
+    "releaseSuccess": "AICM 잠금이 해제됐습니다"
   },
   "models": {
     "title": "모델 관리",

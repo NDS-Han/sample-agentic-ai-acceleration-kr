@@ -32,6 +32,9 @@ class CurrentUser:
     team_id: uuid.UUID | None
     is_service_token: bool = False
     service_token_id: uuid.UUID | None = None
+    # /aicm/v1 mirror principal 만 채운다 — 사람/일반 svc- 는 None.
+    integration: str | None = None
+    integration_lineage_id: uuid.UUID | None = None
 
 
 # 공개키 테이블(admin_jwt_configs)에는 비대칭 알고리즘만 등록돼야 한다 —

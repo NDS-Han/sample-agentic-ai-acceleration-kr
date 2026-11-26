@@ -15,13 +15,14 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import { SetBudgetDialog } from '@/components/budgets/SetBudgetDialog';
 
 vi.mock('@/lib/actions/budgets', () => ({
   setBudgetAction: vi.fn(),
   deleteUserBudgetAction: vi.fn(),
   getBudgetConfigAction: vi.fn(async () => ({ success: true, data: { configured: false } })),
+  releaseManagedFieldAction: vi.fn(async () => ({ success: true, data: undefined })),
 }));
 // ⚠️ 실제 export 이름과 맞춰야 한다. 처음에 이름을 틀렸더니 다이얼로그의 useEffect 가
 //    undefined 를 호출해 unhandled rejection 이 4건 났다 — 테스트는 "통과" 로 보이지만
@@ -97,5 +98,35 @@ describe('SetBudgetDialog — 저장된 임계값 표시', () => {
       />,
     );
     expect(renderedThresholds()).toEqual([42]);
+  });
+});
+
+
+describe('SetBudgetDialog — AICM managed lock', () => {
+  it('managed_by 가 있으면 배지를 보여주고 값은 보이되 편집 컨트롤을 잠근다', async () => {
+    const { getBudgetConfigAction } = await import('@/lib/actions/budgets');
+    vi.mocked(getBudgetConfigAction).mockResolvedValueOnce({
+      success: true,
+      data: {
+        configured: true,
+        max_budget_usd: '100',
+        policy: 'HARD_BLOCK',
+        alert_thresholds: [80, 90, 100],
+        default_user_cap_usd: null,
+        managed_by: { source: 'aicm', since: '2026-11-26T00:00:00Z', field: 'budget' },
+      },
+    });
+    render(<SetBudgetDialog isOpen onClose={() => {}} target={{ ...BASE_TARGET }} />);
+    await waitFor(() => expect(screen.getByTestId('aicm-managed-badge')).toBeInTheDocument());
+    const inputs = screen.getAllByLabelText('maxBudgetUsd');
+    expect(inputs.every((el) => el.hasAttribute('disabled'))).toBe(true);
+    expect(inputs.some((el) => el.getAttribute('value') === '100' || (el as HTMLInputElement).value === '100')).toBe(true);
+    expect(screen.getByText('releaseAction')).toBeInTheDocument();
+  });
+
+  it('managed_by 가 없으면 배지 없이 기존 편집 상태를 유지한다', async () => {
+    render(<SetBudgetDialog isOpen onClose={() => {}} target={{ ...BASE_TARGET }} />);
+    await waitFor(() => expect(screen.queryByTestId('aicm-managed-badge')).not.toBeInTheDocument());
+    expect(screen.getAllByLabelText('maxBudgetUsd').some((el) => !el.hasAttribute('disabled'))).toBe(true);
   });
 });

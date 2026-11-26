@@ -517,6 +517,16 @@
             "title": "Clients",
             "type": "array"
           },
+          "managed_by": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ManagedByInfo"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "user_id": {
             "format": "uuid",
             "title": "User Id",
@@ -581,6 +591,16 @@
             "title": "Client",
             "type": "string"
           },
+          "managed_by": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ManagedByInfo"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "max_budget_usd": {
             "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
             "title": "Max Budget Usd",
@@ -610,6 +630,16 @@
           "group": {
             "title": "Group",
             "type": "string"
+          },
+          "managed_by": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ManagedByInfo"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "max_budget_usd": {
             "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
@@ -663,6 +693,16 @@
               }
             ],
             "title": "Cap Source"
+          },
+          "default_cap_managed_by": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ManagedByInfo"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "default_user_cap_usd": {
             "anyOf": [
@@ -736,6 +776,16 @@
               }
             ],
             "title": "Limit Usd"
+          },
+          "managed_by": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ManagedByInfo"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "remaining_usd": {
             "anyOf": [
@@ -840,6 +890,31 @@
           }
         },
         "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "ManagedByInfo": {
+        "description": "AICM managed-field metadata — additive, omitted entirely when absent.",
+        "properties": {
+          "field": {
+            "title": "Field",
+            "type": "string"
+          },
+          "since": {
+            "format": "date-time",
+            "title": "Since",
+            "type": "string"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source",
+          "since",
+          "field"
+        ],
+        "title": "ManagedByInfo",
         "type": "object"
       },
       "ModelListResponse": {
@@ -1640,6 +1715,16 @@
       },
       "UserAllowedModelsResponse": {
         "properties": {
+          "managed_by": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ManagedByInfo"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "model_aliases": {
             "items": {
               "type": "string"
