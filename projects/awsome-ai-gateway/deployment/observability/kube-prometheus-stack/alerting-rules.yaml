@@ -1,0 +1,216 @@
+# Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
+
+# ============================================================================
+# LLM Gateway 알림 규칙 — kube-prometheus-stack values 오버레이
+# ----------------------------------------------------------------------------
+# install.sh 가 항상 `-f values.yaml -f alerting-rules.yaml` 로 넘긴다 → 차트가
+# PrometheusRule `kps-llm-gateway-alerts` 를 만든다(ruleSelector 가 열려 있어 바로 로드).
+#
+# 메트릭 이름은 Prometheus 에 도착한 그대로다(앱 OTel → otel-collector →
+# prometheusremotewrite). 앱 파드를 scrape 하지 않으므로 시리즈에 staleness
+# marker 가 없다 — 부재 감지는 absent() 대신 absent_over_time() 을 쓴다.
+# OTel 카운터 시리즈는 첫 증가 때 생긴다(reconciliation_mismatch_total 만 0 으로
+# 미리 만든다). 그래서 드문 이벤트 규칙은 "새 시리즈 등장" 항을 함께 본다.
+#
+# 검증: ./check-alerting.sh (promtool check/test rules + amtool check-config).
+# 운영 설명: docs/NDS/observability.md §10.
+# ============================================================================
+additionalPrometheusRulesMap:
+  llm-gateway-alerts:
+    groups:
+      # ── 비용 파이프라인 (cost-recorder-worker) ────────────────────────────
+      - name: llm-gateway.cost
+        rules:
+          - alert: CostReconciliationMismatch
+            # 대조 잡(매일 01:00 REPORTING_TIMEZONE)이 검사별 불일치 수를 누적한다.
+            # 카운터는 기동 시 검사마다 0 으로 만들어 두므로 increase() 가 첫 실행도 본다.
+            # 25h 창 → 불일치 실행 뒤 다음 깨끗한 실행 + 1h 에 해소.
+            expr: sum by (check) (increase(reconciliation_mismatch_total[25h])) > 0
+            labels:
+              severity: warning
+              service: cost-recorder-worker
+            annotations:
+              summary: "Cost reconciliation found mismatches (check={{ $labels.check }})"
+              description: >-
+                The last reconciliation run reported {{ $value | printf "%.0f" }} mismatch(es) for
+                check {{ $labels.check }}. Details: SELECT * FROM usage.reconciliation_runs ORDER BY
+                started_at DESC LIMIT 1; fix with `python -m worker.reconciliation`.
+
+          - alert: CostReconciliationStale
+            # 마지막 성공 실행이 26h 를 넘었거나, 성공 시각 게이지 자체가 없다
+            # (워커가 표에서 못 읽음 = 성공 실행이 한 번도 없음, 또는 워커 다운).
+            expr: |
+              (time() - max(reconciliation_last_success_timestamp) > 26 * 3600)
+              or
+              absent_over_time(reconciliation_last_success_timestamp[30m])
+            for: 15m
+            labels:
+              severity: critical
+              service: cost-recorder-worker
+            annotations:
+              summary: "No successful cost reconciliation for more than 26h"
+              description: >-
+                reconciliation_last_success_timestamp is older than 26h or missing. The daily
+                reconciliation job is failing or not scheduled (RECONCILIATION_ENABLED,
+                RECONCILIATION_CRON). Check worker logs for reconciliation_failed.
+
+          - alert: CostStreamLagHigh
+            expr: max(cost_recorder_stream_lag) > 1000
+            for: 10m
+            labels:
+              severity: warning
+              service: cost-recorder-worker
+            annotations:
+              summary: "cost:stream consumer lag {{ $value | printf \"%.0f\" }} entries"
+              description: >-
+                The cost-recorder-worker is behind on cost:stream. usage_logs, budget_usages and the
+                dashboards lag behind live traffic while this fires.
+          - alert: CostStreamLagHigh
+            expr: max(cost_recorder_stream_lag) > 20000
+            for: 10m
+            labels:
+              severity: critical
+              service: cost-recorder-worker
+            annotations:
+              summary: "cost:stream consumer lag {{ $value | printf \"%.0f\" }} entries"
+              description: >-
+                The cost-recorder-worker is far behind on cost:stream. If the gateway MAXLEN backstop
+                trims undelivered entries, those charges are lost (cost_recorder_stream_gap_total).
+
+          - alert: CostWorkerMetricsAbsent
+            # 워커가 죽었거나 OTel 내보내기가 멈췄다 — 위 lag 규칙은 이때 아무것도 못 본다.
+            expr: absent_over_time(cost_recorder_stream_lag[10m])
+            for: 5m
+            labels:
+              severity: critical
+              service: cost-recorder-worker
+            annotations:
+              summary: "cost-recorder-worker metrics missing for 15m"
+              description: >-
+                No cost_recorder_stream_lag sample for 15 minutes. The worker is down or cannot reach
+                the otel-collector. Cost rows are not being recorded.
+
+          - alert: CostDeadLetterGrowth
+            # usage.cost_dead_letters 에 행이 늘었다(영구 오류로 usage_logs 에 못 쓴 청구 행).
+            # 두 번째 항: 워커 재시작 뒤 첫 dead-letter 는 새 시리즈로 나타나 increase() 가
+            # 못 본다 → 30m 전에 없던 시리즈를 잡는다. Prometheus 자체 재시작 직후(과거
+            # 데이터 없음)에는 모든 시리즈가 "새것" 이므로 30m 동안 그 항을 끈다.
+            expr: |
+              sum by (reason) (increase(cost_recorder_dead_letter_rows_total[30m])) > 0
+              or
+              (
+                sum by (reason) (cost_recorder_dead_letter_rows_total unless cost_recorder_dead_letter_rows_total offset 30m) > 0
+                and on () (time() - max(process_start_time_seconds{job="kps-prometheus", container="prometheus"}) > 1800)
+              )
+            labels:
+              severity: warning
+              service: cost-recorder-worker
+            annotations:
+              summary: "Cost rows dead-lettered (reason={{ $labels.reason }})"
+              description: >-
+                New rows in usage.cost_dead_letters in the last 30m. They are billed requests missing
+                from usage_logs until fixed and replayed.
+                SELECT reason, count(*) FROM usage.cost_dead_letters GROUP BY 1;
+
+          - alert: CostDeadLetterDropped
+            # stream 단계 dead-letter 가 유예 후 버린 entry — 기록되지 않은 과소청구.
+            expr: |
+              sum(increase(cost_recorder_dead_letter_dropped_total[30m])) > 0
+              or
+              (
+                sum(cost_recorder_dead_letter_dropped_total unless cost_recorder_dead_letter_dropped_total offset 30m) > 0
+                and on () (time() - max(process_start_time_seconds{job="kps-prometheus", container="prometheus"}) > 1800)
+              )
+            labels:
+              severity: critical
+              service: cost-recorder-worker
+            annotations:
+              summary: "Cost stream entries dropped by dead-letter handling"
+              description: >-
+                cost_recorder_dead_letter_dropped_total increased in the last 30m. These entries were
+                acknowledged without being recorded (under-billing). Check worker logs.
+
+      # ── 게이트웨이 (gateway-proxy) ───────────────────────────────────────
+      - name: llm-gateway.gateway
+        rules:
+          - alert: GatewayHigh5xxRatio
+            # /v1/* · /model/* 요청만 센다(otel 미들웨어). 트래픽이 5분에 ~15건 미만이면 무시.
+            expr: |
+              (
+                sum(rate(gateway_request_total{status=~"5.."}[5m]))
+                / sum(rate(gateway_request_total[5m]))
+              ) > 0.05
+              and sum(rate(gateway_request_total[5m])) > 0.05
+            for: 10m
+            labels:
+              severity: warning
+              service: gateway-proxy
+            annotations:
+              summary: "Gateway 5xx ratio {{ $value | humanizePercentage }}"
+              description: >-
+                More than 5% of API requests returned 5xx for 10 minutes. Break down with
+                sum by (status, path) (rate(gateway_request_total{status=~"5.."}[5m])).
+          - alert: GatewayHigh5xxRatio
+            expr: |
+              (
+                sum(rate(gateway_request_total{status=~"5.."}[5m]))
+                / sum(rate(gateway_request_total[5m]))
+              ) > 0.20
+              and sum(rate(gateway_request_total[5m])) > 0.05
+            for: 5m
+            labels:
+              severity: critical
+              service: gateway-proxy
+            annotations:
+              summary: "Gateway 5xx ratio {{ $value | humanizePercentage }}"
+              description: >-
+                More than 20% of API requests returned 5xx for 5 minutes. Break down with
+                sum by (status, path) (rate(gateway_request_total{status=~"5.."}[5m])).
+
+          - alert: GatewayHigh503Ratio
+            # 503 = 게이트웨이가 스스로 거절(예산 유예 만료 fail-closed, 모델 캐시 unavailable,
+            # 업스트림 불가). 다른 5xx 와 원인이 달라 따로 본다.
+            expr: |
+              (
+                sum(rate(gateway_request_total{status="503"}[5m]))
+                / sum(rate(gateway_request_total[5m]))
+              ) > 0.05
+              and sum(rate(gateway_request_total[5m])) > 0.05
+            for: 5m
+            labels:
+              severity: warning
+              service: gateway-proxy
+            annotations:
+              summary: "Gateway 503 ratio {{ $value | humanizePercentage }}"
+              description: >-
+                More than 5% of API requests returned 503 for 5 minutes. Usual causes: budget grace
+                window expired (gateway_budget_degraded_total{reason="grace_expired"}), model lookup
+                unavailable (gateway_model_cache_total{result="unavailable"}), or Redis/DB outage.
+
+          - alert: GatewayBudgetDegraded
+            # 예산을 모르는 채로 판정 중(유예 창 / 마지막으로 알던 상태). Redis+DB 장애.
+            expr: |
+              sum by (reason) (increase(gateway_budget_degraded_total{reason=~"grace_allow|grace_expired|last_known_allow|last_known_block"}[5m])) > 0
+            for: 2m
+            labels:
+              severity: critical
+              service: gateway-proxy
+            annotations:
+              summary: "Budget checks in degraded mode (reason={{ $labels.reason }})"
+              description: >-
+                Budget decisions are made without live Redis/DB data
+                ({{ $value | printf "%.0f" }} in the last 5m). grace_expired means requests are being
+                rejected with 503; grace_allow / last_known_allow means spend is not enforced live.
+          - alert: GatewayBudgetDegraded
+            # DB 만 불가 — 캐시된 정책으로 Redis 판정. 파드 롤 직후 수 초 blip 은 for 가 흡수.
+            expr: |
+              sum by (reason) (rate(gateway_budget_degraded_total{reason=~"stale_policy|rebuild_skipped"}[5m])) > 0
+            for: 15m
+            labels:
+              severity: warning
+              service: gateway-proxy
+            annotations:
+              summary: "Budget checks using cached policy (reason={{ $labels.reason }})"
+              description: >-
+                The gateway cannot read budget policy from the DB and has used cached values for 15
+                minutes. Policy edits made in admin-ui are not applied until the DB recovers.

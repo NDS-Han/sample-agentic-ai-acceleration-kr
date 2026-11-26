@@ -84,11 +84,55 @@ fi
 REGION_SET=()
 [ -n "$CW_REGION" ] && REGION_SET=(--set "grafana.additionalDataSources[0].jsonData.defaultRegion=${CW_REGION}")
 
+# ─── Alerting — gateway.yaml `observability.alerting` 가 결정 (기본 꺼짐) ─────────
+# `./deploy render` 가 deployment/gen/<env>/eks/observability.env 에 ALERTING_ENABLED /
+# ALERT_SLACK_SECRET_NAME 를 쓴다. 이 스크립트는 그 파일(또는 같은 이름의 env 변수)을 읽는다.
+#   꺼짐(키 없음/false): Alertmanager 파드·전달 리소스 없음. 릴리즈는 알림 도입 전과 같고,
+#                       게이트웨이 PrometheusRule(alerting-rules.yaml)만 추가로 설치된다(전달 없음).
+#   켜짐(true): values-alerting.yaml(Alertmanager 1 파드, EKS 잡음 규칙 끔, env 라벨) +
+#              env 별 Slack Secret 이 있으면 Slack 전달, 없으면 "null"(전달 꺼짐).
+# env: ALERT_ENV → 없으면 현재 kube context 의 클러스터 이름 끝(llm-gateway-dev → dev).
+ALERT_ENV="${ALERT_ENV:-}"
+if [ -z "$ALERT_ENV" ]; then
+  cur_cluster="$(kubectl config view --minify -o jsonpath='{.contexts[0].context.cluster}' 2>/dev/null || true)"
+  cur_cluster="${cur_cluster##*/}"          # EKS context 는 ARN — 마지막 경로 조각이 클러스터 이름
+  [ -n "$cur_cluster" ] && ALERT_ENV="${cur_cluster##*-}"
+fi
+ALERT_ENV="${ALERT_ENV:-unknown}"
+OBS_ENV_FILE="${OBSERVABILITY_ENV_FILE:-../../gen/${ALERT_ENV}/eks/observability.env}"
+if [ -z "${ALERTING_ENABLED:-}" ] && [ -f "$OBS_ENV_FILE" ]; then
+  # shellcheck disable=SC1090
+  set -a; . "$OBS_ENV_FILE"; set +a
+fi
+ALERTING_ENABLED="${ALERTING_ENABLED:-false}"
+
+ALERT_SET=(-f alerting-rules.yaml)
+if [ "$ALERTING_ENABLED" = "true" ]; then
+  SLACK_SECRET="${ALERT_SLACK_SECRET_NAME:-${SLACK_SECRET_NAME:-alertmanager-slack-${ALERT_ENV}}}"
+  # 알림에 env 라벨을 붙인다(Slack 제목의 [dev]/[prod]). 로컬 쿼리·HPA 에는 영향 없음.
+  ALERT_SET+=(-f values-alerting.yaml --set-string "prometheus.prometheusSpec.externalLabels.env=${ALERT_ENV}")
+  slack_url_b64="$(kubectl -n "$NS" get secret "$SLACK_SECRET" -o jsonpath='{.data.api_url}' 2>/dev/null || true)"
+  if [ -n "$slack_url_b64" ]; then
+    ok "Alertmanager: Slack 전달 켬 (env=${ALERT_ENV}, Secret ${NS}/${SLACK_SECRET})"
+    ALERT_SET+=(-f alertmanager-slack.yaml
+      --set "alertmanager.alertmanagerSpec.volumes[0].name=slack-webhook"
+      --set-string "alertmanager.alertmanagerSpec.volumes[0].secret.secretName=${SLACK_SECRET}"
+      --set "alertmanager.alertmanagerSpec.volumes[0].secret.optional=true")
+  else
+    warn "Alertmanager: Secret ${NS}/${SLACK_SECRET} (key api_url) 없음 → 알림 전달 꺼짐 (env=${ALERT_ENV})."
+    warn "  켜려면 Secret 을 만들고 이 스크립트를 다시 실행 (docs/NDS/observability.md §10)"
+  fi
+  unset slack_url_b64
+else
+  info "Alerting 꺼짐 (gateway.yaml observability.alerting.enabled 미설정/false) — Alertmanager 없음, 규칙만 설치"
+fi
+
 if [ -n "${GRAFANA_ROLE_ARN}" ]; then
   helm upgrade --install kps prometheus-community/kube-prometheus-stack \
     --namespace "$NS" \
     --version "$KPS_VERSION" \
     -f values.yaml \
+    "${ALERT_SET[@]}" \
     --set "grafana.serviceAccount.annotations.eks\.amazonaws\.com/role-arn=${GRAFANA_ROLE_ARN}" \
     "${REGION_SET[@]}" \
     --timeout 10m \
@@ -98,6 +142,7 @@ else
     --namespace "$NS" \
     --version "$KPS_VERSION" \
     -f values.yaml \
+    "${ALERT_SET[@]}" \
     "${REGION_SET[@]}" \
     --timeout 10m \
     --wait

@@ -1,0 +1,214 @@
+# Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
+
+# promtool 규칙 단위 테스트 — ./check-alerting.sh 가 alerting-rules.yaml 을 렌더해 rules.yaml 로 뽑아 실행.
+# 라벨은 dev Prometheus 에 실제로 오는 OTel remote-write 라벨 일부(job, k8s_pod_name)를 쓴다.
+rule_files:
+  - rules-test.yaml   # check-alerting.sh 가 만든 annotations 없는 사본
+evaluation_interval: 1m
+
+tests:
+  # ── 대조 불일치: pricing 검사만 3 증가 → 그 check 만 firing ─────────────────
+  - interval: 1m
+    input_series:
+      - series: 'reconciliation_mismatch_total{check="pricing",job="llm-gateway/cost-recorder-worker",k8s_pod_name="w-1"}'
+        values: '0x60 3x60'
+      - series: 'reconciliation_mismatch_total{check="raw_vs_daily",job="llm-gateway/cost-recorder-worker",k8s_pod_name="w-1"}'
+        values: '0x120'
+      - series: 'reconciliation_last_success_timestamp{job="llm-gateway/cost-recorder-worker",k8s_pod_name="w-1"}'
+        values: '0x120'
+      - series: 'cost_recorder_stream_lag{job="llm-gateway/cost-recorder-worker",k8s_pod_name="w-1"}'
+        values: '0x120'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: CostReconciliationMismatch
+        exp_alerts: []
+      - eval_time: 90m
+        alertname: CostReconciliationMismatch
+        exp_alerts:
+          - exp_labels: {check: pricing, severity: warning, service: cost-recorder-worker}
+      # time()=90m, 마지막 성공=0 → 26h 미만이라 조용
+      - eval_time: 90m
+        alertname: CostReconciliationStale
+        exp_alerts: []
+      - eval_time: 90m
+        alertname: CostWorkerMetricsAbsent
+        exp_alerts: []
+
+  # ── 대조 오래됨: 마지막 성공이 27h 전 ─────────────────────────────────────
+  - interval: 1m
+    input_series:
+      - series: 'reconciliation_last_success_timestamp{job="llm-gateway/cost-recorder-worker",k8s_pod_name="w-1"}'
+        values: '-97200x30'
+      - series: 'cost_recorder_stream_lag{job="llm-gateway/cost-recorder-worker",k8s_pod_name="w-1"}'
+        values: '0x30'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: CostReconciliationStale
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: CostReconciliationStale
+        exp_alerts:
+          - exp_labels: {severity: critical, service: cost-recorder-worker}
+
+  # ── 대조 성공 게이지 자체가 없음(워커는 살아 있음) ─────────────────────────
+  - interval: 1m
+    input_series:
+      - series: 'cost_recorder_stream_lag{job="llm-gateway/cost-recorder-worker",k8s_pod_name="w-1"}'
+        values: '0x40'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: CostReconciliationStale
+        exp_alerts:
+          - exp_labels: {severity: critical, service: cost-recorder-worker}
+      - eval_time: 20m
+        alertname: CostWorkerMetricsAbsent
+        exp_alerts: []
+
+  # ── 스트림 lag: warning → critical, 워커 시리즈 사라짐 → Absent ───────────
+  - interval: 1m
+    input_series:
+      - series: 'cost_recorder_stream_lag{job="llm-gateway/cost-recorder-worker",k8s_pod_name="w-1"}'
+        values: '1500x20 25000x20 _x30'
+      - series: 'reconciliation_last_success_timestamp{job="llm-gateway/cost-recorder-worker",k8s_pod_name="w-1"}'
+        values: '0x70'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: CostStreamLagHigh
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: CostStreamLagHigh
+        exp_alerts:
+          - exp_labels: {severity: warning, service: cost-recorder-worker}
+      - eval_time: 35m
+        alertname: CostStreamLagHigh
+        exp_alerts:
+          - exp_labels: {severity: warning, service: cost-recorder-worker}
+          - exp_labels: {severity: critical, service: cost-recorder-worker}
+      # 마지막 샘플 41m → 10m 창이 비는 52m + for 5m = 57m
+      - eval_time: 50m
+        alertname: CostWorkerMetricsAbsent
+        exp_alerts: []
+      - eval_time: 58m
+        alertname: CostWorkerMetricsAbsent
+        exp_alerts:
+          - exp_labels: {severity: critical, service: cost-recorder-worker}
+
+  # ── dead-letter: (a) 같은 시리즈 증가, (b) 재시작 뒤 새 시리즈로 첫 등장 ─────
+  - interval: 1m
+    input_series:
+      - series: 'process_start_time_seconds{job="kps-prometheus",container="prometheus"}'
+        values: '0x200'
+      - series: 'cost_recorder_dead_letter_rows_total{reason="permanent_error",k8s_pod_name="w-1"}'
+        values: '1x20 2x180'
+      - series: 'cost_recorder_dead_letter_rows_total{reason="parse_failed",k8s_pod_name="w-2"}'
+        values: '_x99 1x100'
+      - series: 'cost_recorder_dead_letter_dropped_total{k8s_pod_name="w-2"}'
+        values: '_x99 4x100'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: CostDeadLetterGrowth
+        exp_alerts:
+          - exp_labels: {reason: permanent_error, severity: warning, service: cost-recorder-worker}
+      - eval_time: 90m
+        alertname: CostDeadLetterGrowth
+        exp_alerts: []
+      - eval_time: 110m
+        alertname: CostDeadLetterGrowth
+        exp_alerts:
+          - exp_labels: {reason: parse_failed, severity: warning, service: cost-recorder-worker}
+      - eval_time: 110m
+        alertname: CostDeadLetterDropped
+        exp_alerts:
+          - exp_labels: {severity: critical, service: cost-recorder-worker}
+      # 30m 뒤에는 offset 30m 에도 시리즈가 있으니 해소
+      - eval_time: 140m
+        alertname: CostDeadLetterGrowth
+        exp_alerts: []
+      - eval_time: 140m
+        alertname: CostDeadLetterDropped
+        exp_alerts: []
+
+  # ── Prometheus 자체가 방금 재시작(과거 데이터 없음) → 기존 카운터를 새것으로 오인하지 않음 ──
+  - interval: 1m
+    input_series:
+      - series: 'process_start_time_seconds{job="kps-prometheus",container="prometheus"}'
+        values: '0x60'
+      - series: 'cost_recorder_dead_letter_rows_total{reason="permanent_error",k8s_pod_name="w-1"}'
+        values: '7x60'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: CostDeadLetterGrowth
+        exp_alerts: []
+      - eval_time: 50m
+        alertname: CostDeadLetterGrowth
+        exp_alerts: []
+
+  # ── 게이트웨이 5xx 비율 9% → warning 만 ───────────────────────────────────
+  - interval: 1m
+    input_series:
+      - series: 'gateway_request_total{job="llm-gateway/gateway-proxy",path="/v1/messages",status="200"}'
+        values: '0+60x30'
+      - series: 'gateway_request_total{job="llm-gateway/gateway-proxy",path="/v1/messages",status="500"}'
+        values: '0+6x30'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: GatewayHigh5xxRatio
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: GatewayHigh5xxRatio
+        exp_alerts:
+          - exp_labels: {severity: warning, service: gateway-proxy}
+      - eval_time: 20m
+        alertname: GatewayHigh503Ratio
+        exp_alerts: []
+
+  # ── 503 비율 33% → 503 + 5xx critical ─────────────────────────────────────
+  - interval: 1m
+    input_series:
+      - series: 'gateway_request_total{job="llm-gateway/gateway-proxy",path="/v1/messages",status="200"}'
+        values: '0+60x30'
+      - series: 'gateway_request_total{job="llm-gateway/gateway-proxy",path="/v1/messages",status="503"}'
+        values: '0+30x30'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: GatewayHigh503Ratio
+        exp_alerts:
+          - exp_labels: {severity: warning, service: gateway-proxy}
+      - eval_time: 12m
+        alertname: GatewayHigh5xxRatio
+        exp_alerts:
+          - exp_labels: {severity: warning, service: gateway-proxy}
+          - exp_labels: {severity: critical, service: gateway-proxy}
+
+  # ── 트래픽이 거의 없으면(5분에 몇 건) 100% 5xx 여도 조용 ─────────────────────
+  - interval: 1m
+    input_series:
+      - series: 'gateway_request_total{job="llm-gateway/gateway-proxy",path="/v1/messages",status="502"}'
+        values: '0+1x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: GatewayHigh5xxRatio
+        exp_alerts: []
+
+  # ── 예산 열화: grace_allow → critical(2m), stale_policy 지속 → warning(15m) ───
+  - interval: 1m
+    input_series:
+      - series: 'gateway_budget_degraded_total{job="llm-gateway/gateway-proxy",reason="grace_allow"}'
+        values: '0x5 0+10x10 100x30'
+      - series: 'gateway_budget_degraded_total{job="llm-gateway/gateway-proxy",reason="stale_policy"}'
+        values: '0+5x40'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: GatewayBudgetDegraded
+        exp_alerts:
+          - exp_labels: {reason: grace_allow, severity: critical, service: gateway-proxy}
+      - eval_time: 20m
+        alertname: GatewayBudgetDegraded
+        exp_alerts:
+          - exp_labels: {reason: grace_allow, severity: critical, service: gateway-proxy}
+          - exp_labels: {reason: stale_policy, severity: warning, service: gateway-proxy}
+      # grace_allow 은 15m 이후 멈춤 → 5m 창이 지나면 해소
+      - eval_time: 30m
+        alertname: GatewayBudgetDegraded
+        exp_alerts:
+          - exp_labels: {reason: stale_policy, severity: warning, service: gateway-proxy}

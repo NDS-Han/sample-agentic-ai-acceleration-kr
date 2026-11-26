@@ -1160,7 +1160,7 @@ notificationWorker:
       deadLetterGrowth: false
       pricingMissing: false
     slack:
-      webhookSecretName: ""       # 예: alertmanager-slack-dev 처럼 env 별로 미리 생성
+      webhookSecretName: ""       # Alertmanager 와 같은 env 별 공유 Secret — alertmanager-slack-<env> (key api_url). 비우면 slack wiring 없음
       webhookSecretKey: "api_url"
 
   # 이메일 발송 설정 — 고객 내부 메일 API / SMTP / SES / mock
