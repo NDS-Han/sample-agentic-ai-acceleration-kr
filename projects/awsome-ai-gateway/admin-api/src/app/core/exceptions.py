@@ -111,3 +111,12 @@ class IntegrationError(AppError):
         self.status_code = status_code
         self.retry_after = retry_after
         self.details = details
+
+
+class ManagedFieldLockedError(AppError):
+    """AICM 이 관리하는 필드를 사람이 바꾸려 함 — **409** ``aicm_managed``."""
+
+    def __init__(self, message: str, *, details: dict):
+        super().__init__(message=message, code="aicm_managed")
+        self.status_code = 409
+        self.details = details

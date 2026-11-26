@@ -360,6 +360,9 @@ class Settings(BaseSettings):
     AICM_PROVISION_GROUPS_ATTRIBUTE: str = "custom:groups"
     # Idempotency-Key 보존 기간(일). 오래된 행은 같은 통합의 새 키 기록 때 조금씩 지운다.
     AICM_IDEMPOTENCY_RETENTION_DAYS: int = 7
+    # AICM 이 마지막으로 쓴 필드를 사람 admin 쓰기에서 409 로 잠근다. 기본 OFF —
+    # OFF 에서는 기존 응답 바이트/상태코드가 그대로고, 기록만 조용히 남는다.
+    AICM_MANAGED_LOCK_ENABLED: bool = False
 
     # AWS Price List API 리전(GetProducts). Price List 는 us-east-1/ap-south-1/
     # eu-central-1 엔드포인트만 지원 — 우리 홈리전 ap-northeast-2 가 아니어도 정상.

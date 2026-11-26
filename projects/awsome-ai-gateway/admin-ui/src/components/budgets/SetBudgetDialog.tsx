@@ -11,6 +11,7 @@ import {
   setBudgetAction,
   deleteUserBudgetAction,
   getBudgetConfigAction,
+  releaseManagedFieldAction,
 } from '@/lib/actions/budgets';
 import {
   getUserAllowedClientsAction,
@@ -20,6 +21,7 @@ import {
 } from '@/lib/actions/users';
 import { CLIENTS, type GatewayClient } from '@/lib/constants/gateway';
 import type { ConfirmationPayload } from '@/lib/actions/types';
+import type { ManagedByInfo } from '@/types/entities';
 import { FormError } from '@/components/common/FormError';
 import { SpinnerButton } from '@/components/common/SpinnerButton';
 import { useToast } from '@/components/common/ToastProvider';
@@ -131,6 +133,10 @@ export function SetBudgetDialog({ isOpen, onClose, target }: SetBudgetDialogProp
   // per-app 예산을 잘못된 앱에 기록할 수 있어 per-app 저장을 건너뛴다.
   const [clientsLoaded, setClientsLoaded] = useState(false);
   const [isAppLoadPending, startAppLoadTransition] = useTransition();
+  // AICM managed metadata — flag OFF 응답에는 키가 없으므로 null 유지, UI 는 기존과 동일.
+  const [budgetManaged, setBudgetManaged] = useState<ManagedByInfo | null>(null);
+  const [defaultCapManaged, setDefaultCapManaged] = useState<ManagedByInfo | null>(null);
+  const [appManaged, setAppManaged] = useState<Record<string, ManagedByInfo>>({});
 
   useEffect(() => {
     if (target) {
@@ -150,6 +156,9 @@ export function SetBudgetDialog({ isOpen, onClose, target }: SetBudgetDialogProp
       thresholdsTouchedRef.current = false;
       mainSavedRef.current = false;
       doneAppsRef.current = new Set();
+      setBudgetManaged(null);
+      setDefaultCapManaged(null);
+      setAppManaged({});
 
       // 현재 enforcement 설정을 prefill — 금액만 고쳐도 정책이 기본값으로
       // 리셋되는 걸 막는다. 실패 시 baseline 은 null 유지 → 해당 필드를
@@ -168,6 +177,8 @@ export function SetBudgetDialog({ isOpen, onClose, target }: SetBudgetDialogProp
           });
           return;
         }
+        setBudgetManaged(res.data.managed_by ?? null);
+        setDefaultCapManaged(res.data.default_cap_managed_by ?? null);
         if (res.data.configured) {
           if (res.data.policy) {
             setBasePolicy(res.data.policy);
@@ -224,9 +235,12 @@ export function SetBudgetDialog({ isOpen, onClose, target }: SetBudgetDialogProp
       if (b.success) {
         const byClient = new Map(b.data.apps.map((a) => [a.client, a.max_budget_usd]));
         const next = emptyBudgets();
+        const managedNext: Record<string, ManagedByInfo> = {};
+        for (const a of b.data.apps) if (a.managed_by) managedNext[a.client] = a.managed_by;
         for (const c of ALL_CLIENTS) next[c] = byClient.get(c) ?? '';
         setBudgets(next);
         setLoadedBudgets(next);
+        setAppManaged(managedNext);
       } else {
         // 조회 실패 시 stale 값(이전 대상의 예산)이 남아 잘못 저장될 수 있으므로 비우고 명시 알림.
         setBudgets(emptyBudgets());
@@ -242,6 +256,44 @@ export function SetBudgetDialog({ isOpen, onClose, target }: SetBudgetDialogProp
   }, [target?.id, isUserScope, isOpen]);
 
   if (!target) return null;
+
+  const budgetLocked = budgetManaged !== null;
+  const defaultCapLocked = defaultCapManaged !== null;
+  const resourceType = isTeamScope ? 'team' : 'user';
+  const releaseManaged = (field: string, clear: () => void) => {
+    const reason = window.prompt(t('releaseReasonPrompt'));
+    if (!reason?.trim()) return;
+    startTransition(async () => {
+      const res = await releaseManagedFieldAction(resourceType, target.id, field, reason);
+      if (!res.success) {
+        setError(res.error);
+        return;
+      }
+      clear();
+      toast({ type: 'success', message: t('releaseSuccess'), auto_dismiss_ms: 3000 });
+    });
+  };
+  const managedBadge = (managed: ManagedByInfo | null, field: string, clear: () => void) => {
+    if (!managed) return null;
+    return (
+      <span className="inline-flex items-center gap-1 align-middle">
+        <span
+          className="badge badge-sky whitespace-nowrap"
+          title={t('managedTooltip')}
+          data-testid="aicm-managed-badge"
+        >
+          {t('aicmManagedBadge')}
+        </span>
+        <button
+          type="button"
+          onClick={() => releaseManaged(field, clear)}
+          className="text-xs text-primary hover:underline underline-offset-2"
+        >
+          {t('releaseAction')}
+        </button>
+      </span>
+    );
+  };
 
   const handleUseTeamBudget = (confirm = false) => {
     setError(null);
@@ -476,6 +528,7 @@ export function SetBudgetDialog({ isOpen, onClose, target }: SetBudgetDialogProp
               onClick={() => handleUseTeamBudget(false)}
               isLoading={isPending}
               variant="secondary" size="sm"
+              disabled={budgetLocked}
             >
               {t('switchToTeamBudget')}
             </SpinnerButton>
@@ -489,6 +542,7 @@ export function SetBudgetDialog({ isOpen, onClose, target }: SetBudgetDialogProp
           <div className="space-y-2">
             <label htmlFor="budget-amount" className="text-sm font-medium">
               {isTeamScope ? t('teamBudgetTotal') : t('maxBudgetUsd')}
+              {' '}{managedBadge(budgetManaged, 'budget', () => setBudgetManaged(null))}
             </label>
             <div className="space-y-3">
               <input
@@ -498,6 +552,7 @@ export function SetBudgetDialog({ isOpen, onClose, target }: SetBudgetDialogProp
                 step={1}
                 value={numericValue}
                 onChange={(e) => setValue(e.target.value)}
+                disabled={budgetLocked}
                 aria-label={isTeamScope ? t('teamBudgetTotal') : t('maxBudgetUsd')}
                 className="w-full h-2 bg-gray-200 rounded-full appearance-none cursor-pointer accent-primary"
               />
@@ -510,6 +565,7 @@ export function SetBudgetDialog({ isOpen, onClose, target }: SetBudgetDialogProp
                   step={0.01}
                   value={value}
                   onChange={(e) => setValue(e.target.value)}
+                  disabled={budgetLocked}
                   className="flex-1 rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                 />
               </div>
@@ -536,7 +592,10 @@ export function SetBudgetDialog({ isOpen, onClose, target }: SetBudgetDialogProp
           {/* TEAM: 기본 유저 cap D (§3-2 — 미설정 유저에게 적용되는 상한) */}
           {isTeamScope && (
             <div className="space-y-2">
-              <label htmlFor="budget-default-cap" className="text-sm font-medium">{t('defaultCapInputLabel')}</label>
+              <label htmlFor="budget-default-cap" className="text-sm font-medium">
+                {t('defaultCapInputLabel')}
+                {' '}{managedBadge(defaultCapManaged, 'default-cap', () => setDefaultCapManaged(null))}
+              </label>
               <p className="text-xs text-muted-foreground">{t('defaultCapDesc')}</p>
               <div className="flex items-center gap-2">
                 <span className="text-sm text-muted-foreground">$</span>
@@ -546,6 +605,7 @@ export function SetBudgetDialog({ isOpen, onClose, target }: SetBudgetDialogProp
                   step={0.01}
                   value={defaultCap}
                   onChange={(e) => setDefaultCap(e.target.value)}
+                  disabled={defaultCapLocked}
                   placeholder={t('notSetPlaceholder')}
                   className="w-32 rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                 />
@@ -569,6 +629,7 @@ export function SetBudgetDialog({ isOpen, onClose, target }: SetBudgetDialogProp
                       policyTouchedRef.current = true;
                       setPolicy(opt.value);
                     }}
+                    disabled={budgetLocked}
                     className="mt-0.5 h-4 w-4"
                   />
                   <div>
@@ -591,6 +652,7 @@ export function SetBudgetDialog({ isOpen, onClose, target }: SetBudgetDialogProp
                   <button
                     type="button"
                     onClick={() => removeThreshold(pct)}
+                    disabled={budgetLocked}
                     aria-label={t('removeThreshold', { pct })}
                     className="text-primary/60 hover:text-primary"
                   >
@@ -605,13 +667,15 @@ export function SetBudgetDialog({ isOpen, onClose, target }: SetBudgetDialogProp
                 max={100}
                 value={newThreshold}
                 onChange={(e) => setNewThreshold(e.target.value)}
+                disabled={budgetLocked}
                 className="w-20 rounded-md border border-input bg-background px-2 py-1.5 text-sm text-center"
               />
               <span className="text-xs text-muted-foreground">%</span>
               <button
                 type="button"
                 onClick={addThreshold}
-                className="text-sm text-primary hover:underline"
+                disabled={budgetLocked}
+                className="text-sm text-primary hover:underline disabled:opacity-50"
               >
                 {t('addThreshold')}
               </button>
@@ -642,6 +706,13 @@ export function SetBudgetDialog({ isOpen, onClose, target }: SetBudgetDialogProp
                     <div key={c}>
                       <label htmlFor={`budget-app-${c}`} className="block text-xs text-muted-foreground mb-1">
                         {CLIENT_LABELS[c]}
+                        {' '}{managedBadge(appManaged[c] ?? null, `app-budget:${c}`, () =>
+                          setAppManaged((prev) => {
+                            const next = { ...prev };
+                            delete next[c];
+                            return next;
+                          })
+                        )}
                       </label>
                       <NumberInput
                         id={`budget-app-${c}`}
@@ -651,7 +722,7 @@ export function SetBudgetDialog({ isOpen, onClose, target }: SetBudgetDialogProp
                         onChange={(e) =>
                           setBudgets((prev) => ({ ...prev, [c]: e.target.value }))
                         }
-                        disabled={isPending}
+                        disabled={isPending || Boolean(appManaged[c])}
                         placeholder={t('notSetPlaceholder')}
                         className="flex-1 w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50"
                       />

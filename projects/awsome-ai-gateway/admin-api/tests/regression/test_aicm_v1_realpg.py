@@ -190,7 +190,7 @@ async def env(owned_dsn, monkeypatch, cognito):
     from app.core.db import install_commit_before_response
     from app.core.encryption import AESEncryptionService
     from app.main import register_exception_handlers
-    from app.routers import aicm, aicm_admin, budgets, models, service_tokens, users
+    from app.routers import aicm, aicm_admin, budgets, managed_fields, models, service_tokens, users
     from app.services.budget_service import BudgetService
     from app.services.key_service import KeyService
     from app.services.model_service import ModelService
@@ -241,6 +241,7 @@ async def env(owned_dsn, monkeypatch, cognito):
     app.include_router(budgets.router)
     app.include_router(models.router)
     app.include_router(aicm_admin.router)
+    app.include_router(managed_fields.router)
     install_commit_before_response(app)
     app.state.jwt_verifier = _JWT()
     app.state.service_token_service = ServiceTokenService()
@@ -256,6 +257,7 @@ async def env(owned_dsn, monkeypatch, cognito):
     async with sm() as ses:
         for sql in (
             "DELETE FROM auth.integration_idempotency_keys",
+            "DELETE FROM auth.external_management",
             "DELETE FROM auth.integration_tokens",
             "DELETE FROM audit.audit_logs",
             "UPDATE auth.service_tokens SET rotated_from = NULL",
@@ -1801,3 +1803,146 @@ async def test_human_concurrent_syncs_cannot_remove_the_last_two_admins(env, mon
     for uid, _sub in ids_and_subs:
         all_audits.extend(await _skip_audits(sm, "HUMAN_SYNC_LAST_ADMIN_CHANGE_SKIPPED", uid))
     assert len(all_audits) == 1
+
+
+# ── managed-field recording / optional human-write lock ──────────────────────
+
+
+async def _mk_active_model(sm, alias: str) -> None:
+    from sqlalchemy import text
+
+    async with sm() as s:
+        await s.execute(text(
+            "INSERT INTO model.model_aliases (alias, provider, provider_model_id, api_format, status, created_by) "
+            "VALUES (:a, CAST('BEDROCK' AS model.provider), 'test-model', "
+            "CAST('BEDROCK_NATIVE' AS model.api_format), CAST('ACTIVE' AS model.model_status), '00000000-0000-4000-a000-000000000010') "
+            "ON CONFLICT (alias) DO NOTHING"
+        ), {"a": alias})
+        await s.commit()
+
+
+async def test_aicm_writes_record_every_managed_write_type_and_human_writes_do_not(env):
+    c, sm = env["client"], env["sm"]
+    mirror = await _issue_mirror(c)
+    h = {"Authorization": f"Bearer {mirror['token']}", "X-Forwarded-For": "10.0.0.3"}
+    tid = await _mk_team(sm, f"ML{uuid.uuid4().hex[:6]}")
+    uid, _ = await _mk_user(sm, provider="sts", team_id=tid)
+    alias = f"managed-{uuid.uuid4().hex[:8]}"
+    await _mk_active_model(sm, alias)
+
+    writes = [
+        ("PUT", f"/aicm/v1/admin/budgets/user/{uid}", {"max_budget_usd": "10", "confirm": True}, "budget"),
+        ("PUT", f"/aicm/v1/admin/budgets/user/{uid}/app/claude-code", {"max_budget_usd": "5", "confirm": True}, "app-budget:claude-code"),
+        ("PUT", f"/aicm/v1/admin/budgets/user/{uid}/app-group/ide", {"max_budget_usd": "7"}, "app-group-budget:ide"),
+        ("PUT", f"/aicm/v1/admin/users/{uid}/allowed-clients", {"clients": ["claude-code"]}, "allowed-clients"),
+        ("PUT", f"/aicm/v1/admin/users/{uid}/allowed-models", {"model_aliases": [alias]}, "allowed-models"),
+        ("PUT", f"/aicm/v1/admin/budgets/team/{tid}", {"max_budget_usd": "100", "default_user_cap_usd": "9", "confirm": True}, "team-budget"),
+    ]
+    for method, path, body, _ in writes:
+        r = await c.request(method, path, json=body, headers=h)
+        assert r.status_code in (200, 204), (path, r.text)
+
+    rows = await _q(sm, "SELECT resource_type, resource_id::text, facet, state, value_state, token_id::text FROM auth.external_management")
+    got = {(r.resource_type, r.resource_id, r.facet): r for r in rows}
+    expected = {
+        ("user", str(uid), "budget"), ("user", str(uid), "app-budget:claude-code"),
+        ("user", str(uid), "app-group-budget:ide"), ("user", str(uid), "allowed-clients"),
+        ("user", str(uid), "allowed-models"), ("team", str(tid), "budget"),
+        ("team", str(tid), "default-cap"),
+    }
+    assert expected <= set(got)
+    assert all(got[k].state == "managed" and got[k].value_state == "set" for k in expected)
+    assert all(got[k].token_id == mirror["id"] for k in expected)
+
+    # 사람 쓰기는 관리 레코드를 만들지 않는다.
+    other, _ = await _mk_user(sm, provider="sts", team_id=tid)
+    r = await c.put(f"/admin/budgets/user/{other}", json={"max_budget_usd": "3", "confirm": True}, headers=HUMAN)
+    assert r.status_code == 200, r.text
+    assert not await _q(sm, "SELECT 1 FROM auth.external_management WHERE resource_id=:u", u=other)
+
+    # AICM DELETE 도 관리 쓰기다 — 값은 cleared 지만 소유/잠금은 유지한다(설계 선택).
+    r = await c.delete(f"/aicm/v1/admin/budgets/user/{uid}/app-group/ide", headers=h)
+    assert r.status_code == 204, r.text
+    rows = await _q(sm, "SELECT state, value_state FROM auth.external_management WHERE resource_id=:u AND facet='app-group-budget:ide'", u=uid)
+    assert rows and rows[0].state == "managed" and rows[0].value_state == "cleared"
+
+
+async def test_managed_lock_blocks_human_409_release_relocks_and_mirror_never_blocked(env, monkeypatch):
+    from app.core.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "AICM_MANAGED_LOCK_ENABLED", True)
+    c, sm = env["client"], env["sm"]
+    mirror = await _issue_mirror(c)
+    mh = {"Authorization": f"Bearer {mirror['token']}", "X-Forwarded-For": "10.0.0.3"}
+    home_team = await _mk_team(sm, f"Lock{uuid.uuid4().hex[:6]}")
+    uid, _ = await _mk_user(sm, provider="sts", team_id=home_team)
+
+    # 잠금 생성 전에는 GET 에 managed_by 가 없다.
+    assert "managed_by" not in (await c.get(f"/admin/budgets/user/{uid}", headers=HUMAN)).json()
+    r = await c.put(f"/aicm/v1/admin/budgets/user/{uid}", json={"max_budget_usd": "10", "confirm": True}, headers=mh)
+    assert r.status_code == 200, r.text
+
+    # 플래그 ON — GET 은 additive managed_by 를 노출하고 사람 쓰기는 409/aicm_managed.
+    getr = await c.get(f"/admin/budgets/user/{uid}", headers=HUMAN)
+    assert getr.status_code == 200 and getr.json()["managed_by"]["source"] == "aicm"
+    assert getr.json()["managed_by"]["field"] == "budget"
+    r = await c.put(f"/admin/budgets/user/{uid}", json={"max_budget_usd": "11", "confirm": True}, headers=HUMAN)
+    assert r.status_code == 409, r.text
+    body = r.json()["error"]
+    assert body["code"] == "aicm_managed"
+    assert body["details"]["resource_id"] == str(uid) and body["details"]["field"] == "budget"
+    assert "release" in body["details"]
+
+    # mirror 는 managed 상태에서도 절대 막히지 않는다.
+    r = await c.put(f"/aicm/v1/admin/budgets/user/{uid}", json={"max_budget_usd": "12", "confirm": True}, headers=mh)
+    assert r.status_code == 200, r.text
+
+    # release endpoint 권한: TEAM_LEADER 는 403, svc 계열은 인증/인가 실패.
+    team = await _mk_team(sm, f"RelT{uuid.uuid4().hex[:6]}")
+    leader, _ = await _mk_user(sm, team_id=team, role="TEAM_LEADER")
+    leader_h = {"Authorization": f"Bearer leader.{leader}.{team}"}
+    rel_path = f"/admin/managed-fields/user/{uid}/budget/release"
+    assert (await c.post(rel_path, json={"reason": "need manual exception"}, headers=leader_h)).status_code == 403
+    assert (await c.post(rel_path, json={"reason": "x"}, headers=mh)).status_code in (401, 403)
+    assert (await c.post(rel_path, json={}, headers=HUMAN)).status_code == 422
+
+    r = await c.post(rel_path, json={"reason": "cost-center correction"}, headers=HUMAN)
+    assert r.status_code == 200, r.text
+    rows = await _q(sm, "SELECT state, release_reason FROM auth.external_management WHERE resource_id=:u AND facet='budget'", u=uid)
+    assert rows[0].state == "released" and rows[0].release_reason == "cost-center correction"
+    queued = await _flush_audit_queue(sm)
+    assert any(e["action"] == "RELEASE_AICM_MANAGED_FIELD" for e in queued) or await _q(
+        sm, "SELECT 1 FROM audit.audit_logs WHERE action='RELEASE_AICM_MANAGED_FIELD' AND resource_id LIKE :p", p=f"%{uid}%"
+    )
+
+    # released 상태에서 사람은 편집 가능하고, 사람 쓰기가 release 를 소비/재생성하지 않는다.
+    r = await c.put(f"/admin/budgets/user/{uid}", json={"max_budget_usd": "13", "confirm": True}, headers=HUMAN)
+    assert r.status_code == 200, r.text
+    rows = await _q(sm, "SELECT state FROM auth.external_management WHERE resource_id=:u AND facet='budget'", u=uid)
+    assert rows[0].state == "released"
+
+    # 다음 AICM 쓰기가 같은 PK 를 upsert 해 다시 잠근다.
+    r = await c.put(f"/aicm/v1/admin/budgets/user/{uid}", json={"max_budget_usd": "14", "confirm": True}, headers=mh)
+    assert r.status_code == 200, r.text
+    rows = await _q(sm, "SELECT state, released_by FROM auth.external_management WHERE resource_id=:u AND facet='budget'", u=uid)
+    assert rows[0].state == "managed" and rows[0].released_by is None
+    r = await c.put(f"/admin/budgets/user/{uid}", json={"max_budget_usd": "15", "confirm": True}, headers=HUMAN)
+    assert r.status_code == 409
+
+
+async def test_managed_lock_flag_off_no_get_key_no_409_but_records(env, monkeypatch):
+    from app.core.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "AICM_MANAGED_LOCK_ENABLED", False)
+    c, sm = env["client"], env["sm"]
+    mirror = await _issue_mirror(c)
+    mh = {"Authorization": f"Bearer {mirror['token']}", "X-Forwarded-For": "10.0.0.3"}
+    home_team = await _mk_team(sm, f"Off{uuid.uuid4().hex[:6]}")
+    uid, _ = await _mk_user(sm, provider="sts", team_id=home_team)
+    r = await c.put(f"/aicm/v1/admin/budgets/user/{uid}", json={"max_budget_usd": "10", "confirm": True}, headers=mh)
+    assert r.status_code == 200, r.text
+    assert await _q(sm, "SELECT 1 FROM auth.external_management WHERE resource_id=:u", u=uid)
+    getr = await c.get(f"/admin/budgets/user/{uid}", headers=HUMAN)
+    assert getr.status_code == 200 and "managed_by" not in getr.json()
+    r = await c.put(f"/admin/budgets/user/{uid}", json={"max_budget_usd": "11", "confirm": True}, headers=HUMAN)
+    assert r.status_code == 200, r.text

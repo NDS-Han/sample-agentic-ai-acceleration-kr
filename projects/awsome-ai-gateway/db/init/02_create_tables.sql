@@ -1523,6 +1523,36 @@ CREATE TABLE IF NOT EXISTS auth.integration_idempotency_keys (
 CREATE INDEX IF NOT EXISTS idx_integration_idempotency_created
     ON auth.integration_idempotency_keys (created_at);
 
+
+-- migration 0071: AICM managed-field ownership records. PK 조회 하나로 사람 관리자 쓰기의
+-- 잠금 여부를 판정한다. gateway hot path 는 읽지 않는 제어plane 테이블.
+CREATE TABLE IF NOT EXISTS auth.external_management (
+    resource_type     VARCHAR(16)   NOT NULL,
+    resource_id       UUID          NOT NULL,
+    facet             VARCHAR(96)   NOT NULL,
+    managed_by        VARCHAR(32)   NOT NULL,
+    state             VARCHAR(16)   NOT NULL,
+    value_state       VARCHAR(16)   NOT NULL,
+    last_written_at   TIMESTAMPTZ   NOT NULL,
+    token_id          UUID          REFERENCES auth.service_tokens(id) ON DELETE SET NULL,
+    lineage_id        UUID,
+    request_id        VARCHAR(128)  NOT NULL DEFAULT '',
+    released_at       TIMESTAMPTZ,
+    released_by       UUID          REFERENCES auth.users(id) ON DELETE SET NULL,
+    release_reason    TEXT,
+    created_at        TIMESTAMPTZ   NOT NULL DEFAULT now(),
+    updated_at        TIMESTAMPTZ   NOT NULL DEFAULT now(),
+    PRIMARY KEY (resource_type, resource_id, facet),
+    CONSTRAINT ck_external_management_resource_type
+        CHECK (resource_type IN ('user', 'team')),
+    CONSTRAINT ck_external_management_state
+        CHECK (state IN ('managed', 'released')),
+    CONSTRAINT ck_external_management_value_state
+        CHECK (value_state IN ('set', 'cleared'))
+);
+CREATE INDEX IF NOT EXISTS idx_external_management_managed_by_state
+    ON auth.external_management (managed_by, state);
+
 -- migration 0045: (dept_id,name)/(org_id,name) 유니크 — check-then-act 경합으로
 -- 중복 행이 생기면 get_team_by_dept_and_name LIMIT 1 이 비결정이 된다.
 -- ⚠️ 중복이 이미 있는 설치본에서 여기서 unique_violation 으로 죽으면 alembic

@@ -253,11 +253,11 @@ export async function setUserAllowedModelsAction(
 
 export async function getUserClientBudgetsAction(
   userId: string,
-): Promise<ActionResult<{ apps: Array<{ client: string; max_budget_usd: string; policy: string }> }>> {
+): Promise<ActionResult<{ apps: Array<{ client: string; max_budget_usd: string; policy: string; managed_by?: import('@/types/entities').ManagedByInfo }> }>> {
   if (!userId) return { success: false, error: 'User ID is required' };
   try {
     const res = await withRetry(() =>
-      adminAPI.get<{ user_id: string; apps: Array<{ client: string; max_budget_usd: string; policy: string }> }>(
+      adminAPI.get<{ user_id: string; apps: Array<{ client: string; max_budget_usd: string; policy: string; managed_by?: import('@/types/entities').ManagedByInfo }> }>(
         `/admin/budgets/user/${encodeURIComponent(String(userId))}/apps`,
       ),
     );
