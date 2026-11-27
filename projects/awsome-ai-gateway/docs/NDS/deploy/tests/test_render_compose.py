@@ -412,3 +412,21 @@ def test_admin_brand_name_default(tmp_path):
 def test_admin_brand_name_from_branding(tmp_path):
     _, out = render_to(tmp_path, cfg(branding={"name": "농심 AI Gateway"}))
     assert out["services"]["admin-ui"]["environment"]["ADMIN_BRAND_NAME"] == "농심 AI Gateway"
+
+
+def test_business_alerts_env_injected_when_enabled(tmp_path):
+    _, out = render_to(tmp_path, cfg(features={
+        "notifications": {"provider": "mock"},
+        "business_alerts": {"enabled": True, "pricing_missing": True, "slack": True}}))
+    env = out["services"]["notification-worker"]["environment"]
+    assert env["BUSINESS_ALERTS_ENABLED"] == "true"
+    assert env["BUSINESS_ALERT_PRICING_MISSING_ENABLED"] == "true"
+    assert env["BUSINESS_ALERT_RECONCILIATION_MISMATCH_ENABLED"] == "false"
+    assert env["SLACK_WEBHOOK_URL"] == "${SLACK_WEBHOOK_URL:-}"
+
+
+def test_business_alerts_absent_by_default(tmp_path):
+    _, out = render_to(tmp_path, cfg())
+    env = out["services"]["notification-worker"]["environment"]
+    assert "BUSINESS_ALERTS_ENABLED" not in env
+    assert "SLACK_WEBHOOK_URL" not in env

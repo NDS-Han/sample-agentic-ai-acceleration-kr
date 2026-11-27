@@ -173,6 +173,15 @@ def desired_tfvars(cfg: GatewayConfig, extra_vars: dict | None = None) -> dict:
     # alerting — eks 의 overlay 양산 방식과 달리 ecs 는 실제 tfvars 라 false 를
     # 명시한다. emails 는 enabled 게이트(schema 검증) 안에서만 발산.
     vars_["enable_alerting"] = cfg.features.alerting.enabled
+
+    # 비즈니스 알림 — 기본 꺼짐. slack=true 면 app SM secret 의 json key
+    # `slack_webhook_url` 을 valueFrom 으로 배선한다(활성화 전 key 생성이 선행 조건).
+    ba = cfg.features.business_alerts
+    vars_["business_alerts_enabled"] = ba.enabled
+    vars_["business_alert_reconciliation_mismatch"] = ba.reconciliation_mismatch
+    vars_["business_alert_dead_letter_growth"] = ba.dead_letter_growth
+    vars_["business_alert_pricing_missing"] = ba.pricing_missing
+    vars_["business_alerts_slack"] = ba.slack
     if cfg.features.alerting.enabled and cfg.features.alerting.emails:
         vars_["alert_emails"] = cfg.features.alerting.emails
     # litellm_pricing_lambda 는 extra_vars(update 아래) 경로로만 들어온다 —

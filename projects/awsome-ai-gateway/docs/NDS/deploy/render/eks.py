@@ -216,6 +216,31 @@ def desired_values(cfg: GatewayConfig) -> dict:
                                 "fromName": n.sender_name or "LLM Gateway"}
     v["notificationWorker"] = dict(v.get("notificationWorker", {}), email=email)
 
+    # 비즈니스 알림 — 차트 네이티브 businessAlerts 블록으로 발산. 전부 기본 꺼짐이라
+    # 선언 시에만 키를 쓴다(미선언은 차트 기본 false 와 같다).
+    ba = cfg.features.business_alerts
+    if ba.enabled or ba.reconciliation_mismatch or ba.dead_letter_growth or ba.pricing_missing or ba.slack:
+        checks = {}
+        if ba.reconciliation_mismatch:
+            checks["reconciliationMismatch"] = True
+        if ba.dead_letter_growth:
+            checks["deadLetterGrowth"] = True
+        if ba.pricing_missing:
+            checks["pricingMissing"] = True
+        ba_values: dict = {"enabled": ba.enabled}
+        if checks:
+            ba_values["checks"] = checks
+        if ba.slack:
+            # Alertmanager 와 같은 env 별 공유 Secret — 차트의 optional secretKeyRef
+            # (Secret 이 없어도 워커는 정상 기동, 알림만 비활성).
+            ba_values["slack"] = {
+                "webhookSecretName": f"alertmanager-slack-{cfg.env}",
+                "webhookSecretKey": "api_url",
+            }
+        v["notificationWorker"] = dict(
+            v.get("notificationWorker", {}), businessAlerts=ba_values
+        )
+
     # ── OIDC — adminApi/gatewayProxy/adminUi 세 곳에 동일 계약 ───────────────
     if cfg.oidc.enabled:
         claim = "cognito:groups" if "cognito" in cfg.oidc.provider_name else "groups"
