@@ -756,10 +756,10 @@ def create_app() -> FastAPI:
     # 않아 라우트·OpenAPI 가 이 기능이 없던 때와 바이트 단위로 같다
     # (tests/unit/test_aicm_flag_off.py).
     if settings.AICM_API_ENABLED:
-        from app.routers.aicm import router as aicm_router
+        # legacy `/aicm/v1` 표면은 제거됐다(aicm-legacy-cleanup) — AICM 계약이 쓰는
+        # mirror(`/aicm/v1/admin/*`)만 남는다. scoped 토큰 발급은 real `/admin/service-tokens`.
         from app.routers.aicm_admin import router as aicm_admin_router
 
-        app.include_router(aicm_router)
         app.include_router(aicm_admin_router)
         logger.info("aicm.router_mounted", prefix="/aicm/v1", admin_mirror=True)
 

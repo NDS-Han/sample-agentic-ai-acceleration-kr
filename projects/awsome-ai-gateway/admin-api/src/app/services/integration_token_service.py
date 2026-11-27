@@ -34,19 +34,15 @@ SCOPES: frozenset[str] = frozenset(
     {
         "tokens:read",
         "tokens:rotate",
-        "users:provision",
-        "users:lifecycle",
-        # /aicm/v1/admin mirror scopes (option A) + p0a2 user/policy/budget surface.
+        # /aicm/v1/admin mirror scopes — legacy 제거로 users:provision/users:lifecycle/
+        # policy:*/budgets:limits:write 는 대상 엔드포인트가 사라져 카탈로그에서 빠졌다.
         # 하나의 토큰이 필요한 표면만 갖도록 발급 시 선택한다 — 읽기/쓰기를 나눈 이유는
         # 유출 시 폭발반경 때문.
         "users:read",
         "users:write",
         "users:sync",
-        "policy:read",
-        "policy:write",
         "budgets:read",
         "budgets:write",
-        "budgets:limits:write",
         "models:read",
 
     }

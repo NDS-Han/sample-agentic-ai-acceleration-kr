@@ -22,15 +22,15 @@ async def client(monkeypatch):
 
     from app.core.db import get_db_session
     from app.main import register_exception_handlers
-    from app.routers import aicm
+    from app.routers import aicm_admin as aicm
     from app.services.integration_token_service import IntegrationTokenRecord, IntegrationTokenService
 
     lineage = uuid.uuid4()
     records = {
-        "itg-" + "a" * 64: IntegrationTokenRecord(
+        "svc-" + "a" * 64: IntegrationTokenRecord(
             token_id=uuid.uuid4(), name="ops", integration="aicm", scopes=frozenset({"tokens:read"}),
             allowed_cidrs=(ipaddress.ip_network("10.0.0.0/8"),), lineage_id=lineage),
-        "itg-" + "b" * 64: IntegrationTokenRecord(
+        "svc-" + "b" * 64: IntegrationTokenRecord(
             token_id=uuid.uuid4(), name="other", integration="other", scopes=frozenset({"tokens:read"}),
             lineage_id=lineage),
     }
@@ -64,6 +64,22 @@ async def client(monkeypatch):
 
     app.dependency_overrides[get_db_session] = _no_db
     app.state.redis = _Redis()
+
+    class _SvcTokens:
+        """mirror 가 재사용하는 real admin handler 의 state 의존 스텁 — 인증은
+        IntegrationTokenService.verify 몽키패치가 담당하므로 여기선 빈 결과만 돌려준다."""
+
+        def __getattr__(self, name):
+            from types import SimpleNamespace
+
+            async def _any(*a, **kw):
+                if name.startswith("list"):
+                    return SimpleNamespace(items=[])
+                return None
+
+            return _any
+
+    app.state.service_token_service = _SvcTokens()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         yield c, app
 
@@ -74,32 +90,32 @@ def _hdr(tok, ip="10.1.1.1"):
 
 async def test_auth_order_and_codes(client, monkeypatch):
     c, app = client
-    good = "itg-" + "a" * 64
+    good = "svc-" + "a" * 64
     cases = [
         ({}, 401, "invalid_integration_token"),
-        ({"Authorization": "Bearer svc-" + "a" * 64}, 401, "invalid_integration_token"),
-        ({"Authorization": "Bearer itg-short"}, 401, "invalid_integration_token"),
-        (_hdr("itg-" + "c" * 64), 401, "invalid_integration_token"),  # 모르는 토큰
-        (_hdr("itg-" + "b" * 64), 401, "invalid_integration_token"),  # 다른 통합
+        ({"Authorization": "Bearer itg-" + "a" * 64}, 401, "invalid_integration_token"),
+        ({"Authorization": "Bearer svc-short"}, 401, "invalid_integration_token"),
+        (_hdr("svc-" + "c" * 64), 401, "invalid_integration_token"),  # 모르는 토큰
+        (_hdr("svc-" + "b" * 64), 401, "invalid_integration_token"),  # 다른 통합
         (_hdr(good, ip="8.8.8.8"), 403, "source_ip_not_allowed"),
         (_hdr(good), 200, None),
     ]
     for headers, status, code in cases:
-        r = await c.get("/aicm/v1/service-tokens", headers=headers)
+        r = await c.get("/aicm/v1/admin/service-tokens", headers=headers)
         assert r.status_code == status, (headers, r.text)
         if code:
             assert r.json()["error"]["code"] == code
     # 쿠키(admin_jwt)는 통합 토큰 경로로 받지 않는다
-    r = await c.get("/aicm/v1/service-tokens", headers={"Cookie": f"admin_jwt={good}"})
+    r = await c.get("/aicm/v1/admin/service-tokens", headers={"Cookie": f"admin_jwt={good}"})
     assert r.status_code == 401
 
 
 async def test_scope_checked_after_ip(client):
     c, _ = client
-    good = "itg-" + "a" * 64
-    r = await c.post("/aicm/v1/service-tokens/rotate", headers=_hdr(good, ip="8.8.8.8"))
+    good = "svc-" + "a" * 64
+    r = await c.post("/aicm/v1/admin/service-tokens/rotate", headers=_hdr(good, ip="8.8.8.8"))
     assert r.json()["error"]["code"] == "source_ip_not_allowed"
-    r = await c.post("/aicm/v1/service-tokens/rotate", headers=_hdr(good))
+    r = await c.post("/aicm/v1/admin/service-tokens/rotate", headers=_hdr(good))
     assert r.status_code == 403 and r.json()["error"]["code"] == "insufficient_scope"
     assert r.json()["error"]["details"] == {"required_scope": "tokens:rotate"}
 
@@ -109,8 +125,8 @@ async def test_rate_limit_per_lineage(client, monkeypatch):
 
     c, _ = client
     monkeypatch.setattr(get_settings(), "AICM_RL_READ_PER_MIN", 3)
-    good = "itg-" + "a" * 64
-    codes = [(await c.get("/aicm/v1/service-tokens", headers=_hdr(good))).status_code for _ in range(4)]
+    good = "svc-" + "a" * 64
+    codes = [(await c.get("/aicm/v1/admin/service-tokens", headers=_hdr(good))).status_code for _ in range(4)]
     assert codes == [200, 200, 200, 429]
 
 
@@ -127,8 +143,8 @@ async def test_rate_limit_falls_back_to_local_when_redis_down(client, monkeypatc
     app.state.redis = _Down()
     integration_auth._LOCAL_RL.clear()
     monkeypatch.setattr(get_settings(), "AICM_RL_READ_PER_MIN", 2)
-    good = "itg-" + "a" * 64
-    codes = [(await c.get("/aicm/v1/service-tokens", headers=_hdr(good))).status_code for _ in range(3)]
+    good = "svc-" + "a" * 64
+    codes = [(await c.get("/aicm/v1/admin/service-tokens", headers=_hdr(good))).status_code for _ in range(3)]
     assert codes == [200, 429, 429]  # Redis 장애 로컬 폴백은 replica 수로 나눈 cap(2//3 → 1)
 
 
@@ -325,18 +341,3 @@ async def test_fingerprint_ignores_json_key_order_but_not_values():
 # ── provision group validation (pure) ────────────────────────────────────────
 
 
-def test_provision_group_rules(monkeypatch):
-    from app.core.config import get_settings
-    from app.services.user_lifecycle_service import UserLifecycleService
-
-    s = get_settings()
-    monkeypatch.setattr(s, "OIDC_GROUP_PREFIX", "Claude_")
-    monkeypatch.setattr(s, "ADMIN_GROUPS", ["ClaudeAdmin"])
-    v = UserLifecycleService.validate_groups
-    assert v(["Claude_Dept_Team", "Claude_Dept_Team", " Claude_X "]) == ["Claude_Dept_Team", "Claude_X"]
-    for bad, code in ((["ClaudeAdmin"], "admin_group_forbidden"), (["Other"], "group_not_allowed"),
-                      (["Claude_a;b"], "invalid_group"), ([], "no_team_group"), (["Claude_"], "no_team_group"),
-                      (["Claude_a_b_c"], "no_team_group")):
-        with pytest.raises(IntegrationError) as ei:
-            v(bad)
-        assert ei.value.code == code, bad
