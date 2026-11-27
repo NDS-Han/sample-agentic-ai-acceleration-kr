@@ -1476,16 +1476,6 @@
       }
     },
     "securitySchemes": {
-      "adminJwt": {
-        "bearerFormat": "JWT (human admin)",
-        "scheme": "bearer",
-        "type": "http"
-      },
-      "integrationTokenLegacy": {
-        "bearerFormat": "itg-<64 hex>",
-        "scheme": "bearer",
-        "type": "http"
-      },
       "integrationTokenSvc": {
         "bearerFormat": "svc-<64 hex>, AICM scoped",
         "scheme": "bearer",
@@ -1494,7 +1484,7 @@
     }
   },
   "info": {
-    "description": "admin-api /aicm/v1 라우터(AICM_API_ENABLED=true 일 때만 존재). /aicm/v1/admin mirror: Authorization: Bearer svc-<64 hex>(AICM scoped). legacy lifecycle routes: Bearer itg-<64 hex>. 오류 봉투: {\"error\": {\"type\", \"code\", \"message\", \"details\"?}}. 안내서: docs/NDS/aicm/README.md",
+    "description": "admin-api /aicm/v1 라우터(AICM_API_ENABLED=true 일 때만 존재). /aicm/v1/admin mirror: Authorization: Bearer svc-<64 hex>(AICM scoped). 오류 봉투: {\"error\": {\"type\", \"code\", \"message\", \"details\"?}}. 안내서: docs/NDS/aicm/README.md",
     "title": "LLM Gateway — AICM integration API",
     "version": "1.0.0"
   },

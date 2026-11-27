@@ -250,26 +250,34 @@ def _team_config_data(config) -> dict:
 
 
 def _client_config_data(config) -> dict:
-    """per-app 행 → ``budget:config:user:{uid}:{client}`` JSON."""
-    return {
+    """per-app/app-group 유효 정책 → ``budget:config:user:{uid}:{client}`` JSON."""
+    out = {
         "limit_usd": str(config.max_budget_usd),
         "policy": _policy_to_lua_value(_db_policy_to_domain(config.policy)),
+        "soft_limit_pct": DEFAULT_SOFT_LIMIT_PCT,
+        "throttle_rpm_pct": DEFAULT_THROTTLE_RPM_PCT,
         "thresholds": _row_thresholds(config),
     }
+    layers = getattr(config, "layers", None)
+    if layers:
+        out["layers"] = layers
+    return out
 
 
 class _ClientPolicyRow:
     """정책 합성에 필요한 최소 행 형상 — ORM/UNION 결과를 같은 코드로 다룬다."""
 
-    __slots__ = ("client", "max_budget_usd", "policy", "alert_thresholds")
+    __slots__ = ("client", "max_budget_usd", "policy", "alert_thresholds", "layers")
 
     def __init__(
-        self, *, client=None, max_budget_usd=None, policy=None, alert_thresholds=None
+        self, *, client=None, max_budget_usd=None, policy=None, alert_thresholds=None,
+        layers=None,
     ) -> None:
         self.client = client
         self.max_budget_usd = max_budget_usd
         self.policy = policy
         self.alert_thresholds = alert_thresholds
+        self.layers = layers
 
 
 def _limit_sort_value(value) -> Decimal:
@@ -284,23 +292,80 @@ def _limit_sort_value(value) -> Decimal:
     return value
 
 
-def _compose_client_policy(app_config, group_config):
-    """per-app cap 과 app-group cap 의 유효 정책 — 금액은 둘의 min().
+def _finite_limit(value) -> Decimal:
+    """정책 행의 한도를 판정용 Decimal 로 정규화 — NULL/비유한/음수는 0(차단)."""
+    try:
+        out = value if isinstance(value, Decimal) else Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError):
+        return Decimal("0")
+    if not out.is_finite() or out < 0:
+        return Decimal("0")
+    return out
 
-    금액이 같으면 더 구체적인 per-app 행의 policy/thresholds 를 쓰고, 한쪽만 있으면
-    그쪽을 쓴다. app-group 단독(0 포함)도 유효한 per-app 정책이 된다.
+
+def _policy_layer_data(row, source: str) -> dict:
+    """Redis 다중 정책 설정에 싣는 한 계층 — 같은 client 카운터를 같이 평가한다."""
+    return {
+        "source": source,
+        "limit_usd": str(row.max_budget_usd),
+        "policy": _policy_to_lua_value(_db_policy_to_domain(row.policy)),
+        "soft_limit_pct": DEFAULT_SOFT_LIMIT_PCT,
+        "throttle_rpm_pct": DEFAULT_THROTTLE_RPM_PCT,
+        "thresholds": _row_thresholds(row),
+    }
+
+
+def _compose_client_policy(app_config, group_config):
+    """per-app cap 과 app-group cap 의 유효 정책.
+
+    두 행이 있으면 낮은 금액 행 하나를 고르지 않고 두 정책을 모두 보존한다 —
+    한쪽의 THROTTLE/SOFT_WARNING 이 다른 쪽 HARD_BLOCK 을 지우지 못하고,
+    어느 쪽의 0 cap 도 즉시 차단한다. ``layers`` 는 Redis Lua/DB 폴백이 같은
+    client 사용량 카운터에 대해 각 정책을 독립 평가하게 하는 신규 표현이다.
+
+    최상위 limit/policy 필드는 layers 를 모르는 구버전 소비자를 위한 보수적
+    폴백이다: hard/soft 의 실제 차단 시점 중 가장 이른 cap 을 hard_block 으로
+    둔다(차단은 보존하고 warning/throttle 신호만 신버전이 복원한다). 한쪽만
+    있으면 기존처럼 그 행을 그대로 쓴다.
     """
-    candidates = []
+    rows: list[tuple[str, object]] = []
     if app_config is not None:
-        candidates.append((0, app_config))
+        rows.append(("app", app_config))
     if group_config is not None:
-        candidates.append((1, group_config))
-    if not candidates:
+        rows.append(("group", group_config))
+    if not rows:
         return None
-    return min(
-        candidates,
-        key=lambda item: (_limit_sort_value(item[1].max_budget_usd), item[0]),
-    )[1]
+    if len(rows) == 1:
+        return rows[0][1]
+
+    layers = [_policy_layer_data(row, source) for source, row in rows]
+    thresholds = sorted({t for layer in layers for t in layer["thresholds"]})
+    block_caps: list[Decimal] = []
+    nominal: list[Decimal] = []
+    for _source, row in rows:
+        limit = _finite_limit(row.max_budget_usd)
+        nominal.append(limit)
+        policy = _db_policy_to_domain(row.policy)
+        if limit <= 0:
+            block_caps.append(limit)
+        elif policy == BudgetPolicy.HARD_BLOCK:
+            block_caps.append(limit)
+        elif policy == BudgetPolicy.SOFT_WARNING:
+            block_caps.append(limit * Decimal(DEFAULT_SOFT_LIMIT_PCT) / Decimal(100))
+    if block_caps:
+        top_limit = min(block_caps)
+        top_policy = BudgetPolicy.HARD_BLOCK
+    else:
+        # 전부 THROTTLE — 금액 차단은 없지만 구버전 소비자도 가장 낮은
+        # 명목 한도의 throttle 신호는 보게 한다.
+        top_limit = min(nominal)
+        top_policy = BudgetPolicy.THROTTLE
+    return _ClientPolicyRow(
+        max_budget_usd=top_limit,
+        policy=top_policy,
+        alert_thresholds=thresholds,
+        layers=layers,
+    )
 
 
 def _effective_client_policy_stmt(user_id: str, client: str):
@@ -2062,6 +2127,73 @@ class BudgetService:
                 "config_present": True,
             }
 
+        def _client_layers_result(used: Decimal, config) -> tuple[str | None, dict]:
+            """mixed per-app/app-group 정책을 Redis Lua 와 같은 규칙으로 합성한다."""
+            layers = getattr(config, "layers", None)
+            if not layers:
+                return _layer(
+                    used,
+                    config.max_budget_usd,
+                    _db_policy_to_domain(config.policy),
+                    _row_thresholds(config),
+                )
+
+            results: list[tuple[str | None, dict]] = []
+            for layer in layers:
+                try:
+                    policy = BudgetPolicy(str(layer.get("policy", "hard_block")).lower())
+                except ValueError:
+                    policy = BudgetPolicy.HARD_BLOCK
+                raw_thresholds = layer.get("thresholds")
+                thresholds = (
+                    sorted({int(v) for v in raw_thresholds if v is not None})
+                    if isinstance(raw_thresholds, list) else list(DEFAULT_THRESHOLDS)
+                )
+                results.append(_layer(
+                    used, _finite_limit(layer.get("limit_usd")), policy, thresholds
+                ))
+
+            def _block_cap(d: dict) -> Decimal:
+                limit = d["limit_usd"]
+                if limit <= 0 or d["policy"] == BudgetPolicy.HARD_BLOCK.value:
+                    return limit
+                if d["policy"] == BudgetPolicy.SOFT_WARNING.value:
+                    return limit * Decimal(DEFAULT_SOFT_LIMIT_PCT) / Decimal(100)
+                return Decimal("Infinity")
+
+            blocked = [item for item in results if item[0]]
+            if blocked:
+                block, d = min(
+                    blocked,
+                    key=lambda item: (
+                        _block_cap(item[1]),
+                        0 if item[1]["policy"] == BudgetPolicy.HARD_BLOCK.value else 1,
+                    ),
+                )
+                return block, d
+
+            def _effective_remaining(d: dict) -> Decimal:
+                if d["policy"] == BudgetPolicy.THROTTLE.value:
+                    return Decimal("Infinity")
+                return _block_cap(d) - d["used_usd"]
+
+            decisive = min(
+                (d for _block, d in results),
+                key=lambda d: (
+                    _effective_remaining(d),
+                    d["limit_usd"] - d["used_usd"],
+                ),
+            )
+            combined = dict(decisive)
+            combined["soft_warning"] = any(d["soft_warning"] for _b, d in results)
+            active_rpms = [
+                d["throttle_rpm_pct"] for _b, d in results if d["throttle_active"]
+            ]
+            combined["throttle_active"] = bool(active_rpms)
+            if active_rpms:
+                combined["throttle_rpm_pct"] = min(active_rpms)
+            return None, combined
+
         async def _user_used() -> Decimal:
             r = await db.execute(
                 select(BudgetUsage)
@@ -2159,11 +2291,8 @@ class BudgetService:
                 )
                 client_usage = client_usage_result.scalar_one_or_none()
                 client_used = client_usage.used_usd if client_usage else Decimal("0")
-                client_block, client_dict = _layer(
-                    client_used,
-                    client_config.max_budget_usd,
-                    _db_policy_to_domain(client_config.policy),
-                    _row_thresholds(client_config),
+                client_block, client_dict = _client_layers_result(
+                    client_used, client_config
                 )
                 self._remember("client", (user_id, client), period, client_dict)
                 if client_block:

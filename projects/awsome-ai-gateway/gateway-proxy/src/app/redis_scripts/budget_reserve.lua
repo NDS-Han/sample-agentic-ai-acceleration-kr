@@ -182,6 +182,30 @@ local soft_limit_pct = tonumber(config.soft_limit_pct) or 110
 if soft_limit_pct ~= soft_limit_pct or soft_limit_pct == math.huge
     or soft_limit_pct == -math.huge then soft_limit_pct = 110 end
 
+-- mixed per-app/app-group 정책은 layers 로 실린다. 예약 상한은 각 계층의
+-- 실제 차단 cap 중 가장 이른 값이고, 어느 계층이라도 소진이면 입장시키지
+-- 않는다 — 낮은 THROTTLE/SOFT_WARNING 행이 HARD_BLOCK 을 지우지 못한다.
+local function reserve_layer(raw)
+    local l = tonumber(raw.limit_usd) or 0
+    if l ~= l or l == math.huge or l == -math.huge then l = 0 end
+    local p = raw.policy or 'hard_block'
+    if p ~= 'hard_block' and p ~= 'soft_warning' and p ~= 'throttle' then
+        p = 'hard_block'
+    end
+    local sp = tonumber(raw.soft_limit_pct) or 110
+    if sp ~= sp or sp == math.huge or sp == -math.huge then sp = 110 end
+    return {limit = l, policy = p, soft_limit_pct = sp}
+end
+local layers = {}
+if type(config.layers) == 'table' then
+    for _, raw_layer in ipairs(config.layers) do
+        if type(raw_layer) == 'table' then table.insert(layers, reserve_layer(raw_layer)) end
+    end
+end
+if #layers == 0 then
+    table.insert(layers, {limit = limit, policy = policy, soft_limit_pct = soft_limit_pct})
+end
+
 local used_raw = redis.call('GET', usage_key) or '0'
 local used = tonumber(used_raw)
 -- 비수치('abc'→nil)/비유한('nan'/'inf') 카운터: 아래 at_cap 비교를 거짓으로
@@ -202,8 +226,10 @@ if used_raw ~= tostring(used) then
 end
 
 -- D-8: limit = 0 은 정책과 무관하게 항상 차단.
-if limit <= 0 then
-    return reply(false, false, scope_label .. '_budget_exceeded', used, limit, true)
+for _, layer in ipairs(layers) do
+    if layer.limit <= 0 then
+        return reply(false, false, scope_label .. '_budget_exceeded', used, layer.limit, true)
+    end
 end
 
 -- 정책별 상한 cap 을 먼저 정한다 — hard_block=limit, soft_warning=limit×pct,
@@ -214,14 +240,27 @@ end
 --   soft_warning: check 와 같은 곱셈 경계식(×100) — 나눗셈 cap 비교는
 --     1-ULP 발산으로 check 가 막는 경계에서 reserve 가 통과시킨다(8차 리뷰
 --     m1, 브루트포스 35/2808 발산).
+-- mixed layers 에서는 각 행의 cap/경계식을 독립 적용하고 가장 이른 cap 을
+-- 예약 클램프로 쓴다.
 local cap = nil
 local at_cap = false
-if policy == 'hard_block' then
-    cap = limit
-    at_cap = used >= cap - 1e-9
-elseif policy == 'soft_warning' then
-    cap = (limit * soft_limit_pct) / 100
-    at_cap = used * 100 >= limit * soft_limit_pct
+local cap_layer_limit = limit
+for _, layer in ipairs(layers) do
+    if layer.policy == 'hard_block' then
+        local c = layer.limit
+        if cap == nil or c < cap then
+            cap = c
+            cap_layer_limit = layer.limit
+        end
+        if used >= c - 1e-9 then at_cap = true end
+    elseif layer.policy == 'soft_warning' then
+        local c = (layer.limit * layer.soft_limit_pct) / 100
+        if cap == nil or c < cap then
+            cap = c
+            cap_layer_limit = layer.limit
+        end
+        if used * 100 >= layer.limit * layer.soft_limit_pct then at_cap = true end
+    end
 end
 
 local reserved_amt = estimate
@@ -234,7 +273,7 @@ if cap then
     -- 초과량 상한은 worst-case 가 아니라 그 요청의 실비다.
     if at_cap then
         return reply(false, false, scope_label .. '_budget_exceeded',
-                     used, limit, true)
+                     used, cap_layer_limit, true)
     end
     if estimate > cap - used then
         reserved_amt = math.max(cap - used, 0)

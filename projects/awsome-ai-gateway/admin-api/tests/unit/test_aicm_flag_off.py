@@ -113,6 +113,14 @@ def test_committed_openapi_spec_is_current(monkeypatch):
     assert _SPEC.read_text(encoding="utf-8") == expected, (
         "docs/NDS/aicm/aicm-v1-openapi.json is stale — run scripts/export_aicm_openapi.py")
     data = json.loads(expected)
-    assert all(p.startswith("/aicm/v1") for p in data["paths"])
+    assert all(p.startswith("/aicm/v1/admin/") for p in data["paths"])
+    assert "/aicm/v1/service-tokens" not in data["paths"]
+    assert set(data["components"]["securitySchemes"]) == {"integrationTokenSvc"}
+    assert "itg-" not in expected
+    securities = {
+        tuple(sorted(next(iter(s)) for s in op.get("security", [])))
+        for ops in data["paths"].values() for op in ops.values()
+    }
+    assert securities == {("integrationTokenSvc",)}
 
 

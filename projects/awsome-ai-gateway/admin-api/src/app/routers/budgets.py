@@ -23,6 +23,7 @@ from app.services.managed_fields import (
 )
 from app.schemas.budgets import (
     AllocateBudgetRequest,
+    AppBudgetItem,
     AppGroupBudgetItem,
     AutoDowngradeConfigRequest,
     AutoDowngradeConfigResponse,
@@ -261,7 +262,8 @@ async def get_user_app_budgets(
     """Read active per-app (client) budgets for a user, for UI prefill."""
 
     svc: BudgetService = request.app.state.budget_service
-    apps = await svc.get_user_app_budgets(session, user_id=user_id, actor=user)
+    rows_out = await svc.get_user_app_budgets(session, user_id=user_id, actor=user)
+    apps = [AppBudgetItem(**row) for row in rows_out]
     rows = await managed_rows(
         session, resource_type=RESOURCE_USER, resource_ids=[user_id],
         facets=[f"app-budget:{a.client}" for a in apps],

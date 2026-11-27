@@ -290,8 +290,8 @@ def test_the_db_fallback_uses_the_shared_decision_for_every_layer():
         None,
     )
     assert fn is not None, "_check_budget_db 를 찾지 못했다"
-    # CAP 모델에서 판정 지점은 넷이다 — USER(개인 cap 또는 팀 기본 cap D),
-    # TEAM, per-app. 전부 내부 헬퍼 `_layer` 를 거치고, `_layer` 만이
+    # CAP 모델의 최상위 판정 지점은 USER(개인/D), TEAM, per-app 이다. per-app 은
+    # mixed app/app-group 보존을 위해 단일행/layers 합성 호출을 둘 다 가진다. 전부 `_layer` 를 거치고,
     # `_evaluate_layer` 를 호출한다. 한 계층이라도 헬퍼를 우회해 무조건 차단을
     # 쓰면 그 계층만 정책이 무시된다 — 원래 결함이 정확히 그 모양이었다.
     eval_calls = [
@@ -312,9 +312,9 @@ def test_the_db_fallback_uses_the_shared_decision_for_every_layer():
         and isinstance(n.func, ast.Name)
         and n.func.id == "_layer"
     ]
-    assert len(layer_calls) == 4, (
+    assert len(layer_calls) == 5, (
         f"_layer 판정 지점이 {len(layer_calls)}곳이다(L{layer_calls}) — "
-        "USER(개인/D) + TEAM + per-app 네 계층 모두여야 한다"
+        "USER(개인/D) + TEAM + per-app 단일/layers 합성 호출이 모두 있어야 한다"
     )
 
     # ⚠️ 불변식을 직접 표현한다: **한도 초과로 인한** 모든 차단은 _evaluate_layer 의

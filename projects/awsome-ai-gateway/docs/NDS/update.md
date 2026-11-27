@@ -204,6 +204,11 @@ git status --short               # 미커밋 변경은 태그(SHA)와 이미지�
   올라가는 사고 방지). `--all` 로 전체 빌드하거나 migration 만 먼저
   올리세요.
 - `--plan` 과의 조합은 읽기 전용입니다 — 빌드/푸시/핀 갱신을 하지 않습니다.
+- **app-group 예산 계층 집행 릴리스 1회** — 새 gateway-proxy rollout 이 끝난 뒤에는
+  구형 per-client budget config Redis 키를 무효화해야 합니다. admin-api pod 선택,
+  dry-run/apply 명령, 보존해야 할 spend/reservation 키는
+  [us-llm-gateway runbook 3-1단계](../us-llm-gateway/ops/8-U-update.md#3-1단계--app-group-예산-롤아웃-뒤-redis-설정-캐시-무효화-해당-릴리스-1회)를
+  그대로 따릅니다.
 
 수동 경로(개별 서비스만 빠르게 올릴 때)는 종전대로 `rebuild-image.sh`:
 

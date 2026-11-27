@@ -168,6 +168,7 @@ end
 local limit = 0
 local thresholds = {80, 90, 100}
 local app_clients = {}
+local alert_layers = {}
 if config_raw then
     local ok, config = pcall(cjson.decode, config_raw)
     if ok and type(config) == 'table' then
@@ -183,7 +184,26 @@ if config_raw then
         if config.app_clients then
             app_clients = config.app_clients
         end
+        if type(config.layers) == 'table' then
+            -- mixed per-app/app-group 알림도 각 행의 명목 한도/임계값을 보존한다.
+            for _, layer in ipairs(config.layers) do
+                if type(layer) == 'table' then
+                    local llimit = tonumber(layer.limit_usd) or 0
+                    if llimit ~= llimit or llimit == math.huge or llimit == -math.huge then
+                        llimit = 0
+                    end
+                    local lthresholds = {80, 90, 100}
+                    if type(layer.thresholds) == 'table' then
+                        lthresholds = layer.thresholds
+                    end
+                    table.insert(alert_layers, {limit = llimit, thresholds = lthresholds})
+                end
+            end
+        end
     end
+end
+if #alert_layers == 0 then
+    table.insert(alert_layers, {limit = limit, thresholds = thresholds})
 end
 
 local used_raw = redis.call('GET', usage_key) or '0'
@@ -277,20 +297,25 @@ local logical_old = sat(usage_lost and 0 or (used - reserved))
 local logical_new = sat(logical_old + actual)
 
 local triggered = cjson.null
-if limit > 0 then
+do
     -- 교차 비교는 곱셈 형태로 — check.lua 의 prior*100 < limit*t 와 같은
     -- 식이다. (old/limit)*100 처럼 나눗셈을 먼저 하면 정확한 경계값에서
-    -- 1-ULP 차이로 check 경로와 판정이 갈린다(11차 리뷰).
+    -- 1-ULP 차이로 check 경로와 판정이 갈린다(11차 리뷰). mixed layers 는
+    -- 각 행의 명목 한도를 독립 평가하고 가장 높은 교차 퍼센트를 하나만 반환한다.
     local highest = nil
-    for _, t in ipairs(thresholds) do
-        -- 소수점 임계값은 교차 후 threshold_triggered int 스키마 거부로
-        -- finalize 가 커밋 후 크래시 → 원장 누락(17차 리뷰 F2). 정수 수렴.
-        if type(t) == 'number' then
-            local ti = math.floor(t)
-            if logical_old * 100 < limit * ti
-                and logical_new * 100 >= limit * ti then
-                if highest == nil or ti > highest then
-                    highest = ti
+    for _, layer in ipairs(alert_layers) do
+        if layer.limit > 0 then
+            for _, t in ipairs(layer.thresholds) do
+                -- 소수점 임계값은 교차 후 threshold_triggered int 스키마 거부로
+                -- finalize 가 커밋 후 크래시 → 원장 누락(17차 리뷰 F2). 정수 수렴.
+                if type(t) == 'number' then
+                    local ti = math.floor(t)
+                    if logical_old * 100 < layer.limit * ti
+                        and logical_new * 100 >= layer.limit * ti then
+                        if highest == nil or ti > highest then
+                            highest = ti
+                        end
+                    end
                 end
             end
         end

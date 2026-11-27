@@ -18,7 +18,7 @@ class ServiceTokenCreateRequest(BaseModel):
     # legacy /aicm/v1 bootstrap 라우트가 하던 일을 사람 admin 표면으로 이전한 것
     # (legacy 제거). scope 없는 평범한 발급은 아래 필드가 모두 비어야 한다.
     scopes: list[str] | None = Field(
-        None, max_length=16,
+        None, min_length=1, max_length=16,
         description="AICM integration scopes (예: users:sync, budgets:write). 지정 시 integration 토큰",
     )
     allowed_cidrs: list[str] | None = Field(

@@ -115,6 +115,32 @@ def _require_admin_actor(actor: CurrentUser) -> None:
         )
 
 
+def _check_team_leader_budget_target(actor: CurrentUser, user: User, user_id: uuid.UUID, *, verb: str) -> None:
+    """BR-BUD-03 + D-13 target guard shared by per-app and app-group budget writes.
+
+    Team leaders may act only on ordinary members of their own team — never on
+    themselves, other leaders, admins, or cross-team users. ADMIN actors and
+    correctly scoped integration callers (synthetic ADMIN) are unaffected.
+    """
+    if actor.role != UserRole.TEAM_LEADER:
+        return
+    if actor.team_id is None or user.team_id != actor.team_id:
+        raise ForbiddenError(f"Team leaders can only {verb} budgets for their own team members")
+    if actor.user_id == user_id:
+        raise BudgetRuleError(
+            f"Team leaders cannot {verb} their own budget (self_allocation_forbidden).",
+            "self_allocation_forbidden",
+            403,
+        )
+    if user.role in (UserRole.TEAM_LEADER, UserRole.ADMIN):
+        raise BudgetRuleError(
+            "Team leaders cannot modify budgets of leaders/admins "
+            "(leader_target_forbidden) — an admin must do it.",
+            "leader_target_forbidden",
+            403,
+        )
+
+
 def _check_cent_precision(amount: Decimal) -> None:
     """예산 입력은 NUMERIC(12,4) 저장 정밀도와 같은 4자리까지 허용한다.
 
@@ -2663,6 +2689,16 @@ class BudgetService:
         user = await UserRepository(session).get_user(user_id)
         if user is None:
             raise NotFoundError("User", str(user_id))
+        # ordinary per-app write 와 같은 대상 규칙 — group cap 은 부모 총액 없이도
+        # 집행되므로 팀 소속/리더 대상 검사를 우회하는 경로가 되면 안 된다.
+        if user.team_id is None:
+            raise BudgetRuleError(
+                f"User {user_id} has no team — budgets can only be assigned to "
+                f"team members.",
+                "user_not_in_team",
+                403,
+            )
+        _check_team_leader_budget_target(actor, user, user_id, verb="set")
         await assert_writable(
             session, [(RESOURCE_USER, user_id, app_group_budget_facet(group))], actor=actor
         )
@@ -2745,6 +2781,9 @@ class BudgetService:
         user = await UserRepository(session).get_user(user_id)
         if user is None:
             raise NotFoundError("User", str(user_id))
+        # row 가 없어도 대상 권한은 먼저 검사한다 — DELETE 의 idempotent no-op 이
+        # cross-team 탐지/무효화 우회가 되지 않게 한다.
+        _check_team_leader_budget_target(actor, user, user_id, verb="clear")
         await assert_writable(
             session, [(RESOURCE_USER, user_id, app_group_budget_facet(group))], actor=actor
         )

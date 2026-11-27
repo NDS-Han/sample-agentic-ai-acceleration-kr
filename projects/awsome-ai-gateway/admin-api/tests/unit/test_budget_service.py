@@ -1758,3 +1758,89 @@ class TestTeamScopeAdminOnlyGuard:
         for coro in await self._calls(budget_service, mock_session, developer_user):
             with pytest.raises(BudgetRuleError, match="team_budget_admin_only"):
                 await coro
+
+
+class TestAppGroupBudgetWriteAuthorization:
+    """Codex P1 — app-group PUT/DELETE 도 ordinary per-app 대상 규칙을 적용한다."""
+
+    @staticmethod
+    def _target(user_id, team_id, role=None):
+        user = MagicMock(spec=User)
+        user.id = user_id
+        user.team_id = team_id
+        user.role = role
+        return user
+
+    @pytest.mark.parametrize("verb", ["set", "clear"])
+    @pytest.mark.parametrize("case", ["cross_team", "self", "leader", "admin"])
+    async def test_team_leader_forbidden_targets_get_403_before_write(
+        self, budget_service, mock_session, team_leader_user, verb, case
+    ):
+        target_id = uuid.uuid4()
+        if case == "self":
+            target_id = team_leader_user.user_id
+        role = None
+        team_id = team_leader_user.team_id
+        if case == "cross_team":
+            team_id = uuid.uuid4()
+        elif case == "leader":
+            from app.models.auth import UserRole
+            role = UserRole.TEAM_LEADER
+        elif case == "admin":
+            from app.models.auth import UserRole
+            role = UserRole.ADMIN
+        user = self._target(target_id, team_id, role)
+
+        with patch("app.services.budget_service.UserRepository") as MockUserRepo, \
+             patch("app.services.budget_service.assert_writable", new=AsyncMock()) as writable, \
+             patch("app.services.budget_service.record_aicm_write", new=AsyncMock()) as aicm_write:
+            MockUserRepo.return_value.get_user = AsyncMock(return_value=user)
+            mock_session.get = AsyncMock(return_value=None)  # DELETE row absent 도 같은 검사
+            with pytest.raises((ForbiddenError, BudgetRuleError)) as excinfo:
+                if verb == "set":
+                    await budget_service.set_user_app_group_budget(
+                        mock_session, user_id=target_id, group="cowork",
+                        data=SetBudgetRequest(max_budget_usd=Decimal("5")), actor=team_leader_user,
+                    )
+                else:
+                    await budget_service.clear_user_app_group_budget(
+                        mock_session, user_id=target_id, group="cowork", actor=team_leader_user,
+                    )
+            assert getattr(excinfo.value, "status_code", 403) == 403
+            writable.assert_not_awaited()
+            aicm_write.assert_not_awaited()
+            mock_session.add.assert_not_called()
+
+    async def test_team_leader_can_write_own_team_member_without_parent_total_budget(
+        self, budget_service, mock_session, team_leader_user
+    ):
+        target_id = uuid.uuid4()
+        user = self._target(target_id, team_leader_user.team_id)
+        with patch("app.services.budget_service.UserRepository") as MockUserRepo, \
+             patch("app.services.budget_service.assert_writable", new=AsyncMock()), \
+             patch("app.services.budget_service.record_aicm_write", new=AsyncMock()), \
+             patch("app.services.budget_service.audit_logger") as audit:
+            MockUserRepo.return_value.get_user = AsyncMock(return_value=user)
+            mock_session.get = AsyncMock(return_value=None)
+            audit.log = AsyncMock()
+            # 부모 USER 총예산 조회/요구가 없어야 한다 — app-group 단독 사용은 유지.
+            await budget_service.set_user_app_group_budget(
+                mock_session, user_id=target_id, group="cowork",
+                data=SetBudgetRequest(max_budget_usd=Decimal("5")), actor=team_leader_user,
+            )
+        assert mock_session.add.called
+
+    async def test_admin_can_clear_absent_app_group_row(
+        self, budget_service, mock_session, admin_user
+    ):
+        target_id = uuid.uuid4()
+        user = self._target(target_id, uuid.uuid4())
+        with patch("app.services.budget_service.UserRepository") as MockUserRepo, \
+             patch("app.services.budget_service.assert_writable", new=AsyncMock()), \
+             patch("app.services.budget_service.record_aicm_write", new=AsyncMock()) as aicm_write:
+            MockUserRepo.return_value.get_user = AsyncMock(return_value=user)
+            mock_session.get = AsyncMock(return_value=None)
+            await budget_service.clear_user_app_group_budget(
+                mock_session, user_id=target_id, group="cowork", actor=admin_user,
+            )
+        aicm_write.assert_awaited_once()

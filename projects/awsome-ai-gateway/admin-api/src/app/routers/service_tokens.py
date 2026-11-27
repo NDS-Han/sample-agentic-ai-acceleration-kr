@@ -24,7 +24,7 @@ from app.schemas.service_tokens import (
 router = APIRouter(prefix="/admin/service-tokens", tags=["Service Token Management"])
 
 
-@router.post("", response_model=ServiceTokenCreateResponse)
+@router.post("", response_model=ServiceTokenCreateResponse, response_model_exclude_unset=True)
 async def issue_service_token(
     request: Request,
     body: ServiceTokenCreateRequest,
@@ -37,7 +37,14 @@ async def issue_service_token(
     if body.scopes:
         # AICM scoped integration 토큰 — legacy /aicm/v1 bootstrap 의 이전 경로.
         # scopes 없이 cidrs/rate_limit 만 오는 조합은 422 (아래에서 검증).
+        from app.core.config import get_settings
         from app.services.integration_token_service import IntegrationTokenService
+
+        if not get_settings().AICM_API_ENABLED:
+            raise ForbiddenError(
+                "AICM scoped service-token issuance is disabled "
+                "(AICM_API_ENABLED=false)"
+            )
 
         isvc = IntegrationTokenService(request.app.state.service_token_service)
         iresp, scopes, cidrs = await isvc.issue(
@@ -93,7 +100,7 @@ async def list_service_tokens(
     return await svc.list_tokens(session)
 
 
-@router.post("/rotate", response_model=ServiceTokenCreateResponse)
+@router.post("/rotate", response_model=ServiceTokenCreateResponse, response_model_exclude_unset=True)
 async def rotate_service_token(
     request: Request,
     admin: CurrentUser = Depends(require_service_token_self),
