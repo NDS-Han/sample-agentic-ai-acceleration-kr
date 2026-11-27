@@ -40,6 +40,29 @@ python3 deployment/scripts/setup-adfs-sso.py setup \
 
 이후 출력되는 순서대로: `./deploy render` → (수동 IdP 있으면 import) → `./deploy apply` → `./deploy doctor` (saml-idp 점검).
 
+## 고객사 ADFS 측 설정 — 반드시 확인할 함정
+
+설치자가 출력하는 relying party trust 값 외에, claim issuance rule 의 **형식**이
+성패를 가른다:
+
+| LDAP attribute | outgoing claim type | 비고 |
+|---|---|---|
+| `E-Mail-Addresses` | `E-Mail Address` | |
+| `Display-Name` | `Name` | |
+| **`Token-Groups - Unqualified Names`** | `Group` | ⚠ 아래 함정 참조 |
+
+- ⚠ **SID 함정** — LDAP attribute 를 `Token-Groups`(또는 `as SIDs`)로 선택하면
+  그룹명이 아니라 `S-1-5-21-...` 형태의 SID 가 실려 그룹 파싱이 전부 실패한다.
+  반드시 `Token-Groups - Unqualified Names` 여야 순수 그룹명(`ssir_claude_users`)이 온다.
+  `Qualified by Domain Name` 계열은 `DOMAIN\group` 형태라 prefix 매칭이 깨진다.
+- ⚠ **claim URI 정합** — outgoing `Group` 의 URI 는 `http://schemas.xmlsoap.org/claims/Group`
+  이다. 이것이 설치자 기본값(`--groups-claim`)과 일치해야 하며, 고객사가 다른 URI
+  (예: `http://schemas.microsoft.com/ws/2008/06/identity/claims/groups`)를 쓰면
+  설치 시 `--groups-claim` 으로 맞춰야 한다 — attribute mapping 의 값이 이 URI 이다.
+- ⚠ **2048자 절단** — custom attribute 는 2048자 제한이 있어, AD 그룹이 많은
+  사용자는 목록이 잘린다. 게이트웨이용 그룹만 보내도록 ADFS 에 regex 필터 규칙
+  (예: `^ssir_`)을 두는 것을 권장한다.
+
 ## 핵심 정합성 — groups_claim
 
 SAML attribute 경로에서 그룹은 토큰의 **`custom:groups`** 클레임에 실린다.

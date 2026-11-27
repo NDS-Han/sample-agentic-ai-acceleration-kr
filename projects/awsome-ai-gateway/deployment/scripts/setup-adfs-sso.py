@@ -44,7 +44,10 @@ DEFAULT_CONFIG = REPO_ROOT / "deployment" / "gateway.yaml"
 # Microsoft ADFS 의 표준 claim URI — 고객사가 커스텀 rule 을 쓰면 인자로 바꾼다.
 ADFS_EMAIL_CLAIM = "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress"
 ADFS_NAME_CLAIM = "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/name"
-ADFS_GROUPS_CLAIM = "http://schemas.microsoft.com/ws/2008/06/identity/claims/groups"
+# ADFS 의 그룹 클레임 표준 pairing — LDAP attribute "Token-Groups - Unqualified Names"
+# → outgoing claim type "Group" (이 URI). microsoft.com 2008/06 groups URI 도
+# 쓰이는 환경이 있으나 ADFS UI 기본 드롭다운 조합은 이쪽이다 — 다르면 --groups-claim 으로.
+ADFS_GROUPS_CLAIM = "http://schemas.xmlsoap.org/claims/Group"
 
 
 def log(msg: str) -> None:
@@ -212,15 +215,23 @@ def cmd_setup(args) -> int:
 
     # 기존 수동 IdP 감지 — import 안내 판단
     env_dir = find_env_dir(doc, env)
-    pool_id, client_id, domain_prefix = "", "", ""
+    pool_id, client_id, domain_host = "", "", ""
     existing_idps: list[str] = []
+    detection_failed = False
     if env_dir:
         outs = tf_outputs(env_dir)
         pool_id = outs.get("cognito_user_pool_id") or ""
         client_id = outs.get("cognito_client_id") or ""
-        domain_prefix = outs.get("cognito_domain_prefix") or ""
+        domain_host = outs.get("cognito_hosted_ui_domain") or ""
         if pool_id:
             existing_idps = list_pool_idps(pool_id, region)
+            if not existing_idps:
+                # aws cli 실패(자격/권한)와 '진짜 IdP 없음'을 구별할 수 없다 — 경고한다
+                detection_failed = True
+        else:
+            detection_failed = True
+    else:
+        detection_failed = True
 
     update_yaml(config_path, args.provider_name, entry,
                 group_prefix=args.group_prefix, admin_group=args.admin_group)
@@ -256,6 +267,10 @@ def cmd_setup(args) -> int:
         print()
     else:
         print("2. (신규 IdP — import 불필요)")
+        if detection_failed:
+            print("   ⚠ 풀 조회를 못 했습니다(env terraform output/AWS 자격 없음).")
+            print("     콘솔에 수동 등록된 동명 IdP 가 있으면 apply 가 실패합니다 —")
+            print("     있다면 --import-existing 을 붙여 import 절차를 출력받으세요.")
         print()
     print("3. 적용:")
     print("   ./deploy apply")
@@ -268,17 +283,24 @@ def cmd_setup(args) -> int:
     print("=" * 72)
     print()
     print(f"  Relying party identifier : urn:amazon:cognito:sp:{pool_id or '<pool-id>'}")
-    if domain_prefix:
-        host = f"{domain_prefix}.auth.{region}.amazoncognito.com"
+    if domain_host:
+        host = domain_host  # output 은 이미 전체 호스트명
     else:
         host = "<cognito-domain>.auth." + region + ".amazoncognito.com"
     print(f"  ACS (SAML consumer) URL  : https://{host}/saml2/idpresponse")
     print(f"  Sign-out URL             : https://{host}/saml2/logout")
     print()
-    print("  필요한 claim issuance rules (LDAP attribute → outgoing claim):")
-    print(f"    E-Mail-Addresses  → {args.email_claim}")
-    print(f"    Display-Name      → {args.name_claim}")
-    print(f"    Token-Groups      → {args.groups_claim}")
+    print("  필요한 claim issuance rules (template: Send LDAP Attributes as Claims):")
+    print(f"    E-Mail-Addresses                 → E-Mail Address")
+    print(f"    Display-Name                     → Name")
+    print(f"    Token-Groups - Unqualified Names → Group")
+    print()
+    print("  ⚠ LDAP attribute 는 반드시 'Token-Groups - Unqualified Names' 여야 합니다.")
+    print("    'Token-Groups' 또는 'as SIDs' 는 그룹명이 아니라 SID(S-1-5-21-...) 를")
+    print("    보내 그룹 파싱이 전부 실패합니다. outgoing 'Group' 의 URI")
+    print(f"    ({args.groups_claim}) 가 --groups-claim 기본값과 다르면 인자로 맞추세요.")
+    print("  ⚠ 사용자의 AD 그룹이 많으면 custom 속성 2048자 제한에 잘릴 수 있습니다 —")
+    print("    게이트웨이용 그룹만 보내도록 regex 필터 규칙(예: ^ssir_)을 권장합니다.")
     print()
     print("  ⚠ groups claim 은 AD 그룹명이 그대로 옵니다 — 대소문자가")
     print(f"    oidc.group_prefix({args.group_prefix!r})·admin_groups 와 정확히 일치해야 합니다.")
@@ -309,9 +331,9 @@ def cmd_teardown(args) -> int:
     print(f"    -target='module.cognito.aws_cognito_identity_provider.saml[\"{args.provider_name}\"]'")
     print()
     print("  ⚠ 수동 destroy 전까지 ./deploy apply 는 이 IdP 의 파괴 변경을 감지해")
-print("    범위 가드가 중단시킵니다 — 절차를 같은 창에 완료하세요.")
-print()
-print("  oidc.groups_claim/group_prefix/admin_groups 는 SAML 전용이 아니라")
+    print("    범위 가드가 중단시킵니다 — 절차를 같은 창에 완료하세요.")
+    print()
+    print("  oidc.groups_claim/group_prefix/admin_groups 는 SAML 전용이 아니라")
     print("  자동으로 되돌리지 않았습니다 — 필요하면 gateway.yaml 을 직접 편집하세요.")
     return 0
 
