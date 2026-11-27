@@ -81,11 +81,12 @@ def _config_state(cfg) -> dict:
         return {"configured": False}
     return {
         "configured": True,
-        "budget_type": cfg.budget_type.value,
-        "total_budget_usd": str(cfg.total_budget_usd) if cfg.total_budget_usd is not None else None,
-        "used_budget_usd": str(cfg.used_budget_usd),
-        "currency": cfg.currency,
+        "max_budget_usd": str(cfg.max_budget_usd) if cfg.max_budget_usd is not None else None,
         "period_type": cfg.period_type.value,
+        "policy": cfg.policy.value,
+        "default_user_cap_usd": (
+            str(cfg.default_user_cap_usd) if cfg.default_user_cap_usd is not None else None
+        ),
         "is_active": cfg.is_active,
     }
 

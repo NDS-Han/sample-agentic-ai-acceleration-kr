@@ -508,10 +508,6 @@
         "title": "AicmTokenListResponse",
         "type": "object"
       },
-<<<<<<< HEAD
-      "BudgetConfigDetailResponse": {
-        "description": "GET /{scope}/{scope_id} — 예산 설정 다이얼로그 prefill 용 현재 설정.\n\n다이얼로그가 금액만 바꿔 저장해도 policy/thresholds 가 프론트 기본값으로\n리셋되지 않으려면, 열 때 현재값을 미리 채워야 한다.\n\n- ``configured=False``: 활성 총액 config 없음 → 프론트는 기본값으로 시작.\n- ``alert_thresholds=None``: thresholds 의 유일한 저장소인 Redis 키가\n  만료/미스라 서버값을 모른다 → 프론트는 기본값을 **표시만** 하고,\n  관리자가 thresholds 를 건드리지 않으면 PUT 에서 생략해 보존한다.",
-=======
       "AllowedClientsBody": {
         "properties": {
           "clients": {
@@ -678,17 +674,8 @@
         "title": "AppGroupBudgetItem",
         "type": "object"
       },
-      "BudgetPolicy": {
-        "enum": [
-          "HARD_BLOCK",
-          "SOFT_WARNING",
-          "THROTTLE"
-        ],
-        "title": "BudgetPolicy",
-        "type": "string"
-      },
-      "BudgetSummaryItem": {
->>>>>>> nds/dev
+      "BudgetConfigDetailResponse": {
+        "description": "GET /{scope}/{scope_id} — 예산 설정 다이얼로그 prefill 용 현재 설정.\n\n다이얼로그가 금액만 바꿔 저장해도 policy/thresholds 가 프론트 기본값으로\n리셋되지 않으려면, 열 때 현재값을 미리 채워야 한다.\n\n- ``configured=False``: 활성 총액 config 없음 → 프론트는 기본값으로 시작.\n- ``alert_thresholds=None``: thresholds 의 유일한 저장소인 Redis 키가\n  만료/미스라 서버값을 모른다 → 프론트는 기본값을 **표시만** 하고,\n  관리자가 thresholds 를 건드리지 않으면 PUT 에서 생략해 보존한다.",
         "properties": {
           "alert_thresholds": {
             "anyOf": [
@@ -704,11 +691,96 @@
             ],
             "title": "Alert Thresholds"
           },
-<<<<<<< HEAD
           "configured": {
             "title": "Configured",
             "type": "boolean"
-=======
+          },
+          "default_cap_managed_by": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ManagedByInfo"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "default_user_cap_usd": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Default User Cap Usd"
+          },
+          "managed_by": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ManagedByInfo"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "max_budget_usd": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Budget Usd"
+          },
+          "policy": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BudgetPolicy"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "configured"
+        ],
+        "title": "BudgetConfigDetailResponse",
+        "type": "object"
+      },
+      "BudgetPolicy": {
+        "enum": [
+          "HARD_BLOCK",
+          "SOFT_WARNING",
+          "THROTTLE"
+        ],
+        "title": "BudgetPolicy",
+        "type": "string"
+      },
+      "BudgetSummaryItem": {
+        "properties": {
+          "alert_thresholds": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Alert Thresholds"
+          },
           "cap_source": {
             "anyOf": [
               {
@@ -729,7 +801,6 @@
                 "type": "null"
               }
             ]
->>>>>>> nds/dev
           },
           "default_user_cap_usd": {
             "anyOf": [
@@ -743,9 +814,6 @@
             ],
             "title": "Default User Cap Usd"
           },
-<<<<<<< HEAD
-          "max_budget_usd": {
-=======
           "department_id": {
             "anyOf": [
               {
@@ -796,7 +864,6 @@
             "type": "boolean"
           },
           "limit_usd": {
->>>>>>> nds/dev
             "anyOf": [
               {
                 "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
@@ -806,44 +873,17 @@
                 "type": "null"
               }
             ],
-<<<<<<< HEAD
-            "title": "Max Budget Usd"
-          },
-          "policy": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/BudgetPolicy"
-=======
             "title": "Limit Usd"
           },
           "managed_by": {
             "anyOf": [
               {
                 "$ref": "#/components/schemas/ManagedByInfo"
->>>>>>> nds/dev
               },
               {
                 "type": "null"
               }
             ]
-<<<<<<< HEAD
-          }
-        },
-        "required": [
-          "configured"
-        ],
-        "title": "BudgetConfigDetailResponse",
-        "type": "object"
-      },
-      "BudgetPolicy": {
-        "enum": [
-          "HARD_BLOCK",
-          "SOFT_WARNING",
-          "THROTTLE"
-        ],
-        "title": "BudgetPolicy",
-        "type": "string"
-=======
           },
           "remaining_usd": {
             "anyOf": [
@@ -936,7 +976,6 @@
         ],
         "title": "BudgetSummaryResponse",
         "type": "object"
->>>>>>> nds/dev
       },
       "HTTPValidationError": {
         "properties": {
@@ -951,8 +990,6 @@
         "title": "HTTPValidationError",
         "type": "object"
       },
-<<<<<<< HEAD
-=======
       "ManagedByInfo": {
         "description": "AICM managed-field metadata — additive, omitted entirely when absent.",
         "properties": {
@@ -1276,7 +1313,6 @@
         "title": "ModelResponse",
         "type": "object"
       },
->>>>>>> nds/dev
       "PaginationMeta": {
         "properties": {
           "cursor": {
@@ -1306,8 +1342,6 @@
         "title": "PaginationMeta",
         "type": "object"
       },
-<<<<<<< HEAD
-=======
       "ProviderEnum": {
         "enum": [
           "BEDROCK",
@@ -1605,7 +1639,6 @@
         "title": "ServiceTokenListResponse",
         "type": "object"
       },
->>>>>>> nds/dev
       "SetBudgetRequest": {
         "properties": {
           "alert_thresholds": {
@@ -1631,11 +1664,7 @@
           "default_user_cap_usd": {
             "anyOf": [
               {
-<<<<<<< HEAD
-                "maximum": 99999999.99,
-=======
                 "maximum": 99999999.9999,
->>>>>>> nds/dev
                 "minimum": 0.0,
                 "type": "number"
               },
@@ -1652,11 +1681,7 @@
           "max_budget_usd": {
             "anyOf": [
               {
-<<<<<<< HEAD
-                "maximum": 99999999.99,
-=======
                 "maximum": 99999999.9999,
->>>>>>> nds/dev
                 "minimum": 0.0,
                 "type": "number"
               },
@@ -1678,7 +1703,6 @@
         "title": "SetBudgetRequest",
         "type": "object"
       },
-<<<<<<< HEAD
       "SetDefaultCapRequest": {
         "description": "PUT /team/{id}/default-cap — 팀 기본 유저 cap D 만 변경.\n\nvalue=null → D 해제(미설정 유저는 팀 한도만 적용), 0 → 미설정 유저 차단.",
         "properties": {
@@ -1690,12 +1714,24 @@
           "value": {
             "anyOf": [
               {
-                "maximum": 99999999.99,
+                "maximum": 99999999.9999,
                 "minimum": 0.0,
                 "type": "number"
               },
               {
-=======
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Value"
+          }
+        },
+        "title": "SetDefaultCapRequest",
+        "type": "object"
+      },
       "TeamUserBudgetSummaryPage": {
         "properties": {
           "has_more": {
@@ -1755,7 +1791,6 @@
           "ws_cost_usd": {
             "anyOf": [
               {
->>>>>>> nds/dev
                 "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
                 "type": "string"
               },
@@ -1763,12 +1798,6 @@
                 "type": "null"
               }
             ],
-<<<<<<< HEAD
-            "title": "Value"
-          }
-        },
-        "title": "SetDefaultCapRequest",
-=======
             "title": "Ws Cost Usd"
           },
           "ws_queries": {
@@ -1888,7 +1917,6 @@
           "app_groups"
         ],
         "title": "UserAppGroupBudgetsResponse",
->>>>>>> nds/dev
         "type": "object"
       },
       "UserListResponse": {
@@ -2051,12 +2079,6 @@
   },
   "openapi": "3.1.0",
   "paths": {
-<<<<<<< HEAD
-    "/aicm/v1/budgets/team/{team_id}": {
-      "delete": {
-        "description": "Idempotency-Key 헤더 필수(1–128자). 같은 키+같은 요청 → 저장된 응답 재생.",
-        "operationId": "delete_team_budget_aicm_v1_budgets_team__team_id__delete",
-=======
     "/aicm/v1/admin/budgets/spent": {
       "put": {
         "description": "Batch-inject absolute spent (USD) per scope for migration burn-rate continuation.\n\nOverwrites used_usd in DB + Redis. Idempotent. Per-item partial failure reported.",
@@ -2192,7 +2214,6 @@
       "get": {
         "description": "팀 멤버 USER summary single-page 조회 — AICM 은 limit=10000 으로 한 페이지를 요청한다.",
         "operationId": "aicm_get_team_user_budget_summary",
->>>>>>> nds/dev
         "parameters": [
           {
             "in": "path",
@@ -2205,70 +2226,6 @@
             }
           },
           {
-<<<<<<< HEAD
-            "in": "query",
-            "name": "confirm",
-            "required": false,
-            "schema": {
-              "default": false,
-              "title": "Confirm",
-              "type": "boolean"
-            }
-          },
-          {
-            "description": "같은 키+같은 요청 → 저장된 응답 재생(Idempotent-Replayed: true). 다른 요청 → 422 idempotency_key_reused. 보존 7일.",
-            "in": "header",
-            "name": "Idempotency-Key",
-            "required": true,
-            "schema": {
-              "maxLength": 128,
-              "minLength": 1,
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "security": [
-          {
-            "integrationToken": []
-          }
-        ],
-        "summary": "Delete Team Budget",
-        "tags": [
-          "AICM Integration"
-        ]
-      },
-      "get": {
-        "operationId": "get_team_budget_aicm_v1_budgets_team__team_id__get",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "team_id",
-            "required": true,
-            "schema": {
-              "format": "uuid",
-              "title": "Team Id",
-              "type": "string"
-=======
             "description": "YYYY-MM",
             "in": "query",
             "name": "period",
@@ -2300,7 +2257,6 @@
               "minimum": 0,
               "title": "Offset",
               "type": "integer"
->>>>>>> nds/dev
             }
           }
         ],
@@ -2309,11 +2265,7 @@
             "content": {
               "application/json": {
                 "schema": {
-<<<<<<< HEAD
-                  "$ref": "#/components/schemas/BudgetConfigDetailResponse"
-=======
                   "$ref": "#/components/schemas/TeamUserBudgetSummaryPage"
->>>>>>> nds/dev
                 }
               }
             },
@@ -2332,19 +2284,6 @@
         },
         "security": [
           {
-<<<<<<< HEAD
-            "integrationToken": []
-          }
-        ],
-        "summary": "Get Team Budget",
-        "tags": [
-          "AICM Integration"
-        ]
-      },
-      "put": {
-        "description": "Idempotency-Key 헤더 필수(1–128자). 같은 키+같은 요청 → 저장된 응답 재생.",
-        "operationId": "set_team_budget_aicm_v1_budgets_team__team_id__put",
-=======
             "integrationTokenSvc": []
           }
         ],
@@ -2358,7 +2297,6 @@
     "/aicm/v1/admin/budgets/team/{team_id}": {
       "put": {
         "operationId": "aicm_set_team_budget",
->>>>>>> nds/dev
         "parameters": [
           {
             "in": "path",
@@ -2369,20 +2307,6 @@
               "title": "Team Id",
               "type": "string"
             }
-<<<<<<< HEAD
-          },
-          {
-            "description": "같은 키+같은 요청 → 저장된 응답 재생(Idempotent-Replayed: true). 다른 요청 → 422 idempotency_key_reused. 보존 7일.",
-            "in": "header",
-            "name": "Idempotency-Key",
-            "required": true,
-            "schema": {
-              "maxLength": 128,
-              "minLength": 1,
-              "type": "string"
-            }
-=======
->>>>>>> nds/dev
           }
         ],
         "requestBody": {
@@ -2417,162 +2341,6 @@
         },
         "security": [
           {
-<<<<<<< HEAD
-            "integrationToken": []
-          }
-        ],
-        "summary": "Set Team Budget",
-        "tags": [
-          "AICM Integration"
-        ]
-      }
-    },
-    "/aicm/v1/budgets/team/{team_id}/default-cap": {
-      "put": {
-        "description": "Idempotency-Key 헤더 필수(1–128자). 같은 키+같은 요청 → 저장된 응답 재생.",
-        "operationId": "set_team_default_cap_aicm_v1_budgets_team__team_id__default_cap_put",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "team_id",
-            "required": true,
-            "schema": {
-              "format": "uuid",
-              "title": "Team Id",
-              "type": "string"
-            }
-          },
-          {
-            "description": "같은 키+같은 요청 → 저장된 응답 재생(Idempotent-Replayed: true). 다른 요청 → 422 idempotency_key_reused. 보존 7일.",
-            "in": "header",
-            "name": "Idempotency-Key",
-            "required": true,
-            "schema": {
-              "maxLength": 128,
-              "minLength": 1,
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/SetDefaultCapRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "security": [
-          {
-            "integrationToken": []
-          }
-        ],
-        "summary": "Set Team Default Cap",
-        "tags": [
-          "AICM Integration"
-        ]
-      }
-    },
-    "/aicm/v1/budgets/user/{user_id}": {
-      "delete": {
-        "description": "Idempotency-Key 헤더 필수(1–128자). 같은 키+같은 요청 → 저장된 응답 재생.",
-        "operationId": "delete_user_budget_aicm_v1_budgets_user__user_id__delete",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "user_id",
-            "required": true,
-            "schema": {
-              "format": "uuid",
-              "title": "User Id",
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "confirm",
-            "required": false,
-            "schema": {
-              "default": false,
-              "title": "Confirm",
-              "type": "boolean"
-            }
-          },
-          {
-            "description": "같은 키+같은 요청 → 저장된 응답 재생(Idempotent-Replayed: true). 다른 요청 → 422 idempotency_key_reused. 보존 7일.",
-            "in": "header",
-            "name": "Idempotency-Key",
-            "required": true,
-            "schema": {
-              "maxLength": 128,
-              "minLength": 1,
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "security": [
-          {
-            "integrationToken": []
-          }
-        ],
-        "summary": "Delete User Budget",
-        "tags": [
-          "AICM Integration"
-        ]
-      },
-      "get": {
-        "operationId": "get_user_budget_aicm_v1_budgets_user__user_id__get",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "user_id",
-            "required": true,
-            "schema": {
-              "format": "uuid",
-              "title": "User Id",
-=======
             "integrationTokenSvc": []
           }
         ],
@@ -2596,7 +2364,6 @@
             "schema": {
               "description": "YYYY-MM",
               "title": "Period",
->>>>>>> nds/dev
               "type": "string"
             }
           }
@@ -2606,11 +2373,7 @@
             "content": {
               "application/json": {
                 "schema": {
-<<<<<<< HEAD
-                  "$ref": "#/components/schemas/BudgetConfigDetailResponse"
-=======
                   "$ref": "#/components/schemas/UsageByAppResponse"
->>>>>>> nds/dev
                 }
               }
             },
@@ -2629,19 +2392,6 @@
         },
         "security": [
           {
-<<<<<<< HEAD
-            "integrationToken": []
-          }
-        ],
-        "summary": "Get User Budget",
-        "tags": [
-          "AICM Integration"
-        ]
-      },
-      "put": {
-        "description": "Idempotency-Key 헤더 필수(1–128자). 같은 키+같은 요청 → 저장된 응답 재생.",
-        "operationId": "set_user_budget_aicm_v1_budgets_user__user_id__put",
-=======
             "integrationTokenSvc": []
           }
         ],
@@ -2655,7 +2405,6 @@
     "/aicm/v1/admin/budgets/user/{user_id}": {
       "put": {
         "operationId": "aicm_set_user_budget",
->>>>>>> nds/dev
         "parameters": [
           {
             "in": "path",
@@ -2666,20 +2415,6 @@
               "title": "User Id",
               "type": "string"
             }
-<<<<<<< HEAD
-          },
-          {
-            "description": "같은 키+같은 요청 → 저장된 응답 재생(Idempotent-Replayed: true). 다른 요청 → 422 idempotency_key_reused. 보존 7일.",
-            "in": "header",
-            "name": "Idempotency-Key",
-            "required": true,
-            "schema": {
-              "maxLength": 128,
-              "minLength": 1,
-              "type": "string"
-            }
-=======
->>>>>>> nds/dev
           }
         ],
         "requestBody": {
@@ -2714,14 +2449,6 @@
         },
         "security": [
           {
-<<<<<<< HEAD
-            "integrationToken": []
-          }
-        ],
-        "summary": "Set User Budget",
-        "tags": [
-          "AICM Integration"
-=======
             "integrationTokenSvc": []
           }
         ],
@@ -3691,7 +3418,434 @@
         "tags": [
           "AICM Admin Mirror",
           "AICM Admin Mirror"
->>>>>>> nds/dev
+        ]
+      }
+    },
+    "/aicm/v1/budgets/team/{team_id}": {
+      "delete": {
+        "description": "Idempotency-Key 헤더 필수(1–128자). 같은 키+같은 요청 → 저장된 응답 재생.",
+        "operationId": "delete_team_budget_aicm_v1_budgets_team__team_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "team_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Team Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "confirm",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Confirm",
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "같은 키+같은 요청 → 저장된 응답 재생(Idempotent-Replayed: true). 다른 요청 → 422 idempotency_key_reused. 보존 7일.",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "integrationTokenLegacy": []
+          }
+        ],
+        "summary": "Delete Team Budget",
+        "tags": [
+          "AICM Integration"
+        ]
+      },
+      "get": {
+        "operationId": "get_team_budget_aicm_v1_budgets_team__team_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "team_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Team Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BudgetConfigDetailResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "integrationTokenLegacy": []
+          }
+        ],
+        "summary": "Get Team Budget",
+        "tags": [
+          "AICM Integration"
+        ]
+      },
+      "put": {
+        "description": "Idempotency-Key 헤더 필수(1–128자). 같은 키+같은 요청 → 저장된 응답 재생.",
+        "operationId": "set_team_budget_aicm_v1_budgets_team__team_id__put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "team_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Team Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "같은 키+같은 요청 → 저장된 응답 재생(Idempotent-Replayed: true). 다른 요청 → 422 idempotency_key_reused. 보존 7일.",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetBudgetRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "integrationTokenLegacy": []
+          }
+        ],
+        "summary": "Set Team Budget",
+        "tags": [
+          "AICM Integration"
+        ]
+      }
+    },
+    "/aicm/v1/budgets/team/{team_id}/default-cap": {
+      "put": {
+        "description": "Idempotency-Key 헤더 필수(1–128자). 같은 키+같은 요청 → 저장된 응답 재생.",
+        "operationId": "set_team_default_cap_aicm_v1_budgets_team__team_id__default_cap_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "team_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Team Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "같은 키+같은 요청 → 저장된 응답 재생(Idempotent-Replayed: true). 다른 요청 → 422 idempotency_key_reused. 보존 7일.",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetDefaultCapRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "integrationTokenLegacy": []
+          }
+        ],
+        "summary": "Set Team Default Cap",
+        "tags": [
+          "AICM Integration"
+        ]
+      }
+    },
+    "/aicm/v1/budgets/user/{user_id}": {
+      "delete": {
+        "description": "Idempotency-Key 헤더 필수(1–128자). 같은 키+같은 요청 → 저장된 응답 재생.",
+        "operationId": "delete_user_budget_aicm_v1_budgets_user__user_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "User Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "confirm",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Confirm",
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "같은 키+같은 요청 → 저장된 응답 재생(Idempotent-Replayed: true). 다른 요청 → 422 idempotency_key_reused. 보존 7일.",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "integrationTokenLegacy": []
+          }
+        ],
+        "summary": "Delete User Budget",
+        "tags": [
+          "AICM Integration"
+        ]
+      },
+      "get": {
+        "operationId": "get_user_budget_aicm_v1_budgets_user__user_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "User Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BudgetConfigDetailResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "integrationTokenLegacy": []
+          }
+        ],
+        "summary": "Get User Budget",
+        "tags": [
+          "AICM Integration"
+        ]
+      },
+      "put": {
+        "description": "Idempotency-Key 헤더 필수(1–128자). 같은 키+같은 요청 → 저장된 응답 재생.",
+        "operationId": "set_user_budget_aicm_v1_budgets_user__user_id__put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "User Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "같은 키+같은 요청 → 저장된 응답 재생(Idempotent-Replayed: true). 다른 요청 → 422 idempotency_key_reused. 보존 7일.",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetBudgetRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "integrationTokenLegacy": []
+          }
+        ],
+        "summary": "Set User Budget",
+        "tags": [
+          "AICM Integration"
         ]
       }
     },
@@ -3848,7 +4002,7 @@
         },
         "security": [
           {
-            "integrationToken": []
+            "integrationTokenLegacy": []
           }
         ],
         "summary": "Lookup User By Email",
@@ -3965,7 +4119,7 @@
         },
         "security": [
           {
-            "integrationToken": []
+            "integrationTokenLegacy": []
           }
         ],
         "summary": "Sync Cognito User",
@@ -4023,7 +4177,7 @@
         },
         "security": [
           {
-            "integrationToken": []
+            "integrationTokenLegacy": []
           }
         ],
         "summary": "Clear User Allowed Clients",
@@ -4067,7 +4221,7 @@
         },
         "security": [
           {
-            "integrationToken": []
+            "integrationTokenLegacy": []
           }
         ],
         "summary": "Get User Allowed Clients",
@@ -4133,7 +4287,7 @@
         },
         "security": [
           {
-            "integrationToken": []
+            "integrationTokenLegacy": []
           }
         ],
         "summary": "Set User Allowed Clients",

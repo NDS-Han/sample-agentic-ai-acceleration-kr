@@ -89,11 +89,7 @@ def test_flag_on_routes_commit_before_response(monkeypatch):
 
     app = _app(monkeypatch, True)
     aicm = [r for r in app.routes if isinstance(r, APIRoute) and r.path.startswith("/aicm/v1")]
-<<<<<<< HEAD
-    assert len(aicm) == 17
-=======
-    assert len(aicm) == 30  # legacy 5 + admin mirror 25 unique method+path routes
->>>>>>> nds/dev
+    assert len(aicm) == 42  # legacy/p0a2 17 + admin mirror 25 unique method+path routes
     assert all(isinstance(r, CommittingRoute) for r in aicm)
 
 

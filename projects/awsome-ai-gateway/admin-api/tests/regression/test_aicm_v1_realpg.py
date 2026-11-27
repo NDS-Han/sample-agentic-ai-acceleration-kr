@@ -1105,7 +1105,6 @@ async def test_idempotency_rows_expire(env):
     assert not await _q(sm, "SELECT 1 FROM auth.integration_idempotency_keys WHERE idem_key='old-1'")
 
 
-<<<<<<< HEAD
 # ── phase 0a2: lookup / sync / policy / budget limits ───────────────────────
 
 
@@ -1300,7 +1299,7 @@ async def test_user_budget_and_policy_refuse_admin_service_and_system_targets(en
             assert r.status_code == 403, (path, r.text)
             assert r.json()["error"]["code"] == code
         assert len(await _q(sm, "SELECT 1 FROM audit.audit_logs WHERE action='AICM_TARGET_REFUSED' AND resource_id=:r", r=str(uid))) >= 2
-=======
+
 
 # ── option A admin mirror: scoped svc- 실 DB 검증 ────────────────────────────
 
@@ -2146,4 +2145,3 @@ async def test_managed_lock_flag_off_no_get_key_no_409_but_records(env, monkeypa
     assert getr.status_code == 200 and "managed_by" not in getr.json()
     r = await c.put(f"/admin/budgets/user/{uid}", json={"max_budget_usd": "11", "confirm": True}, headers=HUMAN)
     assert r.status_code == 200, r.text
->>>>>>> nds/dev
