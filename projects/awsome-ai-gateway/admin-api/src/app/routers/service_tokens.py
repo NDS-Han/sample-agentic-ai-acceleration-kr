@@ -37,7 +37,14 @@ async def issue_service_token(
     if body.scopes:
         # AICM scoped integration 토큰 — legacy /aicm/v1 bootstrap 의 이전 경로.
         # scopes 없이 cidrs/rate_limit 만 오는 조합은 422 (아래에서 검증).
+        from app.core.config import get_settings
         from app.services.integration_token_service import IntegrationTokenService
+
+        if not get_settings().AICM_API_ENABLED:
+            raise ForbiddenError(
+                "AICM scoped service-token issuance is disabled "
+                "(AICM_API_ENABLED=false)"
+            )
 
         isvc = IntegrationTokenService(request.app.state.service_token_service)
         iresp, scopes, cidrs = await isvc.issue(

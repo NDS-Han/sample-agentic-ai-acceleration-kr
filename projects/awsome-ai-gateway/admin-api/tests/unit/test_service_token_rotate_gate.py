@@ -288,3 +288,69 @@ async def test_lineage_rate_limit_ignores_ancestors_out_of_grace():
     resp = await _rotate(repo, leaf.id)
     assert resp.token.startswith("svc-")
     repo.set_revoked_at.assert_awaited_once()
+
+
+async def test_explicit_empty_scopes_is_422_before_any_token_or_grant_write(harness):
+    client, svc, audit, _ = harness
+    resp = await client.post(
+        "/admin/service-tokens",
+        json={"name": "aicm", "scopes": []},
+        headers=_h("admin-jwt"),
+    )
+    assert resp.status_code == 422, resp.text
+    assert resp.json()["error"]["type"] == "validation_error"
+    svc.issue.assert_not_awaited()
+    audit.assert_not_awaited()
+
+
+async def test_scoped_issue_rejected_before_writes_when_aicm_disabled(harness, monkeypatch):
+    from app.core.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "AICM_API_ENABLED", False)
+    client, svc, audit, _ = harness
+    resp = await client.post(
+        "/admin/service-tokens",
+        json={"name": "aicm", "scopes": ["users:read"]},
+        headers=_h("admin-jwt"),
+    )
+    assert resp.status_code == 403, resp.text
+    svc.issue.assert_not_awaited()
+    audit.assert_not_awaited()
+
+
+async def test_scoped_issue_enabled_uses_integration_service(harness, monkeypatch):
+    from app.core.config import get_settings
+    from app.services.integration_token_service import IntegrationTokenService
+
+    monkeypatch.setattr(get_settings(), "AICM_API_ENABLED", True)
+    issue = AsyncMock(return_value=(_new_resp(), ["users:read"], None))
+    monkeypatch.setattr(IntegrationTokenService, "issue", issue)
+    client, svc, audit, _ = harness
+    resp = await client.post(
+        "/admin/service-tokens",
+        json={"name": "aicm", "scopes": ["users:read"]},
+        headers=_h("admin-jwt"),
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["integration"] == "aicm"
+    assert resp.json()["scopes"] == ["users:read"]
+    assert issue.await_args.kwargs["scopes"] == ["users:read"]
+    svc.issue.assert_not_awaited()
+    assert audit.await_args.kwargs["changes"]["after"]["scopes"] == ["users:read"]
+
+
+async def test_ordinary_issue_and_rotation_contract_unchanged_when_aicm_disabled(harness, monkeypatch):
+    from app.core.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "AICM_API_ENABLED", False)
+    client, svc, audit, _ = harness
+    resp = await client.post(
+        "/admin/service-tokens", json={"name": "batch"}, headers=_h("admin-jwt")
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json().get("integration") is None
+    svc.issue.assert_awaited_once()
+
+    rotate = await client.post("/admin/service-tokens/rotate", headers=_h(SVC_RAW))
+    assert rotate.status_code == 200, rotate.text
+    svc.rotate.assert_awaited_once()

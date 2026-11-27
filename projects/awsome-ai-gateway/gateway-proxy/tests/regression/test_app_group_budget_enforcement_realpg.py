@@ -71,16 +71,16 @@ async def _insert_app(session, user_id, amount, client="claude-code"):
     )
 
 
-async def _insert_group(session, user_id, amount, group="claude-code"):
+async def _insert_group(session, user_id, amount, group="claude-code", policy="HARD_BLOCK"):
     from sqlalchemy import text
 
     await session.execute(
         text(
             "INSERT INTO budget.user_app_group_budgets "
             "(user_id, app_group, max_budget_usd, policy, allocated_by) "
-            "VALUES (:uid, :group, :amount, 'HARD_BLOCK', :uid)"
+            "VALUES (:uid, :group, :amount, :policy, :uid)"
         ),
-        {"uid": user_id, "group": group, "amount": amount},
+        {"uid": user_id, "group": group, "amount": amount, "policy": policy},
     )
 
 
@@ -92,12 +92,16 @@ async def _new_user(session, *, total=True):
     return uid
 
 
-async def _hydrated_limit(service, session, uid, client="claude-code"):
+async def _hydrated_config(service, session, uid, client="claude-code"):
     redis = _Redis()
     await service._hydrate_client_config_cache(redis, session, uid, client)
     key = f"budget:config:user:{{{uid}}}:{client}"
     assert key in redis.data, f"{client} 유효 정책 키가 재수화되지 않았다"
-    return json.loads(redis.data[key])["limit_usd"]
+    return json.loads(redis.data[key])
+
+
+async def _hydrated_limit(service, session, uid, client="claude-code"):
+    return (await _hydrated_config(service, session, uid, client))["limit_usd"]
 
 
 @pytest.mark.asyncio
@@ -118,6 +122,10 @@ async def test_real_postgres_min_resolution_orders_one_sided_zero_and_delete():
             await _insert_app(session, uid, 10)
             await _insert_group(session, uid, 5)
             cases.append((uid, "5.0000", "app 먼저 → group 더 낮음"))
+
+            mixed_uid = await _new_user(session)
+            await _insert_app(session, mixed_uid, 10)
+            await _insert_group(session, mixed_uid, 5, policy="THROTTLE")
 
             uid = await _new_user(session)
             await _insert_group(session, uid, 5)
@@ -146,6 +154,12 @@ async def test_real_postgres_min_resolution_orders_one_sided_zero_and_delete():
             for uid, expected, label in cases:
                 got = await _hydrated_limit(service, session, uid)
                 assert got == expected, f"{label}: got {got}, want {expected}"
+
+            mixed = await _hydrated_config(service, session, mixed_uid)
+            layers = {row["source"]: row for row in mixed["layers"]}
+            assert layers["app"]["policy"] == "hard_block"
+            assert layers["group"]["policy"] == "throttle"
+            assert mixed["limit_usd"] == "10.0000"  # 구버전 소비자용 hard 보수 폴백
 
             # DELETE 는 group 제약만 제거한다 — 독립 per-app cap 이 다시 적용된다.
             uid = await _new_user(session)
@@ -194,5 +208,43 @@ async def test_parent_app_clients_gate_includes_group_only_and_excludes_legacy_n
             await service.ensure_config_cached(redis, session, legacy_uid)
             data = json.loads(redis.data[f"budget:config:user:{{{legacy_uid}}}"])
             assert data["app_clients"] == []
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_db_fallback_preserves_soft_block_erased_by_lower_throttle_shape():
+    """REDIS_DEGRADED 폴백도 mixed rows 를 각각 평가한다 — soft cap 이 hard 보다 먼저다."""
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app.services.budget_service import BudgetService
+
+    engine = create_async_engine(PROOF_DSN)
+    service = BudgetService()
+    try:
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with factory() as session:
+            uid = await _new_user(session, total=False)
+            team_id = str(uuid.uuid4())
+            await session.execute(text(
+                "INSERT INTO budget.budget_configs "
+                "(scope, scope_id, client, max_budget_usd, policy, allocated_by, "
+                "effective_from, is_active) "
+                "VALUES ('TEAM', :tid, NULL, 100, 'HARD_BLOCK', :uid, DATE '2020-01-01', true)"
+            ), {"tid": team_id, "uid": uid})
+            await _insert_app(session, uid, 10)
+            await _insert_group(session, uid, 5, policy="SOFT_WARNING")
+            await session.execute(text(
+                "INSERT INTO budget.budget_usages "
+                "(id, scope, scope_id, client, period, used_usd, limit_usd) "
+                "VALUES (:id, 'USER', :uid, 'claude-code', '2026-10', 5.5, 10)"
+            ), {"id": str(uuid.uuid4()), "uid": uid})
+            await session.flush()
+            with pytest.raises(PermissionError) as excinfo:
+                await service._check_budget_db(
+                    session, uid, team_id, "2026-10", client="claude-code"
+                )
+            assert str(excinfo.value) == "client_soft_limit_exceeded"
     finally:
         await engine.dispose()
