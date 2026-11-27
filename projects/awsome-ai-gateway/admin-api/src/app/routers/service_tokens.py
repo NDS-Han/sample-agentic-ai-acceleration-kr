@@ -24,7 +24,7 @@ from app.schemas.service_tokens import (
 router = APIRouter(prefix="/admin/service-tokens", tags=["Service Token Management"])
 
 
-@router.post("", response_model=ServiceTokenCreateResponse)
+@router.post("", response_model=ServiceTokenCreateResponse, response_model_exclude_unset=True)
 async def issue_service_token(
     request: Request,
     body: ServiceTokenCreateRequest,
@@ -100,7 +100,7 @@ async def list_service_tokens(
     return await svc.list_tokens(session)
 
 
-@router.post("/rotate", response_model=ServiceTokenCreateResponse)
+@router.post("/rotate", response_model=ServiceTokenCreateResponse, response_model_exclude_unset=True)
 async def rotate_service_token(
     request: Request,
     admin: CurrentUser = Depends(require_service_token_self),

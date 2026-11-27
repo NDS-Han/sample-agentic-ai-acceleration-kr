@@ -177,6 +177,57 @@ bash 04-verify.sh                       # DB 상태 + 비용 기록까지
 
 ---
 
+## 3-1단계 — app-group 예산 롤아웃 뒤 Redis 설정 캐시 무효화 (해당 릴리스 1회)
+
+이 절은 **per-app/app-group 예산을 계층(`layers`)으로 집행하는 gateway-proxy 릴리스를 처음 올릴 때만** 필요하다. 이미 그 릴리스로 운영 중이면 건너뛴다.
+
+이전 gateway writer 가 써 둔 `budget:config:user:{<user-id>}:<client>` 값은 구형 단일 정책 합성일 수 있다. 예를 들어 per-app `$10 HARD_BLOCK` 과 app-group `$5 THROTTLE` 이 있을 때 구형 캐시가 `$5 THROTTLE` 하나만 들고 있으면, 새 Lua 도 그 캐시를 단일 정책으로 읽어 `$10` hard cap 을 놓친다. 이 설정 키의 기존 TTL 은 **숫자 300초**라 자연 만료되지만, 그 5분 동안 잘못된 판정이 계속될 수 있으므로 롤아웃 직후 즉시 지운다. 지워도 사용량·예약은 지워지지 않고, 다음 요청이 DB 에서 정책을 다시 읽어 같은 키를 `ex=300` 으로 재수화한다.
+
+먼저 새 gateway-proxy 만 남았는지 본다. `rollout status` 와 pod 이미지가 모두 새 태그여야 하고, 종료 중인 구 pod 도 없어야 한다(구 writer 가 살아 있으면 삭제 직후 구형 값을 다시 쓸 수 있다).
+
+```bash
+kubectl -n llm-gateway rollout status deployment/llm-gateway-gateway-proxy
+kubectl -n llm-gateway get pods \
+  -l app.kubernetes.io/component=gateway-proxy \
+  -o custom-columns='NAME:.metadata.name,IMAGE:.spec.containers[0].image,PHASE:.status.phase,DELETING:.metadata.deletionTimestamp'
+```
+
+무효화 대상은 정확히 이 두 형태뿐이다. `<user-id>` 는 UUID 다.
+
+```text
+budget:config:user:{<user-id>}:claude-code
+budget:config:user:{<user-id>}:cowork
+```
+
+다음은 대상이 **아니다** — spend/사용량 카운터(`budget:user:...`), 예약(`budget:pending*`, `budget:resvsum*`), 음성 캐시 표지(`...:<client>:none`), 사용자/팀 총예산 설정, `codex` 등 다른 client. **`FLUSHDB`/`FLUSHALL` 은 절대 쓰지 않는다.**
+
+`23-invalidate-app-budget-config-cache.py` 는 기본이 dry-run 이다. PostgreSQL readiness 를 먼저 검사한다(`budget.budget_configs` 와 `budget.user_app_group_budgets` 를 실제로 SELECT — 테이블이 없거나 DB 가 읽히지 않으면 아무 Redis 키도 지우지 않고 종료). Redis 는 `REDIS_CLUSTER_MODE`/`INFO` 로 판별해 **cluster mode 면 모든 primary 를 순회하고 standalone 이면 그 한 대만** SCAN 한다. SCAN 은 `COUNT 200` 의 bounded batch 로 하고, glob 이 가져온 후보를 다시 exact-key 정규식으로 검증하므로 spend·reservation·다른 client 키는 선택되지 않는다. dry-run 출력에는 후보 수, exact 선택 수, 샘플 키, PTTL min/max(기존 숫자 TTL 확인)가 나온다.
+
+admin-api pod 안에서 실행하면 Redis/DB 접속값과 Python 의존성이 이미 있다. 값은 환경변수로만 읽고 출력하지 않는다.
+
+```bash
+cd ~/awsome-ai-gateway/docs/us-llm-gateway/update-scripts
+ADMIN_POD=$(kubectl -n llm-gateway get pod \
+  -l app.kubernetes.io/component=admin-api \
+  -o jsonpath='{.items[0].metadata.name}')
+
+# 1) dry-run — 삭제 없음. exact 선택 수와 PTTL, invalid_shape=0을 확인
+kubectl -n llm-gateway exec -i "$ADMIN_POD" -- \
+  python - --dry-run < 23-invalidate-app-budget-config-cache.py
+```
+
+출력의 `selected` 가 예상보다 많거나 `invalid_shape` 가 있으면 멈추고 조사한다. `pttl_min_ms`/`pttl_max_ms` 가 양수인지(기존 숫자 TTL)와 `persistent_or_missing_in_batch=0` 인지도 함께 확인한다. 정상이면 바로 적용한다. `--apply` 도 같은 exact 검증을 거친 키만 한 개씩 DEL 하므로 cluster 에서 multi-key CROSSSLOT 을 만들지 않는다.
+
+```bash
+# 2) apply — exact key 만 삭제
+kubectl -n llm-gateway exec -i "$ADMIN_POD" -- \
+  python - --apply < 23-invalidate-app-budget-config-cache.py
+```
+
+적용 후에는 사용량 키와 예약 키가 그대로인지(삭제 수가 `selected` 와 같은지만이 아니라 dry-run 의 대상 shape 인지만) 확인한다. 다음 추론 요청이 오면 gateway 가 DB 에서 per-app/app-group 정책을 다시 읽어 `layers` 를 포함한 설정 키를 300초 TTL 로 다시 만든다. 캐시를 미리 채우려고 같은 키를 손으로 SET 하지 말 것 — 재수화는 gateway 의 일반 경로에 맡긴다.
+
+---
+
 ## 4단계 — 안 되면 되돌린다
 
 ```bash

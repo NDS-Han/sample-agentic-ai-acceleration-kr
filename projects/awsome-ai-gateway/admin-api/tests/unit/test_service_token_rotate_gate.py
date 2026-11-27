@@ -328,12 +328,14 @@ async def test_scoped_issue_enabled_uses_integration_service(harness, monkeypatc
     client, svc, audit, _ = harness
     resp = await client.post(
         "/admin/service-tokens",
-        json={"name": "aicm", "scopes": ["users:read"]},
+        json={"name": "aicm", "scopes": ["users:read"], "allowed_cidrs": None},
         headers=_h("admin-jwt"),
     )
     assert resp.status_code == 200, resp.text
-    assert resp.json()["integration"] == "aicm"
-    assert resp.json()["scopes"] == ["users:read"]
+    body = resp.json()
+    assert body["integration"] == "aicm"
+    assert body["scopes"] == ["users:read"]
+    assert "allowed_cidrs" in body and body["allowed_cidrs"] is None
     assert issue.await_args.kwargs["scopes"] == ["users:read"]
     svc.issue.assert_not_awaited()
     assert audit.await_args.kwargs["changes"]["after"]["scopes"] == ["users:read"]
@@ -344,13 +346,15 @@ async def test_ordinary_issue_and_rotation_contract_unchanged_when_aicm_disabled
 
     monkeypatch.setattr(get_settings(), "AICM_API_ENABLED", False)
     client, svc, audit, _ = harness
+    ordinary_keys = {"id", "name", "token_prefix", "created_at", "expires_at", "token"}
     resp = await client.post(
         "/admin/service-tokens", json={"name": "batch"}, headers=_h("admin-jwt")
     )
     assert resp.status_code == 200, resp.text
-    assert resp.json().get("integration") is None
+    assert set(resp.json()) == ordinary_keys
     svc.issue.assert_awaited_once()
 
     rotate = await client.post("/admin/service-tokens/rotate", headers=_h(SVC_RAW))
     assert rotate.status_code == 200, rotate.text
+    assert set(rotate.json()) == ordinary_keys
     svc.rotate.assert_awaited_once()

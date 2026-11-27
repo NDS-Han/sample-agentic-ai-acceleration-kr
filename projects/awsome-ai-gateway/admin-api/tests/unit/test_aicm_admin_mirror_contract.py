@@ -70,8 +70,14 @@ def test_mirror_reuses_admin_endpoint_and_response_metadata(monkeypatch):
         assert mr.endpoint is ar.endpoint
         assert mr.response_model == ar.response_model
         assert mr.status_code == ar.status_code
+        assert mr.response_model_exclude_unset == ar.response_model_exclude_unset
+        assert mr.response_model_exclude_defaults == ar.response_model_exclude_defaults
+        assert mr.response_model_exclude_none == ar.response_model_exclude_none
         # mirror 의 dependency 가 원래 route dependency 이상이다(통합 scope + 선택적 target guard).
         assert len(mr.dependencies) >= len(ar.dependencies)
+
+    rotate = mirror[("POST", "/aicm/v1/admin/service-tokens/rotate")]
+    assert rotate.response_model_exclude_unset is True
 
 
 @pytest.fixture
