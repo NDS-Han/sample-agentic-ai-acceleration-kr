@@ -182,6 +182,32 @@ resource "awscc_cognito_managed_login_branding" "this" {
 }
 
 # ------------------------------------------------------------------------------
+# SAML Identity Providers (ADFS 연동)
+# ------------------------------------------------------------------------------
+# 수동 등록 IdP adopt: 콘솔에서 이미 만들어진 IdP 가 있으면 apply 가
+# "already exists" 로 실패한다 — 먼저 state 로 편입한다:
+#   terraform import 'module.cognito.aws_cognito_identity_provider.saml["<이름>"]' \
+#     <user_pool_id>/<이름>
+# attribute_mapping 의 custom:groups 는 AD 그룹 → 팀/역할 해석 소스다.
+# ADFS 시기엔 이 경로로 그룹이 들어오고, AICM 이 배포되어 풀 그룹 멤버십이
+# 권위가 되면 이 매핑 한 줄을 지워 cutover 한다 (docs/NDS/adfs-sso.md).
+resource "aws_cognito_identity_provider" "saml" {
+  for_each = var.saml_providers
+
+  user_pool_id  = aws_cognito_user_pool.this.id
+  provider_name = each.key
+  provider_type = "SAML"
+
+  provider_details = merge(
+    each.value.metadata_url != null ? { MetadataURL = each.value.metadata_url } : {},
+    each.value.metadata_xml != null ? { MetadataFile = each.value.metadata_xml } : {},
+  )
+
+  attribute_mapping = each.value.attribute_mapping
+  idp_identifiers   = length(each.value.idp_identifiers) > 0 ? each.value.idp_identifiers : null
+}
+
+# ------------------------------------------------------------------------------
 # App Client — Public (PKCE 강제), gateway-cli 용
 # ------------------------------------------------------------------------------
 resource "aws_cognito_user_pool_client" "cli" {
@@ -195,7 +221,10 @@ resource "aws_cognito_user_pool_client" "cli" {
   allowed_oauth_flows                  = ["code"]
   allowed_oauth_flows_user_pool_client = true
   allowed_oauth_scopes                 = ["openid", "email", "profile"]
-  supported_identity_providers         = ["COGNITO"]
+  # SAML IdP 가 선언되면 클라이언트 활성화도 코드로 고정 — 콘솔 수동 활성화는
+  # 다음 apply 때 ["COGNITO"] 로 revert 되어 hosted UI 의 SAML 버튼이
+  # 사라진다. keys() 순서는 맵 키 정렬순이라 apply 간 안정적이다.
+  supported_identity_providers = concat(["COGNITO"], keys(var.saml_providers))
 
   # Callback / logout URLs
   callback_urls = var.callback_urls

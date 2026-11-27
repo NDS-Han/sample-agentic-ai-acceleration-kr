@@ -70,3 +70,42 @@ variable "managed_login" {
   type        = bool
   default     = false
 }
+
+variable "saml_providers" {
+  # SAML IdP 맵 (키 = provider 이름). 빈 맵(기본)이면 아무 리소스도 만들지
+  # 않아 기존 배포와 diff 가 없다. 선언하면:
+  #   - aws_cognito_identity_provider.saml[<이름>] 생성
+  #   - 앱 클라이언트 supported_identity_providers 에 자동 포함 — 콘솔에서
+  #     수동 활성화해도 apply 때 ["COGNITO"] 로 되돌아가 SAML 버튼이
+  #     사라지는 drift-revert 를 구조적으로 막는다.
+  # metadata_url / metadata_xml 은 택일 — url 은 Cognito 서비스가 fetch
+  # 하므로 ADFS 메타데이터 엔드포인트가 AWS 에서 reachable 해야 하고,
+  # 내부망 전용이면 xml 내용을 직접 넣는다.
+  # attribute_mapping: { <cognito 속성> = <SAML assertion 속성명> }.
+  #   AD 그룹은 "custom:groups" 로 매핑 — 게이트웨이 팀/역할 해석 소스.
+  #   AICM 전환(cutover) 시 이 키 한 줄을 지우면 attribute 경로가 닫힌다.
+  description = "SAML IdP 맵 (ADFS 연동). gateway.yaml infra.cognito_saml 에서 managed overlay 로 내려옴"
+  type = map(object({
+    metadata_url      = optional(string, null)
+    metadata_xml      = optional(string, null)
+    attribute_mapping = map(string)
+    idp_identifiers   = optional(list(string), [])
+  }))
+  default = {}
+
+  validation {
+    condition = alltrue([
+      for name, p in var.saml_providers :
+      (p.metadata_url != null) != (p.metadata_xml != null)
+    ])
+    error_message = "saml_providers: metadata_url 과 metadata_xml 은 정확히 하나만 지정해야 합니다."
+  }
+
+  validation {
+    condition = alltrue([
+      for name, p in var.saml_providers :
+      length(p.attribute_mapping) > 0 && contains(keys(p.attribute_mapping), "email")
+    ])
+    error_message = "saml_providers: attribute_mapping 에 email 은 필수입니다 (사용자 식별)."
+  }
+}

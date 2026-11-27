@@ -468,3 +468,14 @@ variable "cognito_managed_login" {
   type        = bool
   default     = false
 }
+
+variable "cognito_saml_providers" {
+  description = "SAML IdP 맵 (ADFS 연동) — gateway.yaml infra.cognito_saml 이 managed overlay 로 내린다. 빈 맵이면 미생성"
+  type = map(object({
+    metadata_url      = optional(string, null)
+    metadata_xml      = optional(string, null)
+    attribute_mapping = map(string)
+    idp_identifiers   = optional(list(string), [])
+  }))
+  default = {}
+}

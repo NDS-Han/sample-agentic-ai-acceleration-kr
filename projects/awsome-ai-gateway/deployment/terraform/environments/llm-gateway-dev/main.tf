@@ -223,14 +223,15 @@ module "elasticache" {
 module "cognito" {
   source = "../../modules/cognito"
 
-  project       = var.project
-  environment   = var.environment
-  aws_region    = var.aws_region
-  domain_suffix = local.cognito_domain_suffix
-  callback_urls = var.cognito_callback_urls
-  logout_urls   = var.cognito_logout_urls
-  groups        = var.cognito_groups
-  managed_login = var.cognito_managed_login
+  project        = var.project
+  environment    = var.environment
+  aws_region     = var.aws_region
+  domain_suffix  = local.cognito_domain_suffix
+  callback_urls  = var.cognito_callback_urls
+  logout_urls    = var.cognito_logout_urls
+  groups         = var.cognito_groups
+  managed_login  = var.cognito_managed_login
+  saml_providers = var.cognito_saml_providers
 
   tags = var.tags
 }
