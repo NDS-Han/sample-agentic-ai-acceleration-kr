@@ -77,13 +77,58 @@ SAML attribute 경로에서 그룹은 토큰의 **`custom:groups`** 클레임에
 - 팀/역할 해석: `custom:groups` attribute → 기존 그룹 파싱 규칙. sync 는 attribute+풀멤버십 이중 경로 backstop
 - gateway-cli: 동일 hosted UI/클라이언트라 추가 작업 없음
 
+## 혼합 운영 — 네이티브 + federated 사용자 공존
+
+hosted UI 는 네이티브 폼과 SAML 버튼이 공존한다. 그런데 `groups_claim` 은
+하나뿐이라 두 종류 사용자의 그룹 경로를 동시에 읽지 못한다:
+
+| 사용자 종류 | 그룹 소스 | 토큰 클레임 |
+|---|---|---|
+| federated (ADFS) | SAML assertion → attribute | `custom:groups` |
+| 네이티브 (풀 직접 생성) | 풀 그룹 멤버십 | `cognito:groups` |
+
+`custom:groups` 모드에서 네이티브 사용자는 로그인 시점에 풀 멤버십을 못
+읽는다 (sync 가 이중 경로로 교정하는 backstop 이지만 첫 로그인 판정은 먼저다).
+
+### break-glass 네이티브 계정 절차 (현재 — 코드 변경 없음)
+
+ADFS 배포에서 실사용자는 admin 포함 전원 federated 라서, 네이티브 계정은
+초기 부트스트랩/break-glass 용도다. 이 계정이 ADFS 모드에서도 동작하게
+하는 절차:
+
+1. 풀에서 해당 네이티브 사용자의 속성에 `custom:groups` 를 수동 설정
+   (예: `ssir_claude_admin`) — attribute 는 사용자 종류와 무관하게 읽힌다
+2. 사용자가 스스로 바꿀 수는 없다 — 클라이언트 `write_attributes` 가
+   `["email", "name"]` 뿐이라 관리자만 설정 가능 (보안상 안전)
+3. AD 측 장애로 SAML 로그인이 전면 불가할 때 이 계정으로 네이티브 로그인
+
+### 구조적 해결 (AICM 전환 프로젝트 범위로 예약) — union 병합
+
+혼합을 설정 없이 닫는 정답은 로그인 프로비저닝이 **두 클레임을 항상
+union 으로 읽는 것**이다. 두 소스는 같은 AD 라는 단일 trust root 에서
+나오므로 union 에 보안 문제가 없다. 검토하고 기각한 대안:
+
+- 사용자 타입별 분기 (`identities` 클레임) — AICM 전환기에 federated
+  사용자가 풀 멤버십을 갖기 시작하면 양쪽을 다 읽어야 해서 부적합
+- 복수 클레임 목록 설정 — 설정 가능 = misconfiguration 가능. 정답이
+  하나라면 설정으로 뺄 이유가 없다
+
+union 병합의 유일한 함정은 **stale attribute** — cutover 로 attribute
+mapping 을 제거하면 갱신이 멈춘 마지막 값이 사용자에게 남는다. 따라서
+cutover 절차에는 아래 decommission 규율이 필수다: 소스를 끌 때 데이터도
+지운다.
+
 ## AICM 전환 시 cutover (예약 절차)
 
 AICM 이 배포되어 풀 그룹 멤버십이 권위가 되면:
 1. `infra.cognito_saml.<name>.attribute_mapping` 에서 `"custom:groups"` 한 줄을 지운다
    → SAML assertion 의 stale AD 그룹이 토큰에서 사라지고 풀 멤버십만 남는다
-2. `oidc.groups_claim` 을 `cognito:groups` 로 되돌린다
-3. JIT federated 사용자와 AICM pre-provision 사용자의 linking 은
+2. **decommission 규율** — 매핑 제거로 갱신이 멈춘 `custom:groups` 의 마지막
+   값이 사용자 속성에 남는다. 전체 사용자의 해당 속성을 지우는 일회성
+   배치를 같은 절차에서 실행한다 (union 병합 도입 후엔 필수 — 소스를 끌
+   때 데이터도 지운다)
+3. `oidc.groups_claim` 을 `cognito:groups` 로 되돌린다
+4. JIT federated 사용자와 AICM pre-provision 사용자의 linking 은
    `COGNITO_FEDERATED_PROVIDER_NAME` 설계가 처리 — 전환 wave 의 검증 항목
 
 ## 제거
