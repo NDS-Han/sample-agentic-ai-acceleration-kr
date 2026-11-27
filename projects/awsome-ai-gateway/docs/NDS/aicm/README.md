@@ -26,11 +26,12 @@ Notable semantics:
 - `PUT /admin/budgets/spent` is an absolute cumulative seed. Reconciliation treats successful
   `SEED_BUDGET_SPENT` audit deltas as expected ledger input, so a correct seed does not become a
   reconciliation mismatch.
-- App-group budgets are advisory control-plane records only: they are stored and returned, but are
-  not enforced by gateway-proxy and are not included in spend reservations. This is intentional for
-  this deployment because only Claude Code is permitted; Cowork and Codex are not permitted. To
-  restrict or revoke access, use `allowed-clients`, the per-app budget for `claude-code`, or the user
-  total budget.
+- App-group budgets are **enforced**. The only valid app-group names are `claude-code` and
+  `cowork`; each maps one-to-one to the same-named app. The effective app limit is
+  `min(user per-app budget, user app-group budget)`, and a group budget alone is still enforced.
+  `PUT` with `max_budget_usd: "0"` revokes/blocks that app. `DELETE` removes only the group limit,
+  so an independent per-app budget applies again. Spend counters, reservations, user-total budgets,
+  team rules, usage accounting, and reconciliation are unchanged.
 - `GET /admin/budgets/summary/team/{team_id}/users?period=YYYY-MM&limit=10000` is the single-page
   team member summary endpoint.
 - `POST /admin/service-tokens/rotate` is self-rotation and must never be retried. A replay does not

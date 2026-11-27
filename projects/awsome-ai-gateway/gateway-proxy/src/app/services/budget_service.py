@@ -13,11 +13,11 @@ from uuid import uuid4
 from redis.exceptions import RedisError
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import literal, select, union, union_all
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.budget import BudgetConfig, BudgetScope, BudgetUsage
+from app.models.budget import BudgetConfig, BudgetScope, BudgetUsage, UserAppGroupBudget
 from app.resilience.redis_retry import call_with_transient_retry
 from app.schemas.domain import BudgetPolicy, BudgetStatus
 from app.services import budget_degraded as _bd
@@ -131,6 +131,12 @@ _BACKGROUND_TASKS: set[asyncio.Task] = set()
 # per-app(client) 예산 대상 클라이언트. client_identifier 토큰과 동일 집합
 # (claude-code / cowork / codex). 새 앱 추가 시 여기 + DB CHECK 제약 + admin-api 동기화.
 PER_APP_BUDGET_CLIENTS = ("claude-code", "cowork", "codex")
+
+# 사용자 결정(2026-11-26): app-group 은 두 개뿐이며 앱과 1:1 이다.
+# legacy 다른 이름의 행은 남아 있을 수 있지만 enforcement 대상은 이 두 그룹만이다.
+APP_GROUP_BY_CLIENT = {"claude-code": "claude-code", "cowork": "cowork"}
+APP_GROUP_CLIENTS = tuple(APP_GROUP_BY_CLIENT.values())
+APP_CLIENT_BY_GROUP = {g: c for c, g in APP_GROUP_BY_CLIENT.items()}
 
 
 # Redis INCRBYFLOAT 파서가 받는 형식 — Python float() 는 '1_000'(PEP-515
@@ -252,6 +258,97 @@ def _client_config_data(config) -> dict:
     }
 
 
+class _ClientPolicyRow:
+    """정책 합성에 필요한 최소 행 형상 — ORM/UNION 결과를 같은 코드로 다룬다."""
+
+    __slots__ = ("client", "max_budget_usd", "policy", "alert_thresholds")
+
+    def __init__(
+        self, *, client=None, max_budget_usd=None, policy=None, alert_thresholds=None
+    ) -> None:
+        self.client = client
+        self.max_budget_usd = max_budget_usd
+        self.policy = policy
+        self.alert_thresholds = alert_thresholds
+
+
+def _limit_sort_value(value) -> Decimal:
+    """min() 비교용 금액 — 비유한/NULL 한도는 가장 제한적인 값으로 본다.
+
+    per-app 정책의 기존 DB/Redis 판정은 NULL 이나 비유한 한도를 사실상 0(차단)으로
+    수렴한다. 합성 단계에서 그 행이 finite 한 다른 행에 밀려 조용히 fail-open 되지
+    않게 정렬값을 최하위로 둔다.
+    """
+    if value is None or not value.is_finite():
+        return Decimal("-Infinity")
+    return value
+
+
+def _compose_client_policy(app_config, group_config):
+    """per-app cap 과 app-group cap 의 유효 정책 — 금액은 둘의 min().
+
+    금액이 같으면 더 구체적인 per-app 행의 policy/thresholds 를 쓰고, 한쪽만 있으면
+    그쪽을 쓴다. app-group 단독(0 포함)도 유효한 per-app 정책이 된다.
+    """
+    candidates = []
+    if app_config is not None:
+        candidates.append((0, app_config))
+    if group_config is not None:
+        candidates.append((1, group_config))
+    if not candidates:
+        return None
+    return min(
+        candidates,
+        key=lambda item: (_limit_sort_value(item[1].max_budget_usd), item[0]),
+    )[1]
+
+
+def _effective_client_policy_stmt(user_id: str, client: str):
+    """(user, client)의 per-app 행과 1:1 app-group 행을 한 번의 DB 왕복으로 읽는 SELECT."""
+    app_stmt = select(
+        literal("app").label("source"),
+        BudgetConfig.max_budget_usd,
+        BudgetConfig.policy,
+        BudgetConfig.alert_thresholds,
+    ).where(
+        BudgetConfig.scope == BudgetScope.USER,
+        BudgetConfig.scope_id == user_id,
+        BudgetConfig.client == client,
+        BudgetConfig.is_active == True,  # noqa: E712
+    )
+    group = APP_GROUP_BY_CLIENT.get(client)
+    if group is None:
+        return app_stmt
+    group_stmt = select(
+        literal("group").label("source"),
+        UserAppGroupBudget.max_budget_usd,
+        UserAppGroupBudget.policy,
+        UserAppGroupBudget.alert_thresholds,
+    ).where(
+        UserAppGroupBudget.user_id == user_id,
+        UserAppGroupBudget.app_group == group,
+    )
+    return union_all(app_stmt, group_stmt)
+
+
+async def _load_effective_client_policy(db: AsyncSession, user_id: str, client: str):
+    """DB 에서 per-app+app-group 정책을 읽어 min() 으로 합성한다 (한 왕복)."""
+    rows = (await db.execute(_effective_client_policy_stmt(user_id, client))).all()
+    app_row = None
+    group_row = None
+    for source, max_budget_usd, policy, alert_thresholds in rows:
+        row = _ClientPolicyRow(
+            max_budget_usd=max_budget_usd,
+            policy=policy,
+            alert_thresholds=alert_thresholds,
+        )
+        if source == "app" and app_row is None:
+            app_row = row
+        elif source == "group":
+            group_row = row
+    return _compose_client_policy(app_row, group_row)
+
+
 def _put_team_policy(team_id: str, config) -> None:
     """TEAM 행(또는 None) → 정책 캐시. T=NULL 'D-only' 행은 행 없음과 같다(§3-1)."""
     _bd.DEGRADED.policy.put(
@@ -260,17 +357,29 @@ def _put_team_policy(team_id: str, config) -> None:
     )
 
 
-def _put_user_policy(user_id: str, rows: list) -> None:
-    """USER 활성 행 전체(총예산 + per-app) → 정책 캐시."""
+def _put_user_policy(
+    user_id: str, rows: list, group_rows: dict[str, object] | None = None
+) -> None:
+    """USER 활성 행 전체(총예산 + per-app) + app-group 행 → 정책 캐시.
+
+    ``group_rows`` 는 app(=client) 이름을 키로 한다. 캐시에 싣는 client 정책은
+    per-app cap 과 1:1 app-group cap 의 min() 으로 미리 합성된 값이다.
+    """
     total = next((r for r in rows if r.client is None), None)
     apps = {r.client: r for r in rows if r.client}
+    groups = group_rows or {}
+    effective: dict[str, object] = {}
+    for c in PER_APP_BUDGET_CLIENTS:
+        row = _compose_client_policy(apps.get(c), groups.get(c))
+        if row is not None:
+            effective[c] = row
     pc = _bd.DEGRADED.policy
     pc.put(
         _bd.PolicyCache.user_key(user_id),
-        _user_config_data(total, sorted(apps)) if total is not None else None,
+        _user_config_data(total, sorted(effective)) if total is not None else None,
     )
     for c in PER_APP_BUDGET_CLIENTS:
-        row = apps.get(c)
+        row = effective.get(c)
         pc.put(_bd.PolicyCache.client_key(user_id, c),
                _client_config_data(row) if row is not None else None)
 
@@ -1411,14 +1520,24 @@ class BudgetService:
         _put_team_policy(team_id, result.scalar_one_or_none())
 
     async def _load_user_policy(self, db: AsyncSession, user_id: str) -> None:
-        """백그라운드 재조회 — USER 총예산 + per-app 행 → 정책 캐시 (한 번의 조회)."""
+        """백그라운드 재조회 — USER 총예산 + per-app + app-group 행 → 정책 캐시."""
         result = await db.execute(
             select(BudgetConfig)
             .where(BudgetConfig.scope == BudgetScope.USER)
             .where(BudgetConfig.scope_id == user_id)
             .where(BudgetConfig.is_active == True)  # noqa: E712
         )
-        _put_user_policy(user_id, list(result.scalars().all()))
+        group_result = await db.execute(
+            select(UserAppGroupBudget)
+            .where(UserAppGroupBudget.user_id == user_id)
+            .where(UserAppGroupBudget.app_group.in_(APP_GROUP_CLIENTS))
+        )
+        groups = {
+            APP_CLIENT_BY_GROUP[r.app_group]: r
+            for r in group_result.scalars().all()
+            if getattr(r, "app_group", None) in APP_CLIENT_BY_GROUP
+        }
+        _put_user_policy(user_id, list(result.scalars().all()), groups)
 
     @staticmethod
     async def preload_policies(db: AsyncSession, user_ids: list[str], team_ids: list[str],
@@ -1444,9 +1563,21 @@ class BudgetService:
                 grouped: dict[str, list] = {x: [] for x in part}
                 for r in rows:
                     grouped.setdefault(str(r.scope_id), []).append(r)
+                groups_by_user: dict[str, dict[str, object]] = {x: {} for x in part}
+                if scope == BudgetScope.USER and part:
+                    group_rows = (await db.execute(
+                        select(UserAppGroupBudget)
+                        .where(UserAppGroupBudget.user_id.in_(part))
+                        .where(UserAppGroupBudget.app_group.in_(APP_GROUP_CLIENTS))
+                    )).scalars().all()
+                    for gr in group_rows:
+                        if getattr(gr, "app_group", None) in APP_CLIENT_BY_GROUP:
+                            groups_by_user.setdefault(str(gr.user_id), {})[
+                                APP_CLIENT_BY_GROUP[gr.app_group]
+                            ] = gr
                 for ident, rs in grouped.items():
                     if scope == BudgetScope.USER:
-                        _put_user_policy(ident, rs)
+                        _put_user_policy(ident, rs, groups_by_user.get(ident, {}))
                     else:
                         # _load_team_policy 의 LIMIT 1 — 총예산 행(client IS NULL)을 우선한다.
                         rs.sort(key=lambda r: r.client is not None)
@@ -2013,14 +2144,9 @@ class BudgetService:
 
         # 앱(client) 예산 확인 (REDIS_DEGRADED 경로) — 미설정 시 pass-through.
         if client in PER_APP_BUDGET_CLIENTS:
-            client_cfg_result = await db.execute(
-                select(BudgetConfig)
-                .where(BudgetConfig.scope == BudgetScope.USER)
-                .where(BudgetConfig.scope_id == user_id)
-                .where(BudgetConfig.client == client)
-                .where(BudgetConfig.is_active == True)  # noqa: E712
-            )
-            client_config = client_cfg_result.scalar_one_or_none()
+            # app-group(1:1) 과 per-app cap 을 같은 한 왕복으로 읽어 min() 으로 합성한다 —
+            # Redis degraded 폴백도 정상 재수화 경로와 같은 유효 한도를 본다.
+            client_config = await _load_effective_client_policy(db, user_id, client)
             if client_config is None:
                 self._remember("client", (user_id, client), period, {"config_present": False})
             if client_config is not None:
@@ -2084,13 +2210,20 @@ class BudgetService:
         if config:
             # app_clients 는 DB의 활성 per-app budget row에서 재구성 — 이 캐시 재생성이
             # admin-api가 user-config JSON에 써둔 app_clients 를 덮어쓰지 않도록(free gate 보존).
-            app_rows = await db.execute(
-                select(BudgetConfig.client)
-                .where(BudgetConfig.scope == BudgetScope.USER)
-                .where(BudgetConfig.scope_id == user_id)
-                .where(BudgetConfig.client.isnot(None))
-                .where(BudgetConfig.is_active == True)  # noqa: E712
+            # 활성 per-app 행과 enforced app-group 행의 union — 한 왕복은 그대로다.
+            # group-only cap 도 app_clients 게이트에 들어가야 부모 USER config 가 있는
+            # 사용자의 요청이 client tier 를 평가한다. legacy 다른 group 이름은 제외한다.
+            app_cfg_rows = select(BudgetConfig.client).where(
+                BudgetConfig.scope == BudgetScope.USER,
+                BudgetConfig.scope_id == user_id,
+                BudgetConfig.client.isnot(None),
+                BudgetConfig.is_active == True,  # noqa: E712
             )
+            app_group_rows = select(UserAppGroupBudget.app_group).where(
+                UserAppGroupBudget.user_id == user_id,
+                UserAppGroupBudget.app_group.in_(APP_GROUP_CLIENTS),
+            )
+            app_rows = await db.execute(union(app_cfg_rows, app_group_rows))
             app_clients = [c for c in app_rows.scalars().all() if c]
             # ⚠️ 운영자 설정이 되돌아간 지점이었다. 이 재수화는 Redis 설정 키가
             #    만료(ex=300)될 때마다 돌고, 예전에는 DB 에 저장된 값이 없어서
@@ -2157,25 +2290,17 @@ class BudgetService:
         """Per-app (user, client) budget config cache miss 시 DB에서 조회해 SET.
 
         P0-③ 안전망: admin 의 best-effort SET 이 유실되어 per-app config 키가
-        없을 때, gateway 가 DB 의 활성 per-app BudgetConfig 행으로 키를 재생성해
-        per-app 한도가 우회되지 않도록 한다. 키 shape 은 admin
-        `_sync_redis_app_config` 와 동일(limit_usd, lowercase policy, thresholds).
-        키가 없으면(활성 행 없음) do-nothing → Lua 가 config_present=false 로
-        pass-through (정상: 해당 client 에 per-app 예산이 없는 경우).
+        없을 때, gateway 가 DB 의 활성 per-app BudgetConfig 행과 1:1 app-group 행을
+        min() 으로 합성해 키를 재생성한다 — per-app 한도와 group-only 한도가 우회되지
+        않도록 한다. 키 shape 은 기존 per-app 설정과 같다(limit_usd, lowercase policy,
+        thresholds). 키가 없으면(두 정책 행 모두 없음) do-nothing → Lua 가
+        config_present=false 로 pass-through 한다.
 
         ⚠️ 예외는 삼키지 않고 전파한다 — 조회 실패를 '행 없음' 으로 읽으면
            per-app 예산이 조용히 우회된다(P0-③ 가 막으려던 바로 그 구멍).
            전파되면 check_budget 의 바깥 try 가 DB fallback 으로 보낸다.
         """
-        result = await db.execute(
-            select(BudgetConfig)
-            .where(BudgetConfig.scope == BudgetScope.USER)
-            .where(BudgetConfig.scope_id == user_id)
-            .where(BudgetConfig.client == client)
-            .where(BudgetConfig.is_active == True)  # noqa: E712
-            .limit(1)
-        )
-        config = result.scalar_one_or_none()
+        config = await _load_effective_client_policy(db, user_id, client)
         if config is None:
             _bd.DEGRADED.policy.put(_bd.PolicyCache.client_key(user_id, client), None)
             return

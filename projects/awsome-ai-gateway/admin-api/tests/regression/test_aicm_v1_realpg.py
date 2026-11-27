@@ -1187,20 +1187,52 @@ async def test_mirror_app_group_budget_crud_and_has_total_budget(env):
     t = await _issue_mirror(c)
     h = {"Authorization": f"Bearer {t['token']}", "X-Forwarded-For": "10.0.0.3"}
     uid, tid = await _mk_user(sm, provider="sts")
-    # app-group 은 advisory 제어plane — 부모 총액 없이도 저장된다.
+    # app-group cap 은 부모 총액/per-app cap 없이도 저장되고 gateway 가 집행한다.
     r = await c.put(
-        f"/aicm/v1/admin/budgets/user/{uid}/app-group/ide",
+        f"/aicm/v1/admin/budgets/user/{uid}/app-group/cowork",
         json={"max_budget_usd": "12.3456"}, headers=h,
     )
     assert r.status_code == 200, r.text
+    # app-group write 는 per-app write 와 같은 DEL-only 무효화를 쓴다 — 매핑된 app 키와
+    # group-only cap 을 app_clients 에 싣는 부모 user 키. spent counter 는 건드리지 않는다.
+    await asyncio.sleep(0.05)
+    expected = {f"budget:config:user:{{{uid}}}:cowork", f"budget:config:user:{{{uid}}}"}
+    assert expected.issubset(set(env["redis"].deleted)), env["redis"].deleted
+    assert not any("budget:user:" in k for k in env["redis"].deleted), env["redis"].deleted
     r = await c.get(f"/aicm/v1/admin/budgets/user/{uid}/app-groups", headers=h)
     assert r.status_code == 200, r.text
-    assert r.json()["app_groups"][0]["group"] == "ide"
+    assert r.json()["app_groups"][0]["group"] == "cowork"
     assert r.json()["app_groups"][0]["max_budget_usd"] in ("12.3456", 12.3456)
     r = await c.get(f"/aicm/v1/admin/budgets/user/{uid}/apps", headers=h)
     assert r.status_code == 200 and r.json()["has_total_budget"] is False
-    r = await c.delete(f"/aicm/v1/admin/budgets/user/{uid}/app-group/ide", headers=h)
+    env["redis"].deleted.clear()
+    r = await c.delete(f"/aicm/v1/admin/budgets/user/{uid}/app-group/cowork", headers=h)
     assert r.status_code == 204, r.text
+    await asyncio.sleep(0.05)
+    assert expected.issubset(set(env["redis"].deleted)), env["redis"].deleted
+    assert not any("budget:user:" in k for k in env["redis"].deleted), env["redis"].deleted
+
+
+async def test_app_group_invalid_name_is_422_with_admin_mirror_parity(env):
+    c, sm = env["client"], env["sm"]
+    t = await _issue_mirror(c)
+    mh = {"Authorization": f"Bearer {t['token']}", "X-Forwarded-For": "10.0.0.3"}
+    uid, _ = await _mk_user(sm, provider="sts")
+
+    bodies = []
+    for prefix, headers in (("/admin", HUMAN), ("/aicm/v1/admin", mh)):
+        for method in ("PUT", "DELETE"):
+            r = await c.request(
+                method,
+                f"{prefix}/budgets/user/{uid}/app-group/ide",
+                json={"max_budget_usd": "1.0000"} if method == "PUT" else None,
+                headers=headers,
+            )
+            assert r.status_code == 422, (prefix, method, r.text)
+            bodies.append(r.json())
+            assert r.json()["error"]["type"] == "validation_error"
+            assert r.json()["error"]["code"] == "invalid_app_group"
+    assert all(b == bodies[0] for b in bodies), bodies
 
 
 async def test_mirror_team_unlimited_and_four_decimal_budget(env):
@@ -1833,7 +1865,7 @@ async def test_aicm_writes_record_every_managed_write_type_and_human_writes_do_n
     writes = [
         ("PUT", f"/aicm/v1/admin/budgets/user/{uid}", {"max_budget_usd": "10", "confirm": True}, "budget"),
         ("PUT", f"/aicm/v1/admin/budgets/user/{uid}/app/claude-code", {"max_budget_usd": "5", "confirm": True}, "app-budget:claude-code"),
-        ("PUT", f"/aicm/v1/admin/budgets/user/{uid}/app-group/ide", {"max_budget_usd": "7"}, "app-group-budget:ide"),
+        ("PUT", f"/aicm/v1/admin/budgets/user/{uid}/app-group/cowork", {"max_budget_usd": "7"}, "app-group-budget:cowork"),
         ("PUT", f"/aicm/v1/admin/users/{uid}/allowed-clients", {"clients": ["claude-code"]}, "allowed-clients"),
         ("PUT", f"/aicm/v1/admin/users/{uid}/allowed-models", {"model_aliases": [alias]}, "allowed-models"),
         ("PUT", f"/aicm/v1/admin/budgets/team/{tid}", {"max_budget_usd": "100", "default_user_cap_usd": "9", "confirm": True}, "team-budget"),
@@ -1846,7 +1878,7 @@ async def test_aicm_writes_record_every_managed_write_type_and_human_writes_do_n
     got = {(r.resource_type, r.resource_id, r.facet): r for r in rows}
     expected = {
         ("user", str(uid), "budget"), ("user", str(uid), "app-budget:claude-code"),
-        ("user", str(uid), "app-group-budget:ide"), ("user", str(uid), "allowed-clients"),
+        ("user", str(uid), "app-group-budget:cowork"), ("user", str(uid), "allowed-clients"),
         ("user", str(uid), "allowed-models"), ("team", str(tid), "budget"),
         ("team", str(tid), "default-cap"),
     }
@@ -1861,9 +1893,9 @@ async def test_aicm_writes_record_every_managed_write_type_and_human_writes_do_n
     assert not await _q(sm, "SELECT 1 FROM auth.external_management WHERE resource_id=:u", u=other)
 
     # AICM DELETE 도 관리 쓰기다 — 값은 cleared 지만 소유/잠금은 유지한다(설계 선택).
-    r = await c.delete(f"/aicm/v1/admin/budgets/user/{uid}/app-group/ide", headers=h)
+    r = await c.delete(f"/aicm/v1/admin/budgets/user/{uid}/app-group/cowork", headers=h)
     assert r.status_code == 204, r.text
-    rows = await _q(sm, "SELECT state, value_state FROM auth.external_management WHERE resource_id=:u AND facet='app-group-budget:ide'", u=uid)
+    rows = await _q(sm, "SELECT state, value_state FROM auth.external_management WHERE resource_id=:u AND facet='app-group-budget:cowork'", u=uid)
     assert rows and rows[0].state == "managed" and rows[0].value_state == "cleared"
 
 

@@ -250,8 +250,8 @@ EXCEPTION WHEN unique_violation THEN
     RAISE WARNING 'idx_budget_usages_unique: 기존 중복 데이터로 유니크 인덱스 생성 건너뜀 — 운영 remediation 필요';
 END $$;
 
--- AICM/admin 공용 advisory app-group 예산(0070). gateway hot path enforcement 에는
--- 쓰이지 않는다 — 제어plane 정책 저장소이며 spend reservation 에도 포함되지 않는다.
+-- AICM/admin 공용 app-group 예산(0070). gateway 는 이 cap 을 같은 이름의 앱의
+-- per-app cap 과 min() 으로 합성해 집행한다. 별도 group spent/reservation counter 는 없다.
 CREATE TABLE IF NOT EXISTS budget.user_app_group_budgets (
     user_id           UUID                  NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
     app_group         VARCHAR(64)           NOT NULL,

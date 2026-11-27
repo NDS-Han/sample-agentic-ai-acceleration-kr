@@ -84,10 +84,11 @@ class BudgetConfig(Base):
 
 
 class UserAppGroupBudget(Base):
-    """사용자별 app-group advisory 예산(AICM).
+    """사용자별 app-group 예산(AICM).
 
-    gateway hot path enforcement 에는 쓰지 않는다 — 그룹 구성/예약 회계를 아직
-    게이트웨이가 모르므로, 이 테이블은 AICM·admin 의 제어plane 정책 저장소다.
+    허용 그룹은 ``claude-code``/``cowork`` 두 개뿐이며 각각 같은 이름의 앱과 1:1 이다.
+    gateway 는 이 cap 을 같은 앱의 per-app cap 과 min() 으로 합성해 집행한다.
+    legacy 다른 이름의 행은 읽기 API 에는 남지만 enforcement 대상이 아니다.
     """
 
     __tablename__ = "user_app_group_budgets"

@@ -141,6 +141,10 @@ _PERIOD_RE = re.compile(r"[0-9]{4}-[0-9]{2}")
 #: 튜플로 유지하는 이유: 기존 호출부가 순서를 가정한 곳이 있다.
 _ALLOWED_CLIENTS = CLIENT_ORDER
 
+# 사용자 결정(2026-11-26): app-group 은 두 개뿐이며 각각 같은 이름의 앱 하나와 1:1 이다.
+# legacy 다른 이름의 저장 행은 유지하되 신규 PUT/DELETE 는 이 두 이름만 받는다.
+APP_GROUP_TO_CLIENT = {"claude-code": "claude-code", "cowork": "cowork"}
+
 
 def _team_display_name(team: Team) -> str:
     """Cognito 그룹명에서 부서_팀 형태(Claude_NDS_Developers → NDS_Developers)가
@@ -2547,7 +2551,7 @@ class BudgetService:
         )
 
 
-    # ── AICM app-group advisory budgets ─────────────────────────────────────
+    # ── AICM app-group enforced budgets ─────────────────────────────────────
 
     async def has_user_total_budget(self, session, *, user_id: uuid.UUID) -> bool:
         cfg = await BudgetRepository(session).get_active_config(BudgetScope.USER, user_id)
@@ -2555,9 +2559,32 @@ class BudgetService:
 
     @staticmethod
     def _validate_app_group(group: str) -> str:
-        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}", group or ""):
-            raise ValidationError("invalid app group name")
+        if group not in APP_GROUP_TO_CLIENT:
+            raise BudgetRuleError(
+                "invalid app group name — allowed app groups: claude-code, cowork",
+                "invalid_app_group",
+                422,
+            )
         return group
+
+    async def _invalidate_app_group_policy_cache(
+        self, session: AsyncSession, *, user_id: uuid.UUID, group: str
+    ) -> None:
+        """app-group write 의 캐시 무효화 — per-app write 와 같은 키/DEL-only 규칙.
+
+        그룹은 앱과 1:1 이므로 그 client 의 설정 키와, group-only cap 을
+        app_clients 게이트에 싣는 부모 user 설정 키를 함께 지운다. spent counter 키는
+        건드리지 않는다(새 counter 도 만들지 않는다).
+        """
+        client = APP_GROUP_TO_CLIENT[group]
+        await invalidate_after_commit(
+            session,
+            self._cache_mgr,
+            [
+                f"budget:config:user:{{{user_id}}}:{client}",
+                f"budget:config:user:{{{user_id}}}",
+            ],
+        )
 
     async def set_user_app_group_budget(
         self,
@@ -2570,7 +2597,7 @@ class BudgetService:
         ip_address: str = "0.0.0.0",
         request_id: str = "",
     ) -> None:
-        """advisory app-group cap upsert — gateway enforcement·spend reservation 미적용."""
+        """app-group cap upsert — gateway 는 해당 app 의 per-app cap 과 min() 으로 집행한다."""
         group = self._validate_app_group(group)
         _check_cent_precision(data.max_budget_usd)
         _reject_unlimited_outside_team(data.max_budget_usd)
@@ -2608,6 +2635,7 @@ class BudgetService:
             session, resource_type=RESOURCE_USER, resource_id=user_id,
             facet=app_group_budget_facet(group), actor=actor, request_id=request_id,
         )
+        await self._invalidate_app_group_policy_cache(session, user_id=user_id, group=group)
         await audit_logger.log(
             session,
             actor_user_id=actor.user_id,
@@ -2621,7 +2649,7 @@ class BudgetService:
                 "max_budget_usd": str(data.max_budget_usd),
                 "policy": policy.value,
                 "alert_thresholds": sorted(set(alert_thresholds)),
-                "advisory_only": True,
+                "enforced": True,
             }},
             ip_address=ip_address,
             request_id=request_id,
@@ -2680,6 +2708,7 @@ class BudgetService:
             session, resource_type=RESOURCE_USER, resource_id=user_id,
             facet=app_group_budget_facet(group), actor=actor, request_id=request_id, cleared=True,
         )
+        await self._invalidate_app_group_policy_cache(session, user_id=user_id, group=group)
         await audit_logger.log(
             session,
             actor_user_id=actor.user_id,
