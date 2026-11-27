@@ -64,6 +64,22 @@ async def client(monkeypatch):
 
     app.dependency_overrides[get_db_session] = _no_db
     app.state.redis = _Redis()
+
+    class _SvcTokens:
+        """mirror 가 재사용하는 real admin handler 의 state 의존 스텁 — 인증은
+        IntegrationTokenService.verify 몽키패치가 담당하므로 여기선 빈 결과만 돌려준다."""
+
+        def __getattr__(self, name):
+            from types import SimpleNamespace
+
+            async def _any(*a, **kw):
+                if name.startswith("list"):
+                    return SimpleNamespace(items=[])
+                return None
+
+            return _any
+
+    app.state.service_token_service = _SvcTokens()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         yield c, app
 

@@ -17,7 +17,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-import pytest
 from fastapi.routing import APIRoute
 
 _ADMIN_API = Path(__file__).resolve().parents[2]
@@ -89,13 +88,15 @@ def test_flag_on_routes_commit_before_response(monkeypatch):
 
     app = _app(monkeypatch, True)
     aicm = [r for r in app.routes if isinstance(r, APIRoute) and r.path.startswith("/aicm/v1")]
-    assert len(aicm) == 42  # legacy/p0a2 17 + admin mirror 25 unique method+path routes
+    assert len(aicm) == 25  # admin mirror 만 — legacy 는 제거됨(aicm-legacy-cleanup)
     assert all(isinstance(r, CommittingRoute) for r in aicm)
 
 
 def test_admin_routers_do_not_import_integration_modules():
+    # integration_token_service 는 scoped 발급이 /admin/service-tokens 로 이전되면서
+    # admin 공유 서비스가 됐다(aicm-legacy-cleanup) — banned 가 아니다.
     banned = ("user_lifecycle_service", "cognito_admin", "integration_auth", "core.idempotency",
-              "integration_token_service", "routers.aicm")
+              "routers.aicm")
     for f in (_ADMIN_API / "src" / "app" / "routers").glob("*.py"):
         if f.name in ("aicm.py", "aicm_admin.py"):
             continue
@@ -115,17 +116,3 @@ def test_committed_openapi_spec_is_current(monkeypatch):
     assert all(p.startswith("/aicm/v1") for p in data["paths"])
 
 
-@pytest.mark.parametrize("method,path", [
-    ("post", "/aicm/v1/users/provision"), ("post", "/aicm/v1/users/{user_id}/deactivate"),
-    ("post", "/aicm/v1/service-tokens/rotate"),
-    ("post", "/aicm/v1/users/sync-cognito/user/{username}"),
-    ("put", "/aicm/v1/users/{user_id}/allowed-clients"),
-    ("delete", "/aicm/v1/users/{user_id}/allowed-clients"),
-    ("put", "/aicm/v1/budgets/user/{user_id}"), ("delete", "/aicm/v1/budgets/user/{user_id}"),
-    ("put", "/aicm/v1/budgets/team/{team_id}"), ("delete", "/aicm/v1/budgets/team/{team_id}"),
-    ("put", "/aicm/v1/budgets/team/{team_id}/default-cap"),
-])
-def test_spec_documents_idempotency_header(method, path):
-    data = json.loads(_SPEC.read_text(encoding="utf-8"))
-    params = data["paths"][path][method].get("parameters", [])
-    assert any(p["name"] == "Idempotency-Key" and p["required"] for p in params)
