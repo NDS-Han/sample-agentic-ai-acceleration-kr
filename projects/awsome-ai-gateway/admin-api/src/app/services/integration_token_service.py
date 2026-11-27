@@ -29,21 +29,26 @@ from app.services.service_token_service import (
 INTEGRATION_AICM = "aicm"
 
 #: phase 0a scope — 발급 시 이 목록 밖의 값은 거부한다(오타가 조용히 무권한 토큰이 되지 않게).
-#: 정책/예산/조회/sync/reactivation 은 AICM 미결 질문에 달려 있어 발급하지 않는다.
+#: reactivation·spent seeding·app budget·managed lock 은 AICM 미결 질문에 달려 있어 발급하지 않는다.
 SCOPES: frozenset[str] = frozenset(
     {
         "tokens:read",
         "tokens:rotate",
         "users:provision",
         "users:lifecycle",
-        # /aicm/v1/admin mirror scopes (option A). 하나의 토큰이 필요한 표면만
-        # 갖도록 발급 시 선택한다 — 읽기/쓰기를 나눈 이유는 유출 시 폭발반경 때문.
+        # /aicm/v1/admin mirror scopes (option A) + p0a2 user/policy/budget surface.
+        # 하나의 토큰이 필요한 표면만 갖도록 발급 시 선택한다 — 읽기/쓰기를 나눈 이유는
+        # 유출 시 폭발반경 때문.
         "users:read",
         "users:write",
         "users:sync",
+        "policy:read",
+        "policy:write",
         "budgets:read",
         "budgets:write",
+        "budgets:limits:write",
         "models:read",
+
     }
 )
 

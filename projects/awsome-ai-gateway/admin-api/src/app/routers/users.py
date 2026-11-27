@@ -613,17 +613,15 @@ def _build_cognito_sync_service(key_service=None, cache_mgr=None):
     ``return JSONResponse(status_code=400, content=err)`` 를 했다. 직접 만든 응답은 어떤
     exception handler 도 볼 수 없어서 프로젝트 표준 봉투를 우회했고, ``error`` 가 dict 가
     아니라 문자열인 **제3의 shape** 가 되어 admin-ui 는 `UNKNOWN_ERROR` 만 띄웠다(실측).
-    2-튜플을 없애 호출부마다 봉투를 다시 틀릴 여지 자체를 제거한다.
+    2-튜플을 없애 호출부마다 봉투를 다시 틀릴 여지 자체를 제거한다. 실제 생성은 서비스
+    계층 팩토리로 옮기고, 이 함수는 /admin 의 기존 400 detail 매핑만 유지한다.
     """
-    from app.core.config import get_settings
-    from app.services.cognito_sync_service import CognitoSyncService
+    from app.services.cognito_sync_service import build_cognito_sync_service
 
-    settings = get_settings()
-    if not settings.COGNITO_USER_POOL_ID:
-        raise HTTPException(status_code=400, detail="COGNITO_USER_POOL_ID not configured")
-    import boto3
-    client = boto3.client("cognito-idp", region_name=settings.COGNITO_REGION)
-    return CognitoSyncService(client, key_service=key_service, cache_mgr=cache_mgr)
+    try:
+        return build_cognito_sync_service(key_service=key_service, cache_mgr=cache_mgr)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.post("/users/sync-cognito/user/{username}", dependencies=[Depends(require_human_admin)])
@@ -645,32 +643,15 @@ async def sync_cognito_user(
     svc = _build_cognito_sync_service(
         request.app.state.key_service, request.app.state.cache_mgr
     )
-    result = await svc.sync_user(session, username, caller=_sync_caller(request, admin))
-    await audit_logger.log(
+    _result, body = await svc.sync_user_audited(
         session,
-        actor_user_id=admin.user_id,
-        actor_role=admin.role.value,
-        service_token_id=getattr(admin, "service_token_id", None),
-        action="COGNITO_SYNC_USER",
-        resource_type="CognitoSync",
-        resource_id=username,
-        changes={"result": {
-            "user_id": result.user_id,
-            "users_created": result.users_created,
-            "users_updated": result.users_updated,
-            "users_deactivated": result.users_deactivated,
-        }},
+        username,
+        actor=admin,
+        caller=_sync_caller(request, admin),
         ip_address=request.client.host if request.client else "0.0.0.0",
         request_id=getattr(request.state, "request_id", "") or request.headers.get("x-request-id", ""),
     )
-    return {
-        "username": username,
-        "user_id": result.user_id,
-        "users_created": result.users_created,
-        "users_updated": result.users_updated,
-        "users_deactivated": result.users_deactivated,
-        "errors": result.errors,
-    }
+    return body
 
 
 @router.post("/users/sync-cognito/group/{groupname:path}", dependencies=[Depends(require_human_admin)])
@@ -790,31 +771,17 @@ async def set_allowed_clients(
         key_service=request.app.state.key_service,
     )
     try:
-        clients = await svc.set(
-            user_id, body.clients, admin.user_id, actor=admin,
+        clients, _ = await svc.apply_set(
+            user_id,
+            body.clients,
+            admin,
+            ip_address=request.client.host if request.client else "0.0.0.0",
             request_id=getattr(request.state, "request_id", "") or request.headers.get("x-request-id", ""),
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except LookupError as e:
         raise HTTPException(status_code=404, detail=str(e))
-    await session.commit()
-    # 커밋 **후** 무효화 — DEL→commit 창에 들어온 게이트웨이 요청이 옛(느슨한) 정책을
-    # 다시 캐시하면 안 된다. allowed-models 경로와 같은 순서다(:494).
-    await svc.invalidate_user_vk_cache(user_id)
-    # R16: per-user allowed clients 도 감사 대상 — 개인 앱 접근 제어 변경.
-    await audit_logger.log(
-        session,
-        actor_user_id=admin.user_id,
-        actor_role=admin.role.value,
-        service_token_id=getattr(admin, "service_token_id", None),
-        action="SET_USER_ALLOWED_CLIENTS",
-        resource_type="UserAllowedClients",
-        resource_id=str(user_id),
-        changes={"after": {"clients": clients}},
-        ip_address=request.client.host if request.client else "0.0.0.0",
-        request_id=getattr(request.state, "request_id", "") or request.headers.get("x-request-id", ""),
-    )
     return AllowedClientsResponse(user_id=str(user_id), clients=clients)
 
 
@@ -830,21 +797,9 @@ async def clear_allowed_clients(
         cache_mgr=request.app.state.cache_mgr,
         key_service=request.app.state.key_service,
     )
-    await svc.clear(
-            user_id, admin.user_id, actor=admin,
-            request_id=getattr(request.state, "request_id", "") or request.headers.get("x-request-id", ""),
-        )
-    await session.commit()
-    # 커밋 후 무효화 — set 경로와 같은 이유.
-    await svc.invalidate_user_vk_cache(user_id)
-    await audit_logger.log(
-        session,
-        actor_user_id=admin.user_id,
-        actor_role=admin.role.value,
-        service_token_id=getattr(admin, "service_token_id", None),
-        action="CLEAR_USER_ALLOWED_CLIENTS",
-        resource_type="UserAllowedClients",
-        resource_id=str(user_id),
+    await svc.apply_clear(
+        user_id,
+        admin,
         ip_address=request.client.host if request.client else "0.0.0.0",
         request_id=getattr(request.state, "request_id", "") or request.headers.get("x-request-id", ""),
     )

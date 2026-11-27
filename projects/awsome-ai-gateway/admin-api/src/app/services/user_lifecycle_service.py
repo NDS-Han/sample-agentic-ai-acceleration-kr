@@ -29,7 +29,14 @@ from app.models.auth import User, UserRole
 from app.repositories.user_repository import UserRepository
 from app.services.cognito_admin import USER_READ, CognitoAdmin, CognitoClientError, attr
 from app.services.cognito_sync_service import CognitoSyncService
+from app.services.integration_targets import (
+    audit_protected_refusal,
+    protected_error_payload,
+    protected_reason,
+    users_matching_identity,
+)
 from app.services.protected_targets import SYSTEM_USER_IDS as _SYSTEM_USER_IDS
+
 from app.services.user_team_service import release_stale_leader_pointer
 
 logger = structlog.get_logger()
@@ -524,6 +531,105 @@ class UserLifecycleService:
                 e.details = {**(e.details or {}), "partial_state": "created"}
             raise
         return True
+
+    # ── single-user Cognito sync (AICM) ─────────────────────────────────────
+
+    async def _audit_cognito_target_refusal(
+        self, session: AsyncSession, *, username: str, reason: str, actor,
+        ip_address: str, request_id: str, details: dict,
+    ) -> None:
+        await audit_logger.log(
+            session,
+            actor_user_id=actor.user_id,
+            actor_role=actor.role.value,
+            service_token_id=getattr(actor, "service_token_id", None),
+            action="AICM_TARGET_REFUSED",
+            resource_type="CognitoSync",
+            resource_id=username,
+            result="FAILURE",
+            changes={"operation": "sync_cognito_user", "reason": reason, "target": details},
+            ip_address=ip_address,
+            request_id=request_id,
+        )
+
+    async def sync_cognito_user(
+        self, session: AsyncSession, *, username: str, actor,
+        ip_address: str, request_id: str,
+    ):
+        """AICM 단일 사용자 sync — 보호 대상/관리자 승격은 쓰기 전에 403 으로 거부.
+
+        반환은 ``run_idempotent`` 계약의 ``(status, body, after_commit)`` 다.
+        판정 후에는 기존 ``CognitoSyncService.sync_user_audited`` 를 그대로 쓰고,
+        DB 변경·감사·멱등키 완료가 한 트랜잭션에 들어간다.
+        """
+        if not self._cog.pool_id:
+            raise _err(503, "cognito_not_configured", "COGNITO_USER_POOL_ID is not configured")
+        if not username or len(username) > 512:
+            raise _err(422, "invalid_identifier", "username is invalid")
+
+        cu = None
+        try:
+            cu = await self._cog.call(
+                "admin_get_user", passthrough={"UserNotFoundException"}, Username=username
+            )
+        except CognitoClientError as e:
+            if e.code != "UserNotFoundException":
+                raise
+
+        emails: list[str] = []
+        sub = None
+        pool_groups: list[str] = []
+        if cu is not None:
+            sub = attr(cu, "sub") or cu.get("Username") or username
+            email = attr(cu, "email") or ""
+            if email:
+                emails.append(email)
+            pool_groups = await self._pool_groups(username)
+        else:
+            # 삭제된 Cognito 사용자의 soft-delete 동기화는 email=username 으로 대상을 찾는다.
+            emails.append(username)
+
+        rows = await users_matching_identity(session, sub=sub, emails=emails, lock=True)
+        for row in rows:
+            reason = protected_reason(row)
+            if reason:
+                await audit_protected_refusal(
+                    session, actor=actor, user=row, operation="sync_cognito_user",
+                    resource_type="CognitoSync", ip_address=ip_address, request_id=request_id,
+                )
+                return 403, protected_error_payload(reason, operation="sync_cognito_user"), None
+
+        if cu is not None:
+            s = get_settings()
+            attr_groups = []
+            for name in dict.fromkeys((s.OIDC_GROUPS_CLAIM, s.AICM_PROVISION_GROUPS_ATTRIBUTE)):
+                attr_groups.extend(flatten_groups(attr(cu, name)))
+            admin_groups = sorted(set(s.ADMIN_GROUPS) & set(attr_groups + pool_groups))
+            if admin_groups:
+                reason = "target_is_admin"
+                await self._audit_cognito_target_refusal(
+                    session, username=username, reason=reason, actor=actor,
+                    ip_address=ip_address, request_id=request_id,
+                    details={"cognito_username": username, "cognito_admin_groups": admin_groups},
+                )
+                return 403, protected_error_payload(reason, operation="sync_cognito_user"), None
+
+        # sync_user 자체는 원시 boto3 클라이언트를 쓰므로 읽기 2회분을 통합 쿼터에서 선점한다.
+        await self._cog.acquire(USER_READ, 2)
+        sync_service = self._sync_service()
+        result, body = await sync_service.sync_user_audited(
+            session,
+            username,
+            actor=actor,
+            ip_address=ip_address,
+            request_id=request_id,
+            commit=False,
+        )
+
+        async def after_commit() -> None:
+            await sync_service._flush_pending_revocations(session, result)
+
+        return 200, body, after_commit
 
     # ── deactivate ───────────────────────────────────────────────────────────
 

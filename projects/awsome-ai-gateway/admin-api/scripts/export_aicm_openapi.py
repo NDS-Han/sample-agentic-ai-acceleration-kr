@@ -16,11 +16,14 @@ from pathlib import Path
 
 OUT = Path(__file__).resolve().parents[2] / "docs" / "NDS" / "aicm" / "aicm-v1-openapi.json"
 _HUMAN_ONLY = {("post", "/aicm/v1/service-tokens")}
-_LEGACY_IDEMPOTENT = {
-    ("post", "/aicm/v1/service-tokens/rotate"),
-    ("post", "/aicm/v1/users/provision"),
-    ("post", "/aicm/v1/users/{user_id}/deactivate"),
-}
+# Idempotency-Key 는 통합 mutation 의 계약 — admin mirror(/aicm/v1/admin/*)는 /admin 과 같은
+# 인증 모델이라 대상이 아니고, service-tokens 발급(사람 전용)도 멱등 프레임워크를 쓰지 않는다.
+def _is_idempotent_mutation(method: str, path: str) -> bool:
+    if method not in ("post", "put", "delete"):
+        return False
+    if path.startswith("/aicm/v1/admin/"):
+        return False
+    return (method, path) != ("post", "/aicm/v1/service-tokens")
 
 
 def _refs(node, out: set[str]) -> None:
@@ -56,7 +59,7 @@ def build_spec(full: dict) -> dict:
                 {"integrationTokenSvc": []} if path.startswith("/aicm/v1/admin/")
                 else {"integrationTokenLegacy": []}
             ]
-            if (method, path) in _LEGACY_IDEMPOTENT:
+            if _is_idempotent_mutation(method, path):
                 op.setdefault("parameters", []).append({
                     "name": "Idempotency-Key", "in": "header", "required": True,
                     "schema": {"type": "string", "minLength": 1, "maxLength": 128},

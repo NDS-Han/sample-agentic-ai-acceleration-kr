@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.clients import CLIENT_ORDER
 from app.core.budget_cache import defer_redis_write_until_commit
-from app.core.audit import audit_logger
+from app.core.audit import audit_logger, audit_tags
 from app.core.auth import CurrentUser
 from app.core.cache_invalidation import (
     CacheInvalidationManager,
@@ -68,6 +68,27 @@ BUDGET_CONFIG_CACHE_TTL = 300  # 5 min; matches VK_AUTH_CACHE_TTL in key_service
 
 _BUDGET_AMOUNT_QUANTUM = Decimal("0.0001")
 _CENT = Decimal("0.01")  # equal-split 은 UI/계약상 센트 단위로 버림
+
+
+def _integration_audit() -> bool:
+    """AICM 요청 컨텍스트에서만 before/after 감사 확장 — /admin 감사 shape 은 그대로."""
+    tags = audit_tags.get()
+    return bool(tags and tags.get("_integration"))
+
+
+def _config_state(cfg) -> dict:
+    if cfg is None or not cfg.is_active:
+        return {"configured": False}
+    return {
+        "configured": True,
+        "max_budget_usd": str(cfg.max_budget_usd) if cfg.max_budget_usd is not None else None,
+        "period_type": cfg.period_type.value,
+        "policy": cfg.policy.value,
+        "default_user_cap_usd": (
+            str(cfg.default_user_cap_usd) if cfg.default_user_cap_usd is not None else None
+        ),
+        "is_active": cfg.is_active,
+    }
 
 # SetBudgetRequest.alert_thresholds 의 기본값과 동일 — 새 config 행을 만들 때
 # 쓰는 표준 임계값. 명명 상수로 두는 이유: AST 회귀 가드가 리터럴 리스트를
@@ -567,6 +588,10 @@ class BudgetService:
         # §3-1: T 편집은 D 를 건드리지 않는다 — 키가 안 오면 직전 행(비활성 포함,
         # 예산 해제 후 재설정 경로)의 D 를 그대로 이어 쓴다.
         latest = await repo.get_latest_config(BudgetScope.TEAM, team_id)
+        before_state = (
+            _config_state(await repo.get_active_config(BudgetScope.TEAM, team_id))
+            if _integration_audit() else None
+        )
         if writes_default_cap:
             new_cap = data.default_user_cap_usd
         else:
@@ -666,7 +691,11 @@ class BudgetService:
             action=_confirmed_action("SET_TEAM_BUDGET", confirm),
             resource_type="BudgetConfig",
             resource_id=str(config.id),
-            changes={"after": {"team_id": str(team_id), "max_budget_usd": str(data.max_budget_usd), "policy": policy.value, "alert_thresholds": alert_thresholds, "default_user_cap_usd": str(new_cap) if new_cap is not None else None}},
+            changes=(
+                {"before": before_state, "after": {"team_id": str(team_id), "max_budget_usd": str(data.max_budget_usd), "policy": policy.value, "alert_thresholds": alert_thresholds, "default_user_cap_usd": str(new_cap) if new_cap is not None else None}}
+                if before_state is not None
+                else {"after": {"team_id": str(team_id), "max_budget_usd": str(data.max_budget_usd), "policy": policy.value, "alert_thresholds": alert_thresholds, "default_user_cap_usd": str(new_cap) if new_cap is not None else None}}
+            ),
             ip_address=ip_address,
             request_id=request_id,
         )
@@ -842,13 +871,24 @@ class BudgetService:
             action="DELETE_TEAM_BUDGET_CONFIRMED",
             resource_type="BudgetConfig",
             resource_id=str(cfg.id),
-            changes={
-                "before": {
-                    "team_id": str(team_id),
-                    "max_budget_usd": str(cfg.max_budget_usd)
-                    if cfg.max_budget_usd is not None else None,
+            changes=(
+                {
+                    "before": {
+                        "team_id": str(team_id),
+                        "max_budget_usd": str(cfg.max_budget_usd)
+                        if cfg.max_budget_usd is not None else None,
+                    },
+                    "after": {"is_active": False},
                 }
-            },
+                if _integration_audit()
+                else {
+                    "before": {
+                        "team_id": str(team_id),
+                        "max_budget_usd": str(cfg.max_budget_usd)
+                        if cfg.max_budget_usd is not None else None,
+                    }
+                }
+            ),
             ip_address=ip_address,
             request_id=request_id,
         )
@@ -1061,6 +1101,10 @@ class BudgetService:
         repo = BudgetRepository(session)
 
         latest = await repo.get_latest_config(BudgetScope.USER, user_id)
+        before_state = (
+            _config_state(await repo.get_active_config(BudgetScope.USER, user_id))
+            if _integration_audit() else None
+        )
         policy, alert_thresholds = await self._resolve_policy_thresholds(
             data, latest=latest
         )
@@ -1139,7 +1183,11 @@ class BudgetService:
             action=_confirmed_action("SET_USER_BUDGET", confirm),
             resource_type="BudgetConfig",
             resource_id=str(config.id),
-            changes={"after": {"user_id": str(user_id), "max_budget_usd": str(data.max_budget_usd), "policy": policy.value, "alert_thresholds": alert_thresholds}},
+            changes=(
+                {"before": before_state, "after": {"user_id": str(user_id), "max_budget_usd": str(data.max_budget_usd), "policy": policy.value, "alert_thresholds": alert_thresholds}}
+                if before_state is not None
+                else {"after": {"user_id": str(user_id), "max_budget_usd": str(data.max_budget_usd), "policy": policy.value, "alert_thresholds": alert_thresholds}}
+            ),
             ip_address=ip_address,
             request_id=request_id,
         )
@@ -1256,13 +1304,24 @@ class BudgetService:
             action=_confirmed_action("DELETE_USER_BUDGET", confirm),
             resource_type="BudgetConfig",
             resource_id=str(existing.id),
-            changes={
-                "before": {
-                    "user_id": str(user_id),
-                    "max_budget_usd": str(existing.max_budget_usd),
-                    "cascaded_app_clients": cascaded,
+            changes=(
+                {
+                    "before": {
+                        "user_id": str(user_id),
+                        "max_budget_usd": str(existing.max_budget_usd),
+                        "cascaded_app_clients": cascaded,
+                    },
+                    "after": {"is_active": False, "cascaded_app_clients": cascaded},
                 }
-            },
+                if _integration_audit()
+                else {
+                    "before": {
+                        "user_id": str(user_id),
+                        "max_budget_usd": str(existing.max_budget_usd),
+                        "cascaded_app_clients": cascaded,
+                    }
+                }
+            ),
             ip_address=ip_address,
             request_id=request_id,
         )

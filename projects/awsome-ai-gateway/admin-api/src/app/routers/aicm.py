@@ -3,9 +3,9 @@
 
 ``AICM_API_ENABLED=true`` 일 때만 ``main.create_app`` 이 이 라우터를 마운트한다.
 
-범위(phase 0a): 통합 토큰 bootstrap/list/rotate, ``POST /users/provision``,
-``POST /users/{user_id}/deactivate``. 정책·예산·sync·reactivation 등 나머지 P0/P1 엔드포인트는
-AICM 미결 질문에 달려 있어 이 라우터에 없다.
+범위: 통합 토큰 bootstrap/list/rotate, provision/deactivate, 단일 사용자 Cognito sync,
+email 사용자 조회, per-user allowed-clients, user/team 예산 한도. reactivation·spent seeding·
+app budget·managed lock 등 미결 질문에 달린 표면은 이 라우터에 없다.
 
 - 인증: legacy lifecycle 표면은 ``itg-`` 통합 토큰 + scope(``core/integration_auth.py``). svc- 토큰·사람 JWT 는 401.
   예외는 토큰 발급(``POST /aicm/v1/service-tokens``) 하나 — 사람 admin(JWT) 전용.
@@ -17,7 +17,8 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -32,8 +33,21 @@ from app.core.integration_auth import (
     client_ip,
     require_integration,
 )
+from app.models.budget import BudgetScope
+from app.schemas.budgets import BudgetConfigDetailResponse, SetBudgetRequest, SetDefaultCapRequest
+from app.schemas.common import PaginationMeta
+from app.schemas.users import UserListResponse
+from app.services.integration_targets import (
+    audit_protected_refusal,
+    protected_error_payload,
+    protected_reason,
+    user_by_id,
+    users_by_email_ci,
+)
 from app.services.integration_token_service import INTEGRATION_AICM, IntegrationTokenService
 from app.services.service_token_service import INTEGRATION_TOKEN_PREFIX, SERVICE_TOKEN_PREFIX
+from app.services.user_allowed_client_service import UserAllowedClientService
+
 
 router = APIRouter(prefix="/aicm/v1", tags=["AICM Integration"])
 
@@ -283,5 +297,361 @@ async def deactivate_user(
             actor=p.actor, ip_address=p.client_ip, request_id=_rid(request),
         )
         return 200, out, after
+
+    return await _idem(request, session, handler)
+
+
+# ── phase 0a2 helpers ────────────────────────────────────────────────────────
+
+
+def _map_value_error(e: ValueError):
+    from app.core.exceptions import IntegrationError as IE
+    return IE(str(e), code="validation_error", status_code=400)
+
+
+def _map_lookup_error(e: LookupError):
+    from app.core.exceptions import IntegrationError as IE
+    return IE(str(e), code="not_found", status_code=404)
+
+
+async def _protected_user_result(
+    session: AsyncSession,
+    user_id: uuid.UUID,
+    p: IntegrationPrincipal,
+    *,
+    operation: str,
+    resource_type: str,
+    request_id: str,
+):
+    """보호 대상이면 (user, (403, payload)), 아니면 (user|None, None)."""
+    user = await user_by_id(session, user_id)
+    if user is None:
+        return None, None
+    reason = protected_reason(user)
+    if reason is None:
+        return user, None
+    await audit_protected_refusal(
+        session,
+        actor=p.actor,
+        user=user,
+        operation=operation,
+        resource_type=resource_type,
+        ip_address=p.client_ip,
+        request_id=request_id,
+    )
+    return user, (403, protected_error_payload(reason, operation=operation))
+
+
+def _allowed_client_svc(request: Request, session: AsyncSession) -> UserAllowedClientService:
+    return UserAllowedClientService(
+        session,
+        cache_mgr=request.app.state.cache_mgr,
+        key_service=request.app.state.key_service,
+    )
+
+
+class AicmAllowedClientsBody(BaseModel):
+    clients: list[str]
+
+
+class AicmAllowedClientsResponse(BaseModel):
+    user_id: str
+    clients: list[str]
+
+
+# ── Cognito sync / user lookup ───────────────────────────────────────────────
+
+
+@router.post("/users/sync-cognito/user/{username}", description=_IDEM_HEADER_DOC)
+async def sync_cognito_user(
+    request: Request,
+    username: str,
+    p: IntegrationPrincipal = Depends(require_integration("users:sync")),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """단일 Cognito 사용자를 게이트웨이 DB와 동기화 — /admin 미러(Q1 가정 경로)."""
+
+    async def handler():
+        return await _lifecycle(request).sync_cognito_user(
+            session, username=username, actor=p.actor,
+            ip_address=p.client_ip, request_id=_rid(request),
+        )
+
+    return await _idem(request, session, handler)
+
+
+@router.get("/users", response_model=UserListResponse)
+async def lookup_user_by_email(
+    request: Request,
+    email: str = Query(min_length=3, max_length=320),
+    p: IntegrationPrincipal = Depends(require_integration("users:read")),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """email exact 매칭(대소문자 무시) 단건 조회. 응답 모양은 GET /admin/users 와 같다."""
+    rows = await users_by_email_ci(session, email)
+    for user in rows:
+        reason = protected_reason(user)
+        if reason:
+            await audit_protected_refusal(
+                session,
+                actor=p.actor,
+                user=user,
+                operation="lookup_user_by_email",
+                resource_type="User",
+                ip_address=p.client_ip,
+                request_id=_rid(request),
+            )
+            return JSONResponse(
+                status_code=403,
+                content=protected_error_payload(reason, operation="lookup_user_by_email"),
+            )
+    items, has_more = await request.app.state.user_team_service.list_users(
+        session, email=email, limit=50,
+    )
+    return UserListResponse(
+        items=items,
+        pagination=PaginationMeta(cursor=None, limit=50, has_more=has_more),
+    )
+
+
+# ── per-user allowed clients ─────────────────────────────────────────────────
+
+
+@router.get("/users/{user_id}/allowed-clients")
+async def get_user_allowed_clients(
+    request: Request,
+    user_id: uuid.UUID,
+    p: IntegrationPrincipal = Depends(require_integration("policy:read")),
+    session: AsyncSession = Depends(get_db_session),
+):
+    user, refusal = await _protected_user_result(
+        session, user_id, p, operation="get_user_allowed_clients",
+        resource_type="UserAllowedClients", request_id=_rid(request),
+    )
+    if refusal:
+        return JSONResponse(status_code=refusal[0], content=refusal[1])
+    svc = _allowed_client_svc(request, session)
+    return AicmAllowedClientsResponse(user_id=str(user_id), clients=await svc.get(user_id))
+
+
+@router.put("/users/{user_id}/allowed-clients", description=_IDEM_HEADER_DOC)
+async def set_user_allowed_clients(
+    request: Request,
+    user_id: uuid.UUID,
+    body: AicmAllowedClientsBody,
+    p: IntegrationPrincipal = Depends(require_integration("policy:write")),
+    session: AsyncSession = Depends(get_db_session),
+):
+    async def handler():
+        user, refusal = await _protected_user_result(
+            session, user_id, p, operation="set_user_allowed_clients",
+            resource_type="UserAllowedClients", request_id=_rid(request),
+        )
+        if refusal:
+            return refusal[0], refusal[1]
+        svc = _allowed_client_svc(request, session)
+        try:
+            out, after = await svc.apply_set(
+                user_id,
+                body.clients,
+                p.actor,
+                ip_address=p.client_ip,
+                request_id=_rid(request),
+                commit=False,
+                audit_in_transaction=True,
+            )
+        except ValueError as e:
+            raise _map_value_error(e)
+        except LookupError as e:
+            raise _map_lookup_error(e)
+        return 200, AicmAllowedClientsResponse(user_id=str(user_id), clients=out), after
+
+    return await _idem(request, session, handler)
+
+
+@router.delete("/users/{user_id}/allowed-clients", description=_IDEM_HEADER_DOC)
+async def clear_user_allowed_clients(
+    request: Request,
+    user_id: uuid.UUID,
+    p: IntegrationPrincipal = Depends(require_integration("policy:write")),
+    session: AsyncSession = Depends(get_db_session),
+):
+    async def handler():
+        user, refusal = await _protected_user_result(
+            session, user_id, p, operation="clear_user_allowed_clients",
+            resource_type="UserAllowedClients", request_id=_rid(request),
+        )
+        if refusal:
+            return refusal[0], refusal[1]
+        after = await _allowed_client_svc(request, session).apply_clear(
+            user_id,
+            p.actor,
+            ip_address=p.client_ip,
+            request_id=_rid(request),
+            commit=False,
+            audit_in_transaction=True,
+        )
+        return 204, None, after
+
+    return await _idem(request, session, handler)
+
+
+# ── budgets (user/team total limits only) ────────────────────────────────────
+
+
+@router.get("/budgets/user/{user_id}", response_model=BudgetConfigDetailResponse)
+async def get_user_budget(
+    request: Request,
+    user_id: uuid.UUID,
+    p: IntegrationPrincipal = Depends(require_integration("budgets:read")),
+    session: AsyncSession = Depends(get_db_session),
+):
+    user, refusal = await _protected_user_result(
+        session, user_id, p, operation="get_user_budget",
+        resource_type="BudgetConfig", request_id=_rid(request),
+    )
+    if refusal:
+        return JSONResponse(status_code=refusal[0], content=refusal[1])
+    return await request.app.state.budget_service.get_budget_config(
+        session, scope=BudgetScope.USER, scope_id=user_id, actor=p.actor,
+    )
+
+
+@router.put("/budgets/user/{user_id}", description=_IDEM_HEADER_DOC)
+async def set_user_budget(
+    request: Request,
+    user_id: uuid.UUID,
+    body: SetBudgetRequest,
+    p: IntegrationPrincipal = Depends(require_integration("budgets:limits:write")),
+    session: AsyncSession = Depends(get_db_session),
+):
+    async def handler():
+        user, refusal = await _protected_user_result(
+            session, user_id, p, operation="set_user_budget",
+            resource_type="BudgetConfig", request_id=_rid(request),
+        )
+        if refusal:
+            return refusal[0], refusal[1]
+        await request.app.state.budget_service.set_user_budget(
+            session,
+            user_id=user_id,
+            data=body,
+            actor=p.actor,
+            confirm=body.confirm,
+            ip_address=p.client_ip,
+            request_id=_rid(request),
+        )
+        return 200, {"status": "ok"}
+
+    return await _idem(request, session, handler)
+
+
+@router.delete("/budgets/user/{user_id}", description=_IDEM_HEADER_DOC)
+async def delete_user_budget(
+    request: Request,
+    user_id: uuid.UUID,
+    confirm: bool = Query(False),
+    p: IntegrationPrincipal = Depends(require_integration("budgets:limits:write")),
+    session: AsyncSession = Depends(get_db_session),
+):
+    async def handler():
+        user, refusal = await _protected_user_result(
+            session, user_id, p, operation="delete_user_budget",
+            resource_type="BudgetConfig", request_id=_rid(request),
+        )
+        if refusal:
+            return refusal[0], refusal[1]
+        await request.app.state.budget_service.delete_user_budget(
+            session,
+            user_id=user_id,
+            actor=p.actor,
+            confirm=confirm,
+            ip_address=p.client_ip,
+            request_id=_rid(request),
+        )
+        return 204, None
+
+    return await _idem(request, session, handler)
+
+
+@router.get("/budgets/team/{team_id}", response_model=BudgetConfigDetailResponse)
+async def get_team_budget(
+    request: Request,
+    team_id: uuid.UUID,
+    p: IntegrationPrincipal = Depends(require_integration("budgets:read")),
+    session: AsyncSession = Depends(get_db_session),
+):
+    return await request.app.state.budget_service.get_budget_config(
+        session, scope=BudgetScope.TEAM, scope_id=team_id, actor=p.actor,
+    )
+
+
+@router.put("/budgets/team/{team_id}", description=_IDEM_HEADER_DOC)
+async def set_team_budget(
+    request: Request,
+    team_id: uuid.UUID,
+    body: SetBudgetRequest,
+    p: IntegrationPrincipal = Depends(require_integration("budgets:limits:write")),
+    session: AsyncSession = Depends(get_db_session),
+):
+    async def handler():
+        await request.app.state.budget_service.set_team_budget(
+            session,
+            team_id=team_id,
+            data=body,
+            actor=p.actor,
+            confirm=body.confirm,
+            ip_address=p.client_ip,
+            request_id=_rid(request),
+        )
+        return 200, {"status": "ok"}
+
+    return await _idem(request, session, handler)
+
+
+@router.delete("/budgets/team/{team_id}", description=_IDEM_HEADER_DOC)
+async def delete_team_budget(
+    request: Request,
+    team_id: uuid.UUID,
+    confirm: bool = Query(False),
+    p: IntegrationPrincipal = Depends(require_integration("budgets:limits:write")),
+    session: AsyncSession = Depends(get_db_session),
+):
+    async def handler():
+        await request.app.state.budget_service.delete_team_budget(
+            session,
+            team_id=team_id,
+            actor=p.actor,
+            confirm=confirm,
+            ip_address=p.client_ip,
+            request_id=_rid(request),
+        )
+        return 204, None
+
+    return await _idem(request, session, handler)
+
+
+@router.put("/budgets/team/{team_id}/default-cap", description=_IDEM_HEADER_DOC)
+async def set_team_default_cap(
+    request: Request,
+    team_id: uuid.UUID,
+    body: SetDefaultCapRequest,
+    p: IntegrationPrincipal = Depends(require_integration("budgets:limits:write")),
+    session: AsyncSession = Depends(get_db_session),
+):
+    async def handler():
+        value = await request.app.state.budget_service.set_team_default_cap(
+            session,
+            team_id=team_id,
+            value=body.value,
+            actor=p.actor,
+            confirm=body.confirm,
+            ip_address=p.client_ip,
+            request_id=_rid(request),
+        )
+        return 200, {
+            "status": "ok",
+            "default_user_cap_usd": str(value) if value is not None else None,
+        }
 
     return await _idem(request, session, handler)
