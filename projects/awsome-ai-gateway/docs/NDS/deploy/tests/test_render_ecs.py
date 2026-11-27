@@ -501,3 +501,15 @@ def test_business_alerts_tfvars_enabled():
     assert v["business_alert_dead_letter_growth"] is True
     assert v["business_alerts_slack"] is True
     assert v["business_alert_reconciliation_mismatch"] is False
+
+
+def test_tf_value_quotes_non_identifier_keys():
+    """custom:groups 같은 콜론 포함 키는 따옴표 — bare 면 HCL 파싱이 깨진다."""
+    from ..render.ecs import _tf_value
+    out = _tf_value({"custom:groups": "x", "plain-key": "y"})
+    assert '"custom:groups"' in out
+    assert "plain-key" in out  # 하이픈은 HCL identifier 라 bare 허용
+    # 실제 tfvars 라운드트립 — saml 선언이 있으면 중첩 맵이 깨지지 않는다
+    import json as _json
+    v = _tf_value({"p": {"attribute_mapping": {"custom:groups": "g"}}})
+    assert '"custom:groups" = "g"' in v

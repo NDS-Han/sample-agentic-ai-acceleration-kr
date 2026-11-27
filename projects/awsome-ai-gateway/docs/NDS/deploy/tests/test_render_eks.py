@@ -680,3 +680,58 @@ def test_business_alerts_absent_by_default(tmp_path):
     _, out, _ = _render(tmp_path)
     v = yaml.safe_load((out / "values.yaml").read_text())
     assert "businessAlerts" not in v.get("notificationWorker", {})
+
+
+# ── cognito_saml (ADFS 연동) ──────────────────────────────────────────────
+SAML_SPEC = {
+    "ssir-adfs": {
+        "metadata_url": "https://adfs.example.com/federationmetadata/2007-06/federationmetadata.xml",
+        "attribute_mapping": {
+            "email": "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress",
+            "custom:groups": "http://schemas.microsoft.com/ws/2008/06/identity/claims/groups",
+        },
+    },
+}
+
+
+def test_saml_providers_emitted_with_quoted_keys(tmp_path):
+    """custom:groups 같은 콜론 포함 키는 반드시 따옴표 — bare 면 tfvars 파싱이 깨진다."""
+    doc = dict(BASE, infra={"cognito_saml": SAML_SPEC},
+               oidc={**BASE["oidc"], "groups_claim": "custom:groups"})
+    cfg = schema.from_dict(doc)
+    out = tmp_path / "gen" / "dev" / "eks"
+    eks_render.render(cfg, out, repo_root=tmp_path)
+    tfvars = (out / "terraform.tfvars").read_text()
+    assert "cognito_saml_providers" in tfvars
+    assert '"custom:groups"' in tfvars
+    assert '"ssir-adfs"' in tfvars
+    assert "federationmetadata.xml" in tfvars
+
+
+def test_saml_not_emitted_when_undeclared(tmp_path):
+    """미선언 시 키 자체를 쓰지 않는다 — env tfvars 값 보존(켜기만 소유 계약)."""
+    _, out, _ = _render(tmp_path)
+    tfvars = (out / "terraform.tfvars").read_text()
+    assert "cognito_saml_providers" not in tfvars
+
+
+def test_saml_env_tfvars_conflict_warns(tmp_path, capsys):
+    env_dir = _env_dir(tmp_path)
+    (env_dir / "terraform.tfvars").write_text('cognito_saml_providers = {}\n')
+    doc = dict(BASE, infra={"cognito_saml": SAML_SPEC},
+               oidc={**BASE["oidc"], "groups_claim": "custom:groups"})
+    cfg = schema.from_dict(doc)
+    out = tmp_path / "gen" / "dev" / "eks"
+    eks_render.render(cfg, out, repo_root=tmp_path)
+    assert "덮어씁니다" in capsys.readouterr().err
+
+
+def test_saml_groups_claim_coherence_warning():
+    """attribute-mode 필수 연계 — saml 선언 + groups_claim != custom:groups 는 경고."""
+    doc = dict(BASE, infra={"cognito_saml": SAML_SPEC})
+    cfg = schema.from_dict(doc)  # groups_claim 미설정 → cognito:groups 추론
+    assert any("custom:groups" in w for w in cfg.warnings())
+    doc2 = dict(BASE, infra={"cognito_saml": SAML_SPEC},
+                oidc={**BASE["oidc"], "groups_claim": "custom:groups"})
+    cfg2 = schema.from_dict(doc2)
+    assert not any("cognito_saml" in w for w in cfg2.warnings())

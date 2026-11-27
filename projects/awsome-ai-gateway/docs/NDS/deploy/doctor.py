@@ -510,6 +510,57 @@ def _check_cluster_version(rep: DoctorReport, meta: dict, repo_root: Path,
                 "컨트롤플레인 업그레이드를 수행합니다 (의도된 홉이면 진행)")
 
 
+def _check_saml_convergence(rep: DoctorReport, cfg: GatewayConfig,
+                            env_dir: Path) -> None:
+    """infra.cognito_saml 선언 시 — IdP 가 풀에 있고 클라이언트에 활성화됐는지
+    읽기 전용 수렴 점검. apply 의 terraform target 은 모듈 생성까지만 보증
+    하므로 실제 SAML 로그인 가능 상태는 여기서 확인한다."""
+    declared = sorted(cfg.infra.cognito_saml)
+    if not declared or cfg.deploy.target != "eks":
+        return
+    outs = _tf_outputs(env_dir)
+    pool_id, client_id = outs.get("cognito_user_pool_id"), outs.get("cognito_client_id")
+    if not pool_id or not client_id:
+        rep.add("WARN", "saml-idp",
+                "cognito terraform output 없음 — SAML 수렴 미검증")
+        return
+    r = _aws(["cognito-idp", "list-identity-providers",
+              "--user-pool-id", pool_id, "--max-results", "60"], cfg.aws.region)
+    if r.returncode != 0:
+        rep.add("WARN", "saml-idp",
+                f"IdP 목록 조회 실패 — 수렴 미검증: {r.stderr.strip()[:120]}")
+        return
+    try:
+        present = {p.get("ProviderName")
+                   for p in json.loads(r.stdout).get("Providers", [])}
+    except json.JSONDecodeError:
+        present = set()
+    missing = [n for n in declared if n not in present]
+    if missing:
+        rep.add("HIGH", "saml-idp",
+                f"선언됐지만 풀에 없는 IdP: {', '.join(missing)} — "
+                "apply 미수렴. 콘솔 수동 등록분이면 terraform import 후 apply 필요")
+    r = _aws(["cognito-idp", "describe-user-pool-client",
+              "--user-pool-id", pool_id, "--client-id", client_id,
+              "--query", "UserPoolClient.SupportedIdentityProviders"],
+             cfg.aws.region)
+    if r.returncode != 0:
+        rep.add("WARN", "saml-idp", "클라이언트 IdP 활성화 조회 실패 — 미검증")
+        return
+    try:
+        enabled = set(json.loads(r.stdout) or [])
+    except json.JSONDecodeError:
+        enabled = set()
+    disabled = [n for n in declared if n in present and n not in enabled]
+    if disabled:
+        rep.add("HIGH", "saml-idp",
+                f"클라이언트에 비활성화된 IdP: {', '.join(disabled)} — "
+                "hosted UI 에 SAML 버튼이 없습니다 (drift-revert 의심 — apply 필요)")
+    elif not missing:
+        rep.add("OK", "saml-idp",
+                f"SAML IdP {len(declared)}개 등록·클라이언트 활성화 수렴")
+
+
 def check_eks(cfg: GatewayConfig, gen_dir: Path, repo_root: Path,
               context: str = "") -> DoctorReport:
     rep = DoctorReport()
@@ -846,6 +897,7 @@ def check_eks(cfg: GatewayConfig, gen_dir: Path, repo_root: Path,
                     f"terraform init 실패 — drift 검사 생략 "
                     f"({(ini.stderr or '').strip()[:120]})")
             return rep
+        _check_saml_convergence(rep, cfg, env_dir)
         r = _run(_tf_drift_plan_argv(gen_dir), cwd=env_dir, timeout=300)
         if r.returncode == 0:
             rep.add("OK", "tf-drift", "terraform plan no-op")

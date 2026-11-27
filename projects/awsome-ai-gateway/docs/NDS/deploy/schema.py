@@ -299,6 +299,11 @@ class InfraConfig:
     # Claude_ 접두 필수 — 접두 없는 그룹은 OIDC 로그인 거부(REJECT_UNMATCHED_GROUPS).
     # ClaudeAdmin 은 항상 자동 포함이라 목록에 쓰지 않아도 된다.
     cognito_groups: list[str] = field(default_factory=list)
+    # SAML IdP 맵 (ADFS 연동) — managed overlay 가 cognito_saml_providers tfvars 로
+    # 내린다. { 이름: { metadata_url|metadata_xml, attribute_mapping, idp_identifiers? } }.
+    # attribute-mapping 그룹 경로를 쓰는 동안은 oidc.groups_claim=custom:groups 가
+    # 필수 연계다 — setup-adfs-sso.py 설치자가 정합성 있게 함께 쓴다.
+    cognito_saml: dict[str, dict] = field(default_factory=dict)
     # 비우면 backend 기본: eks=variables.tf 최신 목록, ecs=models_profile 매핑.
     bedrock_allowed_model_arns: list[str] = field(default_factory=list)
     # eks 전용 — in-account Bedrock Mantle 호출 허용 리전. 비우면 env
@@ -523,6 +528,21 @@ class GatewayConfig:
             w.append("features.alerting.enabled=true 이지만 emails 가 비어 있습니다 — "
                      "topic·alarm 은 생기지만 수신자가 없어 콘솔에서만 보입니다. "
                      "구독은 콘솔/CLI 로 언제든 추가 가능합니다.")
+        # SAML attribute-mode 정합성 — groups 는 custom:groups 클레임에 실리는데
+        # groups_claim 이 cognito:groups(기본 추론 포함)면 로그인 시점에 읽히는
+        # 그룹이 0개라 reject_unmatched_groups 하에서 전원 403 이 된다.
+        # setup-adfs-sso.py 설치자는 둘을 항상 함께 쓰므로 이 경고는 수동 편집 신호.
+        if self.infra.cognito_saml and self.oidc.enabled:
+            effective_claim = (self.oidc.groups_claim
+                               or ("cognito:groups" if "cognito" in self.oidc.provider_name
+                                   else "groups"))
+            if effective_claim != "custom:groups":
+                w.append(
+                    f"infra.cognito_saml 선언 + oidc.groups_claim={effective_claim!r} — "
+                    "SAML attribute 의 그룹은 custom:groups 클레임에 실립니다. "
+                    "attribute-mode 로 쓰려면 oidc.groups_claim: custom:groups 를 "
+                    "설정하세요 (setup-adfs-sso.py 가 함께 설정합니다). 풀 그룹 "
+                    "멤버십(AICM 모델)만 쓸 거라면 이 경고는 무시해도 됩니다.")
         if al.emails:
             w.append("SNS email 구독은 apply 후 각 주소로 confirmation 메일이 가며, "
                      "수신자가 confirm 해야 발송이 시작됩니다 (자동화 불가).")
@@ -1158,6 +1178,69 @@ def _image_tags(v: Any, errors: list[str]) -> dict[str, str]:
     return out
 
 
+# Cognito provider 이름 — 영숫자/밑줄/하이픈/마침표, 1~128자 (AWS API 제약)
+_IDP_NAME_RE = re.compile(r"^[\w][\w.\-]{0,127}$")
+
+
+def _parse_cognito_saml(v: Any, errors: list[str]) -> dict[str, dict]:
+    """infra.cognito_saml — { IdP 이름: { metadata_url|metadata_xml (택일),
+    attribute_mapping (email 필수), idp_identifiers? } }.
+    구조 검증을 여기서 전부 수행 — terraform validation 에만 맡기면
+    apply 시점까지 오류가 숨는다."""
+    raw = _require_mapping(v, "infra.cognito_saml", errors)
+    out: dict[str, dict] = {}
+    for name, spec in raw.items():
+        ns = _opt_str(name)
+        path = f"infra.cognito_saml.{ns}"
+        if not isinstance(name, str) or not _IDP_NAME_RE.fullmatch(name):
+            errors.append(f"{path} — IdP 이름은 영숫자/밑줄/하이픈/마침표 1~128자: {name!r}")
+            continue
+        if not isinstance(spec, dict):
+            errors.append(f"{path} 는 mapping 이어야 합니다: {type(spec).__name__}")
+            continue
+        url = spec.get("metadata_url")
+        xml = spec.get("metadata_xml")
+        if bool(url) == bool(xml):
+            errors.append(f"{path} — metadata_url 과 metadata_xml 은 정확히 하나만 지정해야 합니다")
+            continue
+        if url is not None and not isinstance(url, str):
+            errors.append(f"{path}.metadata_url 은 문자열이어야 합니다: {url!r}")
+            continue
+        if xml is not None and not isinstance(xml, str):
+            errors.append(f"{path}.metadata_xml 은 문자열이어야 합니다: {type(xml).__name__}")
+            continue
+        am = spec.get("attribute_mapping")
+        if not isinstance(am, dict) or not am:
+            errors.append(f"{path}.attribute_mapping — 필수 mapping 입니다 "
+                          "(예: email, name, custom:groups)")
+            continue
+        am_out: dict[str, str] = {}
+        am_ok = True
+        for ck, sv in am.items():
+            if not isinstance(ck, str) or not isinstance(sv, str) or not ck or not sv:
+                errors.append(f"{path}.attribute_mapping — 키/값은 비어있지 않은 문자열: {ck!r}={sv!r}")
+                am_ok = False
+                continue
+            am_out[ck] = sv
+        if not am_ok:
+            continue
+        if "email" not in am_out:
+            errors.append(f"{path}.attribute_mapping — email 매핑은 필수입니다 (사용자 식별)")
+            continue
+        entry: dict = {"attribute_mapping": am_out}
+        if url:
+            entry["metadata_url"] = url.strip()
+        else:
+            entry["metadata_xml"] = xml
+        idps = spec.get("idp_identifiers")
+        if idps is not None:
+            items = _str_items(idps, f"{path}.idp_identifiers", errors)
+            if items:
+                entry["idp_identifiers"] = items
+        out[ns] = entry
+    return out
+
+
 _TOP_LEVEL_KEYS = frozenset((
     "version", "env", "aws", "deploy", "network", "domain",
     "features", "images", "clients", "oidc", "infra", "branding",
@@ -1192,7 +1275,7 @@ _OIDC_KEYS = frozenset(("issuer_url", "audience", "client_id", "client_secret",
                         "vk_ttl_hours", "groups_claim", "group_prefix",
                         "reject_unmatched_groups", "admin_groups", "admin_emails"))
 _INFRA_KEYS = frozenset(("azs", "vpc_cidr", "cognito_domain_suffix", "db", "cache",
-                        "cognito_groups", "bedrock_allowed_model_arns",
+                        "cognito_groups", "cognito_saml", "bedrock_allowed_model_arns",
                         "mantle_regions", "eks_version"))
 
 
@@ -1390,6 +1473,7 @@ def from_dict(raw: dict) -> GatewayConfig:
             cognito_domain_suffix=_opt_str(infra.get("cognito_domain_suffix"), ""),
             cognito_groups=_str_items(infra.get("cognito_groups"),
                                       "infra.cognito_groups", errors),
+            cognito_saml=_parse_cognito_saml(infra.get("cognito_saml"), errors),
             bedrock_allowed_model_arns=_str_items(
                 infra.get("bedrock_allowed_model_arns"),
                 "infra.bedrock_allowed_model_arns", errors,

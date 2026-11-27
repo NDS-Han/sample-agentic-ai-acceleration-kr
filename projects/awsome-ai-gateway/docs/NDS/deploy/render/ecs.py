@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 
 from .. import schema
@@ -33,7 +34,11 @@ def _tf_value(v) -> str:
     if isinstance(v, list):
         return "[" + ", ".join(_tf_value(x) for x in v) + "]"
     if isinstance(v, dict):
-        inner = ", ".join(f"{k} = {_tf_value(x)}" for k, x in v.items())
+        # 키가 HCL identifier 가 아니면(콜론 포함 custom:groups 등) 따옴표 필요 —
+        # bare 로 찍으면 tfvars 파싱 자체가 깨진다.
+        inner = ", ".join(
+            f"{k if re.fullmatch(r'[A-Za-z_][A-Za-z0-9_-]*', str(k)) else json.dumps(str(k), ensure_ascii=False)}"
+            f" = {_tf_value(x)}" for k, x in v.items())
         return "{ " + inner + " }"
     raise TypeError(f"tfvars 변환 미지원 타입: {type(v)}")
 
@@ -115,6 +120,8 @@ def desired_tfvars(cfg: GatewayConfig, extra_vars: dict | None = None) -> dict:
     if inf.cognito_groups:
         vars_["cognito_groups"] = list(
             dict.fromkeys([*inf.cognito_groups, "ClaudeAdmin"]))
+    # SAML IdP — ecs 는 완전 tfvars 라 미선언이면 빈 맵을 명시한다 (모듈 기본값과 동일)
+    vars_["cognito_saml_providers"] = inf.cognito_saml or {}
     # admin_groups 를 안 내리면 env 가 cognito_groups 전체로 폴백해
     # 팀 그룹 직원이 전부 ADMIN 이 된다 — eks 의 adminBootstrap.groups
     # (고정 ClaudeAdmin)와 같은 계약으로 명시한다.

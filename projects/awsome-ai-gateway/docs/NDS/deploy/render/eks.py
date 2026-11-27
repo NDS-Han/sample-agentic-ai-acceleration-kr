@@ -561,6 +561,20 @@ def render_tfvars(cfg: GatewayConfig, env_dir: Path | None = None) -> str:
             [*_tfvars_list(env_dir, "cognito_groups"),
              *inf.cognito_groups, "ClaudeAdmin"]))
         lines.append(f"cognito_groups = {json.dumps(groups)}")
+    if inf.cognito_saml:
+        # SAML IdP 맵은 통째 교체 의미(선언 = 전체 소유) — 리스트처럼 env 와
+        # 합집합하지 않는다. attribute_mapping 까지 중첩된 맵의 부분 병합은
+        # 의미가 모호하고, setup-adfs-sso 설치자가 yaml 에 완전한 정의를 쓰므로
+        # yaml 이 곧 정본이다. env tfvars 에도 선언이 있으면 overlay 가 이긴다.
+        # JSON 은 HCL object literal 과 호환되므로 그대로 싣는다.
+        if env_dir and re.search(
+                r'(?m)^\s*cognito_saml_providers\s*=',
+                "\n".join(_env_tfvars_texts(env_dir))):
+            print("⚠ env tfvars 의 cognito_saml_providers — managed overlay 의 "
+                  "infra.cognito_saml 선언이 덮어씁니다 (정본은 gateway.yaml)",
+                  file=sys.stderr)
+        lines.append("cognito_saml_providers = "
+                     + json.dumps(inf.cognito_saml, indent=2))
     if inf.bedrock_allowed_model_arns:
         lines.append(
             f"bedrock_allowed_model_arns = "

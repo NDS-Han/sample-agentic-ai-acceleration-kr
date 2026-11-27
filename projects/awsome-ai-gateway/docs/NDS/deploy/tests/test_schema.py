@@ -1045,3 +1045,40 @@ def test_observability_unknown_key_rejected():
     with pytest.raises(schema.SchemaError, match="알 수 없는 키"):
         schema.from_dict(minimal(deploy={"target": "eks", "size_tier": "t3"},
                                  images={"tag": "abc"}, observability={"metrics": {}}))
+
+
+# ── infra.cognito_saml 구조 검증 ─────────────────────────────────────────
+def _saml_doc(spec):
+    return {"version": 1, "env": "dev", "aws": {"region": "ap-south-1"},
+            "deploy": {"target": "eks", "size_tier": "t2"},
+            "images": {"tag": "x"},
+            "infra": {"cognito_saml": spec}}
+
+
+def test_cognito_saml_valid_parses():
+    spec = {"ssir-adfs": {
+        "metadata_url": "https://adfs.example.com/federationmetadata/2007-06/federationmetadata.xml",
+        "attribute_mapping": {"email": "e", "custom:groups": "g"}}}
+    cfg = schema.from_dict(_saml_doc(spec))
+    assert "ssir-adfs" in cfg.infra.cognito_saml
+    assert cfg.infra.cognito_saml["ssir-adfs"]["attribute_mapping"]["custom:groups"] == "g"
+
+
+def test_cognito_saml_metadata_xor_enforced():
+    for bad in ({"attribute_mapping": {"email": "e"}},  # 둘 다 없음
+                {"metadata_url": "u", "metadata_xml": "x",
+                 "attribute_mapping": {"email": "e"}}):  # 둘 다 있음
+        with pytest.raises(schema.SchemaError, match="정확히 하나"):
+            schema.from_dict(_saml_doc({"p": bad}))
+
+
+def test_cognito_saml_email_required():
+    spec = {"p": {"metadata_url": "u", "attribute_mapping": {"name": "n"}}}
+    with pytest.raises(schema.SchemaError, match="email"):
+        schema.from_dict(_saml_doc(spec))
+
+
+def test_cognito_saml_bad_provider_name():
+    spec = {"bad name!": {"metadata_url": "u", "attribute_mapping": {"email": "e"}}}
+    with pytest.raises(schema.SchemaError, match="IdP 이름"):
+        schema.from_dict(_saml_doc(spec))
