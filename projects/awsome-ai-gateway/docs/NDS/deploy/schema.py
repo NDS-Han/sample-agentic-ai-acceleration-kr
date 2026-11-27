@@ -1200,6 +1200,12 @@ def _parse_cognito_saml(v: Any, errors: list[str]) -> dict[str, dict]:
             continue
         url = spec.get("metadata_url")
         xml = spec.get("metadata_xml")
+        # strip 먼저 — "  " 같은 공백 문자열이 truthy 로 xor 를 통과한 뒤
+        # strip 되어 빈 값이 terraform 까지 새는 걸 막는다.
+        if isinstance(url, str):
+            url = url.strip() or None
+        if isinstance(xml, str) and not xml.strip():
+            xml = None
         if bool(url) == bool(xml):
             errors.append(f"{path} — metadata_url 과 metadata_xml 은 정확히 하나만 지정해야 합니다")
             continue
@@ -1229,7 +1235,7 @@ def _parse_cognito_saml(v: Any, errors: list[str]) -> dict[str, dict]:
             continue
         entry: dict = {"attribute_mapping": am_out}
         if url:
-            entry["metadata_url"] = url.strip()
+            entry["metadata_url"] = url
         else:
             entry["metadata_xml"] = xml
         idps = spec.get("idp_identifiers")

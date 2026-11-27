@@ -235,7 +235,7 @@ def cmd_setup(args) -> int:
     print()
     already = args.provider_name in existing_idps
     if already or args.import_existing:
-        gen_tfvars = REPO_ROOT / "docs" / "NDS" / "gen" / env / "eks" / "terraform.tfvars"
+        gen_tfvars = REPO_ROOT / "deployment" / "gen" / env / "eks" / "terraform.tfvars"
         imp = (f"terraform -chdir={env_dir or '<env-dir>'} import "
                f"-var-file={gen_tfvars} "
                f"'module.cognito.aws_cognito_identity_provider.saml[\"{args.provider_name}\"]' "
@@ -308,7 +308,10 @@ def cmd_teardown(args) -> int:
     print(f"  terraform -chdir={env_dir} destroy \\")
     print(f"    -target='module.cognito.aws_cognito_identity_provider.saml[\"{args.provider_name}\"]'")
     print()
-    print("  oidc.groups_claim/group_prefix/admin_groups 는 SAML 전용이 아니라")
+    print("  ⚠ 수동 destroy 전까지 ./deploy apply 는 이 IdP 의 파괴 변경을 감지해")
+print("    범위 가드가 중단시킵니다 — 절차를 같은 창에 완료하세요.")
+print()
+print("  oidc.groups_claim/group_prefix/admin_groups 는 SAML 전용이 아니라")
     print("  자동으로 되돌리지 않았습니다 — 필요하면 gateway.yaml 을 직접 편집하세요.")
     return 0
 

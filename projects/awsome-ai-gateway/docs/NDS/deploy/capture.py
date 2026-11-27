@@ -1561,6 +1561,24 @@ def capture_eks(namespace: str = "llm-gateway", release: str = "llm-gateway",
                               ("cognito_domain_suffix", "cognito_domain_suffix")):
             if tv.get(tfkey):
                 infra[dockey] = tv[tfkey]
+        # cognito_saml_providers 는 중첩 맵이라 부분집합 파서가 스킵한다 —
+        # 키 존재만 감지해 수동 이관을 안내한다. 캡처본에 빠진 채 채택하면
+        # overlay 가 키를 잃어 다음 apply 가 IdP destroy 를 계획하고 범위
+        # 가드가 모든 apply 를 중단시킨다.
+        try:
+            _raw_tf = "\n".join(
+                (env_dir / f).read_text()
+                for f in ("terraform.tfvars",) if (env_dir / f).exists())
+            _gen_tf = _gen_root() / env / "eks" / "terraform.tfvars"
+            if _gen_tf.exists():
+                _raw_tf += "\n" + _gen_tf.read_text()
+        except OSError:
+            _raw_tf = ""
+        if re.search(r'(?m)^\s*cognito_saml_providers\s*=', _raw_tf):
+            notes.append("infra.cognito_saml — tfvars 에 SAML IdP 선언이 있지만 "
+                         "중첩 맵이라 자동 역변환을 지원하지 않습니다. 캡처본 채택 전 "
+                         "infra.cognito_saml 을 수동으로 옮기세요 — 빠지면 다음 apply 가 "
+                         "IdP 삭제를 계획해 범위 가드가 중단됩니다.")
         if infra:
             notes.append(f"infra.{', '.join(infra)} 를 tfvars 에서 복원했습니다")
 
