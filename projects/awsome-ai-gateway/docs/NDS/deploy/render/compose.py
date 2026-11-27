@@ -127,6 +127,25 @@ def transform_services(base: dict, cfg: GatewayConfig) -> dict:
             svc.setdefault("environment", {})["NEXTAUTH_URL"] = \
                 f"https://admin.{cfg.domain.name}{_sfx}"
 
+        # ⑤-c 비즈니스 알림 — 기본 꺼짐. 켜면 env 를 명시하고, slack 은 .env 의
+        #     SLACK_WEBHOOK_URL 을 interpolate 만 한다(.env 는 미커밋 운영자 소유 —
+        #     비어 있으면 워커가 알림만 끄고 정상 기동한다).
+        if name == "notification-worker":
+            ba = cfg.features.business_alerts
+            if ba.enabled or ba.reconciliation_mismatch or ba.dead_letter_growth \
+                    or ba.pricing_missing or ba.slack:
+                svc.setdefault("environment", {}).update({
+                    "BUSINESS_ALERTS_ENABLED": "true" if ba.enabled else "false",
+                    "BUSINESS_ALERT_RECONCILIATION_MISMATCH_ENABLED":
+                        "true" if ba.reconciliation_mismatch else "false",
+                    "BUSINESS_ALERT_DEAD_LETTER_GROWTH_ENABLED":
+                        "true" if ba.dead_letter_growth else "false",
+                    "BUSINESS_ALERT_PRICING_MISSING_ENABLED":
+                        "true" if ba.pricing_missing else "false",
+                })
+                if ba.slack:
+                    svc["environment"]["SLACK_WEBHOOK_URL"] = "${SLACK_WEBHOOK_URL:-}"
+
         # ⑥ env_file 은 생성 .env 를 가리키도록
         if "env_file" in svc:
             svc["env_file"] = [str(e) for e in

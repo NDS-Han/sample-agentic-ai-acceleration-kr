@@ -125,6 +125,29 @@ class AlertingConfig:
 
 
 @dataclass
+class BusinessAlertsConfig:
+    """비용 정확성 비즈니스 알림(notification-worker) — 3타겟 공통 모델.
+
+    전부 기본 꺼짐. enabled 는 마스터(폴링 태스크 자체), 개별 check 스위치는
+    그 아래에서 켠다. slack=true 면 전달 경로를 배선한다:
+    - eks: notification-worker 가 k8s Secret `alertmanager-slack-<env>`(key api_url,
+      Alertmanager 와 같은 env 별 공유 Secret)을 optional secretKeyRef 로 읽는다 —
+      Secret 이 없어도 워커는 정상 기동하고 알림만 비활성.
+    - ecs: app Secrets Manager secret 의 json key `slack_webhook_url` 을 valueFrom 으로
+      배선한다. 활성화 전에 그 key 를 SM 에 만들어 두어야 한다(없으면 태스크 기동 실패 —
+      사전 수동 단계, 런타임 graceful 아님).
+    - compose: .env 의 SLACK_WEBHOOK_URL 을 그대로 통과시킨다(없으면 워커가 알림만 끈다).
+    임계값·폴링 주기는 서비스 기본값(helm values / worker config)을 쓰고, DB
+    notification_configs 행이 env 보다 우선한다(기존 계약).
+    """
+    enabled: bool = False
+    reconciliation_mismatch: bool = False
+    dead_letter_growth: bool = False
+    pricing_missing: bool = False
+    slack: bool = False
+
+
+@dataclass
 class FeaturesConfig:
     notifications: NotificationConfig = field(default_factory=NotificationConfig)
     alerting: AlertingConfig = field(default_factory=AlertingConfig)
@@ -148,6 +171,7 @@ class FeaturesConfig:
     # fail-closed 가 이중으로 보장되지만, 렌더러는 값을 항상 명시적으로
     # 내려보내 env 오버레이의 stale true 를 덮는다.
     service_keys: bool = False
+    business_alerts: BusinessAlertsConfig = field(default_factory=BusinessAlertsConfig)
 
 
 # eks helm 오버레이에서 이미지 태그를 가질 수 있는 키. migration 도 태그가
@@ -1141,6 +1165,8 @@ _TOP_LEVEL_KEYS = frozenset((
 ))
 _OBSERVABILITY_KEYS = frozenset(("alerting",))
 _OBS_ALERTING_KEYS = frozenset(("enabled", "slack_secret_name"))
+_BIZAL_KEYS = frozenset(("enabled", "reconciliation_mismatch",
+                       "dead_letter_growth", "pricing_missing", "slack"))
 _K8S_NAME_RE = re.compile(r"[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?")
 _AWS_KEYS = frozenset(("region", "account_id", "allowed_roles"))
 _DEPLOY_KEYS = frozenset(("target", "size_tier", "sizing", "capacity_tier",
@@ -1151,7 +1177,8 @@ _DOMAIN_KEYS = frozenset(("mode", "name", "zone_id", "hosts"))
 _DOMAIN_HOST_KEYS = frozenset(("gateway", "admin_ui", "admin_api"))
 _FEATURE_KEYS = frozenset(("notifications", "alerting", "bi_insight", "pricing_lambda",
                            "web_search", "body_logging", "observability",
-                           "dev_login", "service_keys"))
+                           "dev_login", "service_keys",
+    "business_alerts",))
 _ALERTING_KEYS = frozenset(("enabled", "emails", "log_shipping"))
 _NOTIF_KEYS = frozenset(("provider", "smtp_host", "smtp_port", "smtp_from",
                          "ses_from", "sender_name",
@@ -1186,6 +1213,7 @@ def from_dict(raw: dict) -> GatewayConfig:
     features = _require_mapping(raw.get("features"), "features", errors)
     notif = _require_mapping(features.get("notifications"), "features.notifications", errors)
     alerting = _require_mapping(features.get("alerting"), "features.alerting", errors)
+    bizal = _require_mapping(features.get("business_alerts"), "features.business_alerts", errors)
     images = _require_mapping(raw.get("images"), "images", errors)
     clients = _require_mapping(raw.get("clients"), "clients", errors)
     branding = _require_mapping(raw.get("branding"), "branding", errors)
@@ -1219,6 +1247,7 @@ def from_dict(raw: dict) -> GatewayConfig:
     _check_unknown(features, _FEATURE_KEYS, "features", errors)
     _check_unknown(notif, _NOTIF_KEYS, "features.notifications", errors)
     _check_unknown(alerting, _ALERTING_KEYS, "features.alerting", errors)
+    _check_unknown(bizal, _BIZAL_KEYS, "features.business_alerts", errors)
     _check_unknown(images, _IMAGE_KEYS, "images", errors)
     _check_unknown(clients, _CLIENT_KEYS, "clients", errors)
     _check_unknown(branding, _BRANDING_KEYS, "branding", errors)
@@ -1320,6 +1349,20 @@ def from_dict(raw: dict) -> GatewayConfig:
                                  "features.dev_login"),
             service_keys=_safe_bool(features.get("service_keys", False), errors,
                                     "features.service_keys"),
+            business_alerts=BusinessAlertsConfig(
+                enabled=_safe_bool(bizal.get("enabled", False), errors,
+                                   "features.business_alerts.enabled"),
+                reconciliation_mismatch=_safe_bool(
+                    bizal.get("reconciliation_mismatch", False), errors,
+                    "features.business_alerts.reconciliation_mismatch"),
+                dead_letter_growth=_safe_bool(
+                    bizal.get("dead_letter_growth", False), errors,
+                    "features.business_alerts.dead_letter_growth"),
+                pricing_missing=_safe_bool(bizal.get("pricing_missing", False), errors,
+                                           "features.business_alerts.pricing_missing"),
+                slack=_safe_bool(bizal.get("slack", False), errors,
+                                 "features.business_alerts.slack"),
+            ),
         ),
         images=ImagesConfig(
             registry=_opt_str(images.get("registry"), ""),

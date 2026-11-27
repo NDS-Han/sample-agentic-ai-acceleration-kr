@@ -660,3 +660,23 @@ def test_eks_observability_alerting_enabled_with_secret_name(tmp_path):
     assert "ALERTING_ENABLED=true" in lines
     assert "ALERT_SLACK_SECRET_NAME=am-slack-dev" in lines
     assert any("observability.alerting 켜짐" in n for n in notes)
+
+
+def test_business_alerts_render_to_helm_values(tmp_path):
+    doc = dict(BASE, features=dict(BASE["features"], business_alerts={
+        "enabled": True, "reconciliation_mismatch": True, "slack": True}))
+    doc = {**BASE, "features": {**BASE["features"], "business_alerts": {
+        "enabled": True, "reconciliation_mismatch": True, "slack": True}}}
+    _, out, _ = _render(tmp_path, doc)
+    v = yaml.safe_load((out / "values.yaml").read_text())
+    ba = v["notificationWorker"]["businessAlerts"]
+    assert ba["enabled"] is True
+    assert ba["checks"] == {"reconciliationMismatch": True}
+    assert ba["slack"] == {"webhookSecretName": "alertmanager-slack-dev",
+                           "webhookSecretKey": "api_url"}
+
+
+def test_business_alerts_absent_by_default(tmp_path):
+    _, out, _ = _render(tmp_path)
+    v = yaml.safe_load((out / "values.yaml").read_text())
+    assert "businessAlerts" not in v.get("notificationWorker", {})

@@ -399,6 +399,34 @@ variable "claude_code_role_arn" {
 # ------------------------------------------------------------------------------
 # 기능 플래그가 만드는 app env + 권한
 # ------------------------------------------------------------------------------
+# ── 비용 정확성 비즈니스 알림 (notification-worker) — 전부 기본 꺼짐 ──
+variable "business_alerts_enabled" {
+  type    = bool
+  default = false
+}
+
+variable "business_alert_reconciliation_mismatch" {
+  type    = bool
+  default = false
+}
+
+variable "business_alert_dead_letter_growth" {
+  type    = bool
+  default = false
+}
+
+variable "business_alert_pricing_missing" {
+  type    = bool
+  default = false
+}
+
+# slack=true 면 app secret 의 json key `slack_webhook_url` 을 valueFrom 으로 배선.
+# 활성화 전에 그 key 를 SM 에 만들어 두어야 한다 — 없으면 태스크 기동 실패(ECS 계약).
+variable "business_alerts_slack" {
+  type    = bool
+  default = false
+}
+
 variable "email_sender_type" {
   description = "mock | ses | smtp | internal_api"
   type        = string

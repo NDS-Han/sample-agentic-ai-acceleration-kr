@@ -484,3 +484,20 @@ def test_cognito_managed_login_tfvars():
     assert ecs_render.desired_tfvars(_cfg())["cognito_managed_login"] is False
     assert ecs_render.desired_tfvars(
         _cfg(branding={"managed_login": True}))["cognito_managed_login"] is True
+
+
+def test_business_alerts_tfvars_defaults_off():
+    v = ecs_render.desired_tfvars(_cfg())
+    assert v["business_alerts_enabled"] is False
+    assert v["business_alert_reconciliation_mismatch"] is False
+    assert v["business_alerts_slack"] is False
+
+
+def test_business_alerts_tfvars_enabled():
+    cfg = _cfg(features={"notifications": {"provider": "mock"}, "business_alerts": {
+        "enabled": True, "dead_letter_growth": True, "slack": True}})
+    v = ecs_render.desired_tfvars(cfg)
+    assert v["business_alerts_enabled"] is True
+    assert v["business_alert_dead_letter_growth"] is True
+    assert v["business_alerts_slack"] is True
+    assert v["business_alert_reconciliation_mismatch"] is False

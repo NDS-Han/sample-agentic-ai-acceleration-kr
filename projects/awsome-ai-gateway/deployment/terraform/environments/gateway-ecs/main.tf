@@ -210,15 +210,20 @@ module "gateway" {
   admin_api_external_url = var.admin_api_external_url
 
   # 기능
-  email_sender_type    = var.email_sender_type
-  email_sender_address = var.email_sender_address
-  email_sender_name    = var.email_sender_name
-  aws_ses_region       = var.aws_ses_region
-  smtp_host            = var.smtp_host
-  smtp_port            = var.smtp_port
-  smtp_username        = var.smtp_username
-  smtp_password        = var.smtp_password
-  email_api_url        = var.email_api_url
+  email_sender_type                      = var.email_sender_type
+  business_alerts_enabled                = var.business_alerts_enabled
+  business_alert_reconciliation_mismatch = var.business_alert_reconciliation_mismatch
+  business_alert_dead_letter_growth      = var.business_alert_dead_letter_growth
+  business_alert_pricing_missing         = var.business_alert_pricing_missing
+  business_alerts_slack                  = var.business_alerts_slack
+  email_sender_address                   = var.email_sender_address
+  email_sender_name                      = var.email_sender_name
+  aws_ses_region                         = var.aws_ses_region
+  smtp_host                              = var.smtp_host
+  smtp_port                              = var.smtp_port
+  smtp_username                          = var.smtp_username
+  smtp_password                          = var.smtp_password
+  email_api_url                          = var.email_api_url
 
   body_log_firehose_name = var.enable_body_logging ? module.body_logging.firehose_stream_name : ""
   body_log_firehose_arn  = var.enable_body_logging ? module.body_logging.firehose_stream_arn : ""

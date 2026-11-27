@@ -206,6 +206,11 @@ locals {
     notification-worker = merge(local.common_env, local.conn_env, local.email_env, {
       DB_STATEMENT_CACHE_SIZE = "100"
       REDIS_TLS_ENABLED       = tostring(var.redis_tls_enabled)
+      # 비즈니스 알림 — false 도 명시해 stale 수동 tfvars 를 덮는다.
+      BUSINESS_ALERTS_ENABLED                        = tostring(var.business_alerts_enabled)
+      BUSINESS_ALERT_RECONCILIATION_MISMATCH_ENABLED = tostring(var.business_alert_reconciliation_mismatch)
+      BUSINESS_ALERT_DEAD_LETTER_GROWTH_ENABLED      = tostring(var.business_alert_dead_letter_growth)
+      BUSINESS_ALERT_PRICING_MISSING_ENABLED         = tostring(var.business_alert_pricing_missing)
       },
       var.email_sender_type == "ses" ? { AWS_SES_REGION = var.aws_ses_region != "" ? var.aws_ses_region : var.aws_region } : {},
       var.email_sender_type == "smtp" ? {
@@ -257,7 +262,11 @@ locals {
     notification-worker = concat(local.db_secrets,
       var.email_sender_type == "smtp" && var.smtp_password != "" ? [
         { name = "SMTP_PASSWORD", valueFrom = "${aws_secretsmanager_secret.app.arn}:smtp_password::" },
-    ] : [])
+      ] : [],
+      var.business_alerts_slack ? [
+        { name = "SLACK_WEBHOOK_URL", valueFrom = "${aws_secretsmanager_secret.app.arn}:slack_webhook_url::" },
+      ] : [],
+    )
 
     migration = [
       { name = "DB_MASTER_PASSWORD", valueFrom = "${var.db_master_secret_arn}:password::" },

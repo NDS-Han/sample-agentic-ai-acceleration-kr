@@ -38,6 +38,23 @@ def _is_true_env(v) -> bool:
     return str(v if v is not None else "").strip().lower() in ("true", "1", "yes", "on")
 
 
+def _capture_business_alerts(env: dict) -> dict:
+    """notification-worker env 의 BUSINESS_ALERT_* → features.business_alerts.
+    스키마 키 전체를 기록한다 — 못 읽은 기능은 false 명시(키 생략은 옵션 존재를 숨긴다)."""
+    return {
+        "enabled": _is_true_env(env.get("BUSINESS_ALERTS_ENABLED")),
+        "reconciliation_mismatch": _is_true_env(
+            env.get("BUSINESS_ALERT_RECONCILIATION_MISMATCH_ENABLED")),
+        "dead_letter_growth": _is_true_env(
+            env.get("BUSINESS_ALERT_DEAD_LETTER_GROWTH_ENABLED")),
+        "pricing_missing": _is_true_env(
+            env.get("BUSINESS_ALERT_PRICING_MISSING_ENABLED")),
+        # 전달 wiring 의 진리는 시크릿/env 부재가 아니라 선언 스위치 — env 키
+        # 자체는 compose 에만 보이고 eks/ecs 는 secret 참조라 읽을 수 없다.
+        # 캡처는 URL 존재로 slack 을 추정한다(보수적으로 false 기본).
+        "slack": bool(env.get("SLACK_WEBHOOK_URL")),
+    }
+
 def _branding(raw, managed_login=None) -> dict | None:
     """배포된 ADMIN_BRAND_NAME (+ tfvars cognito_managed_login) → branding 블록.
 
@@ -207,6 +224,7 @@ def capture_compose(out_dir: Path, unknown: set[str] | None = None
                       or _is_true_env(api_env.get("DEV_LOGIN_ENABLED"))
                       or _is_true_env(ui_env.get("DEV_LOGIN_ENABLED"))),
         "service_keys": _is_true_env(sk_env),
+        "business_alerts": _capture_business_alerts(_env_map("notification-worker")),
         # alerting 은 compose 미지원 — 스키마가 비기본 키를 거부하므로 기본값
         # 블록만 기록한다 (키 존재를 사용자에게 보이되 채택은 무효가 아님).
         "alerting": {"enabled": False, "emails": [], "log_shipping": False},
@@ -392,7 +410,7 @@ def capture_ecs(env_dir: Path, region: str,
                      "역매핑을 건너뜁니다")
         name_map = {}
     service_names = list(name_map.values())
-    image_tag, sizing, sender_type, sizing_env = "", {}, "mock", {}
+    image_tag, sizing, sender_type, sizing_env, nw_env = "", {}, "mock", {}, {}
     api_env_ok = True
     try:
         # admin-api task def — env 계약의 진원지. 실제 서비스 이름은 output 의
@@ -694,6 +712,16 @@ def capture_ecs(env_dir: Path, region: str,
     for k, v2 in oidc_tfvars.items():
         oidc.setdefault(k, v2)
 
+    # notification-worker task env — 실패해도 admin-api 조회와 무관하게 false 기록.
+    try:
+        nw_arn = _aws_json(
+            ["ecs", "describe-services", "--cluster", cluster,
+             "--services", name_map.get("notification-worker", "notification-worker")],
+            region)["services"][0]["taskDefinition"]
+        nw_env = _taskdef_env(region, nw_arn, "notification-worker")
+    except (CaptureError, KeyError, IndexError):
+        nw_env = {}
+
     doc = {
         "version": 1,
         "env": env_name,
@@ -726,6 +754,8 @@ def capture_ecs(env_dir: Path, region: str,
             "service_keys": (api_env_ok
                              and _is_true_env(
                                  sizing_env.get("SERVICE_KEYS_ENABLED"))),
+            # notification-worker task env — 두 번째 taskdef 라 읽기 실패 시 false.
+            "business_alerts": _capture_business_alerts(nw_env),
             # 생성 여부의 진리는 terraform output — ECS 는 tfvars 전량 재생성이라
             # 캡처 누락 시 다음 apply 가 module.alerting 을 통째로 destroy 한다.
             # emails 는 선언 tfvars(사람 소유)에 있으면 함께 보존한다.
@@ -1368,6 +1398,18 @@ def capture_eks(namespace: str = "llm-gateway", release: str = "llm-gateway",
         # values 에 손으로 false(비인용 bool)를 박아도 yaml 파서가 False 로
         # 넘기니 _is_true_env 의 문자열 정규화로 안전하다.
         "service_keys": _is_true_env(aenv.get("SERVICE_KEYS_ENABLED")),
+    }
+    # businessAlerts — 차트 네이티브 블록이 진원지. 미선언 구 차트/미적용 배포는
+    # 전부 false 로 기록된다(스키마 키 전량 발산 계약).
+    _ba = _dmap(_val(v, "notificationWorker", "businessAlerts", default={}))
+    _ba_checks = _dmap(_ba.get("checks"))
+    _ba_slack = _dmap(_ba.get("slack"))
+    features["business_alerts"] = {
+        "enabled": bool(_ba.get("enabled")),
+        "reconciliation_mismatch": bool(_ba_checks.get("reconciliationMismatch")),
+        "dead_letter_growth": bool(_ba_checks.get("deadLetterGrowth")),
+        "pricing_missing": bool(_ba_checks.get("pricingMissing")),
+        "slack": bool(_ba_slack.get("webhookSecretName")),
     }
     # env 부재 — 차트 기본이 --all 에 합류하므로 부재는 구 차트/구 이미지 배포.
     # false 를 기록하되 실측이 아님을 unknown 에 표시해 absorb 오덮어쓰기 방지.
