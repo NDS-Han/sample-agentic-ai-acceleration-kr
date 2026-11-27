@@ -14,6 +14,19 @@ class ServiceTokenCreateRequest(BaseModel):
     expiry_days: int | None = Field(
         None, ge=1, le=365, description="Override default expiry (days)"
     )
+    # AICM 통합 토큰 — scopes 를 주면 scoped integration 토큰(svc-)으로 발급된다.
+    # legacy /aicm/v1 bootstrap 라우트가 하던 일을 사람 admin 표면으로 이전한 것
+    # (legacy 제거). scope 없는 평범한 발급은 아래 필드가 모두 비어야 한다.
+    scopes: list[str] | None = Field(
+        None, max_length=16,
+        description="AICM integration scopes (예: users:sync, budgets:write). 지정 시 integration 토큰",
+    )
+    allowed_cidrs: list[str] | None = Field(
+        None, max_length=16, description="호출 허용 원천 IP 대역. 생략 = 제한 없음"
+    )
+    rate_limit_per_min: int | None = Field(
+        None, ge=1, le=10000, description="write 등급 분당 상한 재정의"
+    )
 
 
 class ServiceTokenCreateResponse(BaseModel):
@@ -23,6 +36,9 @@ class ServiceTokenCreateResponse(BaseModel):
     created_at: datetime
     expires_at: datetime
     token: str = Field(description="Plaintext token — returned only on issue/rotate")
+    integration: str | None = None
+    scopes: list[str] | None = None
+    allowed_cidrs: list[str] | None = None
 
 
 class ServiceTokenItem(BaseModel):

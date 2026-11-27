@@ -34,10 +34,31 @@ async def issue_service_token(
     """발급 — 사람 admin(JWT)만. 원문은 응답에서 1회만 반환."""
     if admin.is_service_token:
         raise ForbiddenError("Service tokens cannot issue new service tokens")
-    svc = request.app.state.service_token_service
-    result = await svc.issue(
-        session, name=body.name, created_by=admin.user_id, expiry_days=body.expiry_days
-    )
+    if body.scopes:
+        # AICM scoped integration 토큰 — legacy /aicm/v1 bootstrap 의 이전 경로.
+        # scopes 없이 cidrs/rate_limit 만 오는 조합은 422 (아래에서 검증).
+        from app.services.integration_token_service import IntegrationTokenService
+
+        isvc = IntegrationTokenService(request.app.state.service_token_service)
+        iresp, scopes, cidrs = await isvc.issue(
+            session, name=body.name, created_by=admin.user_id, scopes=body.scopes,
+            allowed_cidrs=body.allowed_cidrs, rate_limit_per_min=body.rate_limit_per_min,
+            expiry_days=body.expiry_days,
+        )
+        result = ServiceTokenCreateResponse(
+            id=iresp.id, name=iresp.name, token_prefix=iresp.token_prefix,
+            created_at=iresp.created_at, expires_at=iresp.expires_at, token=iresp.token,
+            integration="aicm", scopes=scopes, allowed_cidrs=cidrs,
+        )
+    elif body.allowed_cidrs or body.rate_limit_per_min is not None:
+        from app.core.exceptions import ValidationError
+
+        raise ValidationError("allowed_cidrs/rate_limit_per_min 은 scopes 와 함께만 지정할 수 있습니다")
+    else:
+        svc = request.app.state.service_token_service
+        result = await svc.issue(
+            session, name=body.name, created_by=admin.user_id, expiry_days=body.expiry_days
+        )
     # R16: 서비스 토큰 생명주기는 키 폐기·역할 변경과 같은 감사 대상 — 발급
     # 자체가 ADMIN 동급 자격증명 생성인데 audit_logs 행이 없었다.
     await audit_logger.log(
@@ -48,7 +69,13 @@ async def issue_service_token(
         action="SERVICE_TOKEN_ISSUE",
         resource_type="ServiceToken",
         resource_id=str(result.id),
-        changes={"after": {"name": body.name, "expiry_days": body.expiry_days}},
+        changes={"after": {
+            "name": body.name, "expiry_days": body.expiry_days,
+            **({"integration": "aicm", "scopes": body.scopes,
+                "allowed_cidrs": body.allowed_cidrs,
+                "rate_limit_per_min": body.rate_limit_per_min}
+               if body.scopes else {}),
+        }},
         ip_address=request.client.host if request.client else "0.0.0.0",
         request_id=getattr(request.state, "request_id", "") or request.headers.get("x-request-id", ""),
     )
