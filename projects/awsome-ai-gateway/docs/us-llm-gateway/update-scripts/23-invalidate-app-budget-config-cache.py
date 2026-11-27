@@ -122,12 +122,21 @@ async def _redis_client():
     return aioredis.from_url(redis_url, **kwargs), "standalone"
 
 
+def _scan_cursor_value(next_cursor: Any, target_node) -> int:
+    if not isinstance(next_cursor, dict):
+        return int(next_cursor)
+    node_name = getattr(target_node, "name", None) or str(target_node)
+    if node_name not in next_cursor:
+        raise RuntimeError(f"Redis Cluster SCAN cursor response did not include {node_name}")
+    return int(next_cursor[node_name])
+
+
 async def _scan_batch(redis, *, cursor: int, pattern: str, count: int, target_node=None):
     kwargs = {"match": pattern, "count": count}
     if target_node is not None:
         kwargs["target_nodes"] = target_node
     next_cursor, keys = await redis.scan(cursor=cursor, **kwargs)
-    return int(next_cursor), list(keys)
+    return _scan_cursor_value(next_cursor, target_node), list(keys)
 
 
 async def _pttls(redis, keys: list[str]) -> list[int]:

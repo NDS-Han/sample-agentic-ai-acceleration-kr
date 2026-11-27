@@ -83,7 +83,7 @@ def test_budget_settle_lua_copy_matches_gateway():
                / "budget_settle.lua")
     if not gateway.exists():
         pytest.skip("gateway-proxy 소스가 없는 체크아웃")
-    assert worker_copy.read_text() == gateway.read_text()
+    assert worker_copy.read_bytes() == gateway.read_bytes()
 
 
 def test_settle_args_shape():
