@@ -1,12 +1,13 @@
 # Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
-"""user app-group advisory budgets (AICM admin mirror)
+"""user app-group budgets (AICM admin mirror)
 
 Revision ID: 0070
 Revises: 0069
 Create Date: 2026-11-26
 
-새 테이블만 만든다 — 기존 테이블 rewrite 없음, hot path 에서 읽지 않는 advisory 제어plane
-테이블이다. lock_timeout 은 5s, lock timeout 은 지수 backoff 로 재시도한다(AGENTS.md 규칙 6).
+새 테이블만 만든다 — 기존 테이블 rewrite 없음. 제어plane 정책 저장소이며 gateway 는
+이 cap 을 읽어 per-app cap 과 min() 으로 합성한다. lock_timeout 은 5s, lock timeout 은
+지수 backoff 로 재시도한다(AGENTS.md 규칙 6).
 """
 from __future__ import annotations
 

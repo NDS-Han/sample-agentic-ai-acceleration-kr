@@ -513,9 +513,10 @@ async def test_background_refresh_loads_team_and_user_policy(mock_redis):
         res = MagicMock()
         sql = str(stmt)
         res.scalar_one_or_none = MagicMock(return_value=team)
+        rows = [] if "user_app_group_budgets" in sql else [user_total, user_app]
         res.scalars = MagicMock(return_value=MagicMock(
-            all=MagicMock(return_value=[user_total, user_app])))
-        assert "budget_configs" in sql
+            all=MagicMock(return_value=rows)))
+        assert "budget_configs" in sql or "user_app_group_budgets" in sql
         return res
 
     session = AsyncMock()

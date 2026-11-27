@@ -80,6 +80,40 @@ class BudgetConfig(Base):
     )
 
 
+class UserAppGroupBudget(Base):
+    """사용자별 app-group 예산(제어 plane 정책 읽기 전용).
+
+    그룹명과 앱은 1:1 이다: ``claude-code`` → ``claude-code``, ``cowork`` → ``cowork``.
+    gateway 는 이 테이블을 읽어 per-app 정책과 min() 으로 합성할 뿐 여기에 쓰지 않는다.
+    """
+
+    __tablename__ = "user_app_group_budgets"
+    __table_args__ = {"schema": "budget"}
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("auth.users.id", ondelete="CASCADE"), primary_key=True
+    )
+    app_group: Mapped[str] = mapped_column(String(64), primary_key=True)
+    max_budget_usd: Mapped[Decimal] = mapped_column(Numeric(12, 4), nullable=False)
+    policy: Mapped[BudgetPolicy] = mapped_column(
+        Enum(BudgetPolicy, name="budget_policy", schema="budget", create_type=False),
+        nullable=False,
+        default=BudgetPolicy.HARD_BLOCK,
+    )
+    alert_thresholds: Mapped[list[int]] = mapped_column(
+        ARRAY(Integer), nullable=False, default=lambda: [80, 90, 100]
+    )
+    allocated_by: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("auth.users.id"), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
 class BudgetUsage(Base):
     __tablename__ = "budget_usages"
     __table_args__ = {"schema": "budget"}

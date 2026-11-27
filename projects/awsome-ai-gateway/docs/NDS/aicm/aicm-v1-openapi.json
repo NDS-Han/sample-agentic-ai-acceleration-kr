@@ -1931,7 +1931,7 @@
         ]
       },
       "put": {
-        "description": "advisory app-group budget upsert. gateway enforcement 는 바꾸지 않는다.",
+        "description": "app-group budget upsert — 해당 앱의 per-app budget 과 min() 으로 gateway 집행.",
         "operationId": "aicm_set_user_app_group_budget",
         "parameters": [
           {

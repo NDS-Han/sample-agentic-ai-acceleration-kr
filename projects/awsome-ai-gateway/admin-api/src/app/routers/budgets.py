@@ -350,7 +350,7 @@ async def set_user_app_group_budget(
     user: CurrentUser = Depends(require_admin_or_team_leader),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """advisory app-group budget upsert. gateway enforcement 는 바꾸지 않는다."""
+    """app-group budget upsert — 해당 앱의 per-app budget 과 min() 으로 gateway 집행."""
     svc: BudgetService = request.app.state.budget_service
     await svc.set_user_app_group_budget(
         session,
