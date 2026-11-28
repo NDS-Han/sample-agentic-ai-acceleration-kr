@@ -41,7 +41,8 @@ NDS Gateway connects Claude Code, Cowork, and Codex to a managed model gateway. 
 
 - Maintenance · [Upstream synchronization](upstream-sync.en.md) · [Deployment design](decisions.en.md)
 - Technical reference · [Additional Alertmanager receivers](alerting-receivers.en.md) · [R7 external cost reconciliation design](cost-reconciliation-r7.md)
-- Historical references · [Legacy EKS migration](upgrade-eks-legacy.en.md) · [NDS transition records](upstream-diff/README.en.md) · [Review records](review/README.en.md)
+- Change comparison · [NDS Gateway changes since upstream e3a39757](upstream-diff/README.en.md)
+- Historical references · [Legacy EKS migration](upgrade-eks-legacy.en.md) · [Review records](review/README.en.md)
 
 ## Deployment at a glance
 

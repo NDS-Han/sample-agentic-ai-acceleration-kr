@@ -1,85 +1,24 @@
-# 배포 모델 — upstream 대비 변경 전체
+# 배포와 환경 수명주기
 
-upstream의 배포는 **사이트 고정 스크립트**(`docs/us-llm-gateway/` 절차 문서,
-`update-scripts/*.sh`, `install-eks.sh`, EC2 기준 수작업 values 편집)였다.
-NDS는 이를 **`gateway.yaml` 단일 선언 파일 + `./deploy` 통합 도구**로 교체했다.
+**한국어** · [English](deployment.en.md) · [비교 목차](README.md)
 
-## 1. 선언적 배포 도구 (`docs/NDS/deploy/`)
+## 선언에서 배포까지
 
-upstream에 없던 전체 신규 서브시스템 (~11k LOC + 테스트 478).
+NDS는 기존 Terraform·Helm·배포 스크립트 위에 `gateway.yaml`과 `./deploy`를 추가했습니다. `init/configure`로 입력을 만들고 `validate/render`로 산출물을 검증합니다. 신규 환경은 `bootstrap`, 변경은 `apply --plan`과 `apply`, 상태 확인은 `doctor`를 사용합니다. `doctor --capture`는 대상의 현재 상태로 설정 초안을 만들며, 운영자가 미확인·보존 항목과 source of truth를 검토합니다. `client-values`의 결과는 직원 설정에 전달합니다. [설정 스키마](../gateway-yaml.md)
 
-| 구성 | 역할 |
-|---|---|
-| `cli.py` | 명령 디스패치 — init/configure/validate/render/bootstrap/apply/doctor/client-values/upgrade/teardown |
-| `schema.py` | `gateway.yaml` 스키마 — 필드 검증·경고·SchemaError 수집 |
-| `tiers.py` | `deploy.capacity_tier`(사용자 수 밴드)→ pod/task 수·용량 프리셋 전개, `deploy.sizing` 덮어쓰기 |
-| `render/` | 대상별 산출물 렌더링 — `compose.py`(docker-compose+.env+Caddyfile), `eks`(helm values), `ecs`(tfvars) |
-| `bootstrap.py` | 신규 설치 — 인프라·시크릿·이미지·Cognito 전체 프로비저닝 |
-| `eks_apply.py` / `ecs_apply.py` | 업데이트 경로 — helm apply, terraform plan/apply, `--plan` 미리보기 |
-| `eks_build.py` | `apply --build` — eks 변경분 감지 이미지 빌드·ECR push·`images.tags` 핀 갱신(`--all` 전체) |
-| `capture.py` | `doctor --capture` — 기존 배포를 gateway.yaml로 역생성(helm values+kubectl 라이브 대조, compose .env 병합) |
-| `doctor.py` | 상태·드리프트 점검 — 준비성·위험 감지 |
-| `websearch.py` / `chatagent.py` / `pricinglambda.py` | 기능별 프로비저너 — boto3로 AgentCore Runtime·Lambda 생성·동기화 |
-| `tests/` | 485 tests — 매 리뷰 라운드의 회귀 고정 |
-
-명령 수명주기: `init/configure`(yaml 작성) → `bootstrap`(신규 1회) →
-`apply`(업데이트 반복, render 내장) → `doctor`(점검) → `teardown`(삭제).
-EKS 버전은 별도 절차형 명령 `upgrade eks`가 담당(apply는 버전을 바꾸지
-않음).
-`./deploy`는 `docs/NDS/deploy.sh`로 위임하는 4줄 래퍼다.
-
-## 2. 배포 대상 — 3 경로
-
-| 대상 | 티어 | upstream 대비 |
+| 대상 | 배포 산출물 | 인수·운영에서 확인할 점 |
 |---|---|---|
-| `compose` | t0 고정 | 신규 — 단일 호스트 Docker Compose, Caddy 인입점 |
-| `ecs` | t1/t2 | **신규** — ECS Fargate + Aurora + ElastiCache 전체를 terraform으로 생성 |
-| `eks` | t2/t3 | 기존 EKS 경로를 NDS 수명주기에 편입 — `bootstrap`/`apply`/`doctor`/`teardown` 통합 |
+| Compose | 단일 호스트 Compose, env, Caddy | 백업은 호스트 외부에 보관. 볼륨 삭제 옵션 확인 |
+| ECS | Terraform tfvars 및 Fargate 서비스 | 서비스·태스크별 배포, 계정과 상태, IAM, 비밀의 JSON 필드 확인 |
+| EKS | Helm values 및 관리형 Terraform overlay | 정확한 context와 릴리스 확인. 공통·서비스별 이미지 핀을 기록. 제어판/애드온 업그레이드는 별도 계획 |
 
-`capacity_tier` 사용자 수 밴드가 eks pod min/max·ecs task 수를 같은
-밴드로 전개 — 용량 선언의 정본이 gateway.yaml.
+EKS와 ECS 용량 밴드는 사용자 수를 기준으로 초기 pod/task 범위를 정합니다. DB와 Redis의 실측 및 `deploy.sizing`을 함께 사용합니다. EKS `upgrade eks`는 제어판을 한 번에 한 minor씩 계획하고 애드온과 워크로드 검증을 거칩니다. 앱 롤백은 DB 호환성이 확인된 전 태그를 다시 적용합니다. [업데이트](../update.md) · [EKS 업그레이드](../upgrade-eks-cluster.md)
 
-## 3. Terraform 모듈 (`deployment/terraform/modules/`)
+## 권한, TLS와 선택 기능
 
-upstream 대비 신규 12종: `vpc`, `eks-fargate`, `ecs-gateway`,
-`aurora-postgresql`, `elasticache-valkey`, `cognito`, `irsa`,
-`alb-controller`, `external-secrets`, `alerting`,
-`bedrock-invocation-logging`, `body-logging`, `agentcore-runtime`.
-environments: `gateway-ecs`, `llm-gateway-dev`, `llm-gateway-prod`.
+- Route 53/ACM 경로는 인증서 검증, 호스트와 인입 구성, Cognito 콜백을 연결합니다. smoke 테스트의 private DNS 판정은 `9b59c781`에서 실제 VPC CIDR 기준으로 바뀌었습니다.
+- ADFS의 메타데이터·매핑·provider details를 선언에 포함합니다. `6d382cd4`의 변경 뒤에는 수동 값과 선언 차이를 검토하고 capture·plan으로 소유권을 확인합니다.
+- optional 기능의 범위와 준비 조건을 별개로 확인합니다. 웹 검색은 AgentCore Gateway와 제한 설정, BI Insight는 AgentCore Runtime과 DB 읽기 자격, 외부 가격은 Lambda, 로그는 Firehose/S3, 알림은 백엔드별 Secret/채널이 필요할 수 있습니다.
+- 인프라 상태와 앱 상태는 다른 변경 단위입니다. 관리 overlay가 담당한 모듈, 운영자가 유지하는 VPC·EKS·Aurora 등의 상태와 변경 경로, teardown에서 환경에 미치는 범위를 확인합니다.
 
-## 4. 도메인·TLS 자동화
-
-- `domain.mode`: `none` / `route53-acm` / `selfsigned-temp`(EKS 전용,
-  도메인 없이 임시 https) / `cloudfront-temp`
-- `route53-acm`: ACM 인증서 발급·검증 CNAME·ALB 레코드·Cognito 콜백
-  도메인 부착을 apply가 자동 처리
-- compose는 Caddy 단일 인입점, eks는 ALB+인증서, 자가서명은
-  `selfsigned-temp`로 개발용 https
-
-## 5. 업데이트·수렴 안전장치 (upstream에 없던 것)
-
-- **`apply --plan`**: eks=helm server dry-run+라이브 diff, ecs=terraform
-  plan, compose=산출물 diff — 변경 전 미리보기
-- **`doctor --capture`**: 라이브 helm values·kubectl 상태·.env를 읽어
-  gateway.yaml 역생성 — 기존 배포 온보딩
-- **소유 증명**: `_release_manifest_names`로 우리 release 리소스만
-  캡처/teardown 대상 인정 — 라벨 위조·교차 타깃 오인 방지(27차 리뷰)
-- **teardown**: apply 소유분만 삭제 — compose(컨테이너+네트워크,
-  `--purge` 볼륨), ecs(terraform 리소스 전부, deletion protection
-  티어는 해제 후), eks(helm release, `--infra`로 인프라까지)
-- **`upgrade eks`**: EKS 클러스터/매니지드 애드온 홉 단위 업그레이드 —
-  apply 가 건드리지 않는 버전의 절차형 명령. 라이브 실측→minor 한 칸씩
-  홉 분할→tfvars 기록→plan 범위 검사→apply→워크로드 재생성.
-  `infra.eks_version` 선언 필드 + capture 역생성·drift 안내 포함
-  (eks_upgrade.py)
-- **declared-off 수렴**: `merge_env`가 선언에서 빠진 관리 키를 .env에서
-  제거(WEB_SEARCH_ENABLED→AGENTCORE_* 동반 수렴 등)
-- **pending-teardown 마커**: `.pending-provisioner-teardown` — teardown
-  실패해도 추적 증거 보존
-
-## 6. 관련 문서 (docs/NDS/)
-
-`install-compose/ecs/eks-prereq.md`, `gateway-yaml.md`(스키마),
-`domain.md`, `update.md`(업데이트·teardown·capture), `ad-sync.md`,
-`observability.md`, `dr-runbook.md`, `upstream-sync.md`,
-`review/`(29라운드 리뷰 레포트 + AMM + PR 기록).
+[배포 CLI 소스](../deploy/cli.py) · [Terraform 모듈](../../../deployment/terraform/modules) · [ADFS](../adfs-sso.md) · [운영 인수인계](../op-guide/README.ko.md)

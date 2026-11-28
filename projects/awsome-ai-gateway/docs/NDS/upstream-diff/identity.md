@@ -1,62 +1,24 @@
-# 인증·인가 — upstream 대비 변경 전체
+# 인증·인가와 자격 증명
 
-upstream은 Cognito OIDC 단일 경로 + 관리자 수동 사용자 등록이었다.
-NDS는 **SAML/AD FS·dev 로그인·서비스 계정·JIT 프로비저닝·그룹 매핑**을 추가했다.
+**한국어** · [English](identity.en.md) · [비교 목차](README.md)
 
-## 1. OIDC 로그인 경로 — 분리와 확장
+## Cognito와 게이트웨이 사용자
 
-| 경로 | 기능 | upstream 대비 |
-|---|---|---|
-| `POST /v1/auth/exchange` | OIDC JWT → Virtual Key 교환 (CLI용) | 기존 경로 — `provision_user` 추출로 프로비저닝 공유화 |
-| `POST /v1/auth/provision` | JWT 검증→사용자/팀/역할 등록, **VK 미발급** | **신규(PR #4)** — 웹 첫 로그인 JIT 등록 |
-| `POST /admin/users/sync-cognito` | 풀 그룹 순회 + 전체 유저 열거 + `custom:groups` 속성 읽기 | 신규 — 배치/정합성 경로 |
-| `POST /admin/users/sync-cognito/user|group` | 개별 동기화 | 신규 |
+| 과정 | NDS 동작 |
+|---|---|
+| 관리자·직원 웹 첫 로그인 | 토큰 검증 → `POST /v1/auth/provision` → 사용자·팀·역할 결정 → `/admin/my/profile` 조회. VK 발급은 하지 않으며 등록 실패 시 웹 세션 생성을 거부합니다. |
+| CLI 로그인 | `POST /v1/auth/exchange`에서 공통 프로비저닝을 거쳐 직원 VK를 교환합니다. 승인된 STS 경로에도 계정·리전·역할 제한이 적용됩니다. |
+| 일괄 Cognito 동기화 | Cognito 그룹과 사용자 전체 목록을 순회해 풀 그룹이 없는 페더레이션 사용자도 매핑합니다. 사용자·그룹 단위 동기화를 제공합니다. |
+| 관리자 및 수동 팀 배정 | 정확히 일치하는 관리자 그룹 또는 설정된 검증 이메일을 확인합니다. 수동 배정 출처와 보호된 관리자 권한은 자동 동기화의 영향을 별도로 검사합니다. |
 
-`provision_user`는 exchange의 1-7단계(검증→클레임→Cognito 이메일 enrich→
-그룹 게이트→팀 해석→역할→upsert→활성 검사)를 그대로 수행하되 자격 발급을
-하지 않는다 — **로그인 시도 자체가 동기화 트리거**라 폴링/트리거 인프라
-불요. 레이트리밋 `rl:auth_exchange:{ip}` 공유(10/min).
+기존 OIDC 교환에 웹 등록을 분리한 변경은 `1ab19b29`, 그룹 클레임 선언은 `033d0632`를 참고합니다. `required_group`과 팀 접두사·미일치 거부 규칙은 사용자 도입 전에 확인합니다. [OIDC 라우터](../../../admin-api/src/app/routers/auth_oidc.py) · [그룹 매핑](../ad-sync.md)
 
-## 2. SAML / AD FS
+## ADFS SAML과 그룹 전달
 
-- **`custom:groups` 클레임** — Cognito 사용자 속성 + 토큰 클레임 양쪽 처리,
-  `OIDC_GROUPS_CLAIM` 설정화
-- **풀 그룹이 없는 SAML 사용자** — `_list_all_users` 전체 열거 + 속성 읽기로
-  sync 커버, 로그인 시 provision이 토큰 최신 그룹으로 등록
-- **`attr_groups` 병합** — SAML 유도 팀이 stale-team 정리에서 보존
-- **`team_source='manual'` 보호** — 관리자 수동 배정은 그룹-유도 자동 복귀
-  대상에서 제외(migration 0048)
+`85f608a9`와 `6d382cd4`를 통해 IdP·메타데이터·매핑·provider details를 `infra.cognito_saml`에서 관리합니다. ADFS에는 RP Identifier `urn:amazon:cognito:sp:<pool-id>`와 HTTPS ACS `/saml2/idpresponse`를 별개로 전달합니다. ADFS에서 내보낸 속성을 Cognito의 가변 `custom:groups`로 매핑할 경우, 사용하는 앱 클라이언트에 해당 속성 쓰기 허용이 필요합니다. 비교 종료점의 Terraform 모듈은 `custom:groups`를 읽기 목록에만 선언합니다. 가동 중인 앱 클라이언트와 선언을 함께 검증합니다. [Cognito 앱 클라이언트 정의](../../../deployment/terraform/modules/cognito/main.tf)
 
-## 3. dev_login · 서비스 계정
+SSO 변경은 실제 사용자의 assertion 속성 → Cognito 프로필 → 설정된 JWT 그룹 클레임 → 게이트웨이 등록·역할을 확인합니다. 재로그인 시 빠진 속성이 오래된 값으로 남을 수 있으므로 권한 제거 시험도 수행합니다. 환경이 한 가지 그룹 claim을 선택할 때 비상 네이티브 로그인 계정의 권한 경로도 확인합니다. [ADFS 런북](../adfs-sso.md)
 
-- **`features.dev_login`** — OIDC 공존 개발자 로그인(평가용, 무인증 dev
-  토큰). oidc 미배선 + 미선언이면 `DEV_LOGIN_ENABLED=false` fail-closed
-- **`features.service_keys`** — 장기 서비스키 발급 on/off 분리
-- **서비스 계정 장기 VK** (migration 0050) — 사람 로그인 경로로 서비스
-  계정이 키를 받을 수 없게 거부(`service_account_login_forbidden`) —
-  유저당 ACTIVE 1개 규칙상 장기키를 즉시 죽이는 사고 방지
-- **`adminBootstrap` groups/emails** — 선언한 키만 env overlay를 덮는
-  부분 적용
+## 권한별 자격 증명
 
-## 4. 그룹 → 역할/팀 매핑
-
-`gateway.yaml`의 `oidc` 블록에 그룹→역할/팀 매핑 선언 —
-`required_group`, `group_prefix`, `groups_claim`, `reject_unmatched_groups`,
-`admin_groups`, `admin_emails`, `vk_ttl_hours` 전부 배포 선언에서 제어.
-역할 도출은 ADMIN_EMAILS 매칭 시 **검증된 이메일만** 사용
-(`email_verified`·preferred_username 미검증 경로 분리).
-
-## 5. CLI 인증
-
-- STS presigned URL 기반 로그인 — admin-api가 STS URL을 **서버측 https
-  fetch**로 검증(SSRF 표면이라 http 변형 거부). `ALLOWED_STS_REGIONS`·
-  `ALLOWED_AWS_ACCOUNTS`·`ALLOWED_IAM_ROLES` 화이트리스트
-- `cookieToken` = id_token 우선(검증된 세션 토큰), admin-ui 콜백이
-  provision → profile 순서로 호출, 실패 시 쿠키 미발급
-
-## 6. 세션·로그아웃
-
-- Cognito **id_token 12h** + Hosted UI 브랜딩
-- 로그아웃 시 IdP 세션까지 종료 — Cognito `/logout` + 로컬 쿠키 정리
-- 로케일/만료 정규화 — 파싱 불가·만료 세션은 실제 `isSessionExpired`
-  계약대로 처리(dev 토큰 보존)
+직원 VK는 OIDC/CLI를 사용합니다. 서비스 계정용 장기 VK는 **Agents**에 있으며 서비스 계정의 사람이 쓰는 로그인 경로는 차단됩니다. 일반 `svc-` 토큰과 AICM scoped `svc-` 토큰은 동일한 접두사라도 승인 경계가 다릅니다. dev 로그인은 평가용이며 환경 플래그로 제어합니다. Cognito 로그아웃은 Hosted UI와 로컬 쿠키 정리를 수행합니다. ADFS에서 남은 세션으로 재인증되는지는 IdP 설정을 별도로 확인합니다. [관리 API 비교](admin-api.md) · [운영 인수인계](../op-guide/README.ko.md)

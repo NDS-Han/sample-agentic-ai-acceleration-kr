@@ -1,52 +1,27 @@
-# 워커·부속 서비스 — upstream 대비 변경 전체
+# 워커, 비용과 관측
 
-## 1. notification-worker (+5,133)
+**한국어** · [English](workers-aux.en.md) · [비교 목차](README.md)
 
-| 변경 | 내용 |
+## 비용 데이터 흐름
+
+프록시가 사용·비용 이벤트를 만들고 비용 워커가 스트림을 소비해 저장과 집계를 진행합니다. `87ff960b`는 비용 정밀성, `11aad69c`는 내구성, `23c0c6c8`은 대사 조정을 추가합니다. 요청 시작/종료 기록과 대응되는 확정 이벤트, DB fallback과 재처리, 비정상적으로 열린 요청 점검을 포함합니다. 복구 중 추정치가 생길 수 있어 원장·예산 차이를 보고합니다. 웹 검색 과거 데이터 보정은 `93561142`를 확인합니다.
+
+v2 일·월·시간 집계, dirty mark 및 대사 상태로 지연·재계산을 추적합니다. 기본 시간 집계는 매시 05분, 일 집계는 00:10, 대사는 01:00입니다. 실제 일정과 타임존을 확인합니다. 내부 원장을 대조하며 외부 AWS CUR/CloudWatch 청구 대조는 별도 설계로 관리합니다. [R7 설계](../cost-reconciliation-r7.ko.md) [비용 워커 소스](../../../cost-recorder-worker) · [관리 API·스키마](admin-api.md)
+
+## 알림 경로
+
+| 경로 | 무엇을 확인 |
 |---|---|
-| **SES 발송 채널** | worker 코드 + 로케일 템플릿, SES 발신 provider + IRSA·provider 전환 도구(update-scripts yq 재작성) |
-| **notifications:system** | 무발행 채널 연결 — degradation/provider_error 알림 경로(R40) |
-| **VK 수명주기 알림** | 키 만료·폐기 알림, 만료 키 purge(기본 off) |
-| **예산 알림** | `budget_alert_thresholds`(0041) 소비 — 임계값 도달 시 발송 |
-| dedup | `notification_logs_dedup`(0040) — 중복 발송 방지 |
-| 로그 위생 | 예외 메시지의 이메일 마스킹(`mask_emails_in_text`) |
+| AWS 알람 | `features.alerting`, CloudWatch/SNS 구독 승낙, Aurora·ElastiCache·ALB 검증과 선택 로그 전달 |
+| Prometheus/Alertmanager | EKS 관측 스택 설치, `observability.alerting.enabled`, 관측 namespace의 Slack Secret과 규칙. 기본 Prometheus 24h/emptyDir와 Alertmanager 상태 보존 120h는 별개 |
+| notification-worker | 예산·키 이벤트, dedup·메일 공급자. 비용 대사 알림은 별도 `features.business_alerts`와 대상별 Slack 설정 |
 
-## 2. cost-recorder-worker (+4,057)
+`31072728`에서 비용 알림을 EKS·ECS·Compose에 연결했습니다. EKS는 워커 namespace Secret, ECS는 앱 secret의 `slack_webhook_url`, Compose는 `SLACK_WEBHOOK_URL`을 확인합니다. 운영 화면에 알림이 보일 때 원본 이벤트를 어느 경로가 처리했는지 확인합니다. [관측 런북](../observability.md)
 
-- 예산 정산 정합 — 장문 컨텍스트 티어(0042/0047) 요금 계측,
-  Haiku 5.5 비용 정합
-- LiteLLM 단가 동기화 소스 소비, `LITELLM_COST_MAP_URL` 폴백
-- daily_aggregates bigint(0044), key_prefix(0051)·session_id(0054)
-  사용 로그 컬럼 반영
+## 부속 서비스
 
-## 3. litellm-pricing-lambda/ — 신규
+- **가격 Lambda**는 옵션형 LiteLLM 카탈로그 경로입니다. 비활성 환경은 AWS Price List 또는 수동 단가를 사용합니다.
+- **BI Insight**는 기존 chat agent를 확장해 AgentCore Runtime·DB reader 설정을 배포 수명주기에 넣고 `/chat` 보고서 흐름에 연결합니다.
+- **mock과 부하 테스트**는 내부 스테이지에서 SSE, 동시 로그인, executor 포화와 Redis/DB 용량을 재현하는 데 사용합니다. 모의 호출의 결과와 실제 공급자의 지연·비용을 별도로 확인합니다.
 
-- LiteLLM 단가 조회를 **Lambda 프록시로 격리** — 직접 호출 제거,
-  미배포 시 admin-ui 비활성화
-- `LITELLM_COST_MAP_URL` cost-map 폴백 모드
-- deploy 프로비저너(`pricinglambda.py`)가 배포·동기화 — NDS-01
-
-## 4. admin-chat-agent (+1,758)
-
-- **NDS 자동 프로비저닝 승격** — `chatagent.py`가 AgentCore Runtime
-  생성·등록, `chat_reader` DB 비밀번호 자동 동기화
-- 메시지 리포트(migration 0057) + admin-ui `/agents` 페이지
-- Runtime teardown을 NDS 수명주기에 편입(수동 단계 제거)
-
-## 5. mock/ + loadtest/ — 신규
-
-- **`mock/`** — mock-bedrock 서비스: 부하 테스트에서 Bedrock 비용 $0
-- **`loadtest/`** — k6 시나리오·k8s 잡·SSE-hold 로드젠
-  (`sse_loadgen.py`) — 10k boot-storm·executor 포화 등 실측 부하
-
-## 6. alerting·관측 인프라 (terraform 모듈)
-
-- `alerting` 모듈 — SNS + CloudWatch alarms + Fargate log shipping
-- `bedrock-invocation-logging`·`body-logging` 모듈 — 로그 수집 계층
-- ALB 알람 자동 발견 — apply가 ingress→elbv2 dimension 주입
-- 비용·예산 알림은 notification-worker가 소비
-
-## 7. BI Insight (ecs 타깃)
-
-- `bi_insight` 기능 — AgentCore Runtime 프로비저닝 + DB 비밀번호
-  동기화, 미배포 시 admin-ui 숨김
+[알림 워커](../../../notification-worker) · [부하 검증](../loadtest.md) · [운영 인수인계](../op-guide/README.ko.md)

@@ -1,60 +1,85 @@
-# NDS 전환 변경사항 종합 — upstream 대비 기능 차이 목록
+# NDS Gateway 변경 내역 — upstream 대비 상세 비교
 
-**한국어** · [English](README.en.md)
+**한국어** · [English](README.en.md) · [운영·배포 인수인계](../op-guide/README.ko.md)
 
-이 디렉토리는 upstream(`gonsoomoon-ml/sample-agentic-ai-acceleration-kr`)과
-NDS 브랜치 사이의 **기능 단위 차이 전체**를 정리한다. 기준 커밋:
+## 비교 범위
 
-- **merge-base**: `e3a39757` (upstream PR #17 머지 — 2026년 초)
-- **비교 시점**: 2026년 11월 16일 문서 작성 당시의 `nds/dev` (`5963902b`의 변경 기록)
-- **규모**: `projects/awsome-ai-gateway` 기준 1560 파일, +269,782/−14,988 라인,
-  커밋 ~1,384개
-
-upstream은 merge-base 이후 거의 정지해 있어, 사실상 **모든 차이가 NDS 쪽
-추가·변경**이다. 삭제된 top-level 디렉토리는 없다.
-
-현재 절차는 [NDS 문서 목차](../README.md), 이후 upstream 반영 절차는 [upstream 동기화](../upstream-sync.md)를 참고합니다.
-
-## 문서 구성
-
-| 문서 | 범위 |
+| 항목 | 기준 |
 |---|---|
-| [deployment.md](deployment.md) | NDS 배포 모델 — `gateway.yaml` 선언적 배포 도구, terraform 모듈, helm 차트, capture/doctor/teardown, 도메인 자동화, 용량 티어 |
-| [identity.md](identity.md) | 인증·인가 — OIDC/Cognito/SAML-AD 연동, `/v1/auth/exchange`·`provision`, dev_login, 서비스 계정, 그룹→역할/팀 매핑 |
-| [admin-api.md](admin-api.md) | 관리 API — 신규 라우터 5종, 감사·설정·바디로그·서비스 계정, DB 마이그레이션 0024–0057 |
-| [admin-ui.md](admin-ui.md) | 관리자 콘솔 — 신규 페이지 5종, 전면 i18n, 정책 편집·예산·모니터링 UX |
-| [gateway-proxy.md](gateway-proxy.md) | 게이트웨이 프록시 — web search 루프, body logging, Claude Code auto/safeguards, CAP 강제, 계정 라우팅, 장문 티어 |
-| [clients.md](clients.md) | 클라이언트 — 직원용 인스톨러(Win/Linux), cowork-installer, gateway-cli v1/v2, policy-helper, OTEL |
-| [workers-aux.md](workers-aux.md) | 워커·부속 — notification(SES)·cost-recorder·pricing-lambda·admin-chat-agent·mock-bedrock·loadtest |
+| 고정 upstream 기준 | `e3a3975745716bc7413c125a50a6bac3fcd94c95`. 2026년 7월 14일 KST, upstream PR #17 머지 |
+| NDS 비교 종료점 | `98e825a011a79f56b89bb89ef61ffe95d612f15b`. 2026년 11월 28일 KST, `codex/nds-bilingual-docs`의 이번 보고서 작성 직전 커밋 |
+| 확인한 원격 브랜치 | 2026년 11월 28일 KST 조회에서 upstream 기본 브랜치는 기준점 `e3a39757`, `origin/nds/dev`는 `93d502c6` |
+| 로컬 `nds/dev` | `de4909bc`. 이 브랜치에는 기존 관리자·운영 문서 변경이 포함되며, 한·영 문서 구성 커밋은 별도 문서 브랜치에 있음 |
 
-## upstream에 없는 신규 top-level 구성요소
+커밋 수는 기준 커밋을 제외하고 종료점에서 도달할 수 있는 이력을 셉니다. 병합 커밋을 포함하며, 동일 커밋은 한 번만 셉니다. 파일과 줄 수는 양 끝의 트리를 비교한 순변경입니다. 중간의 반복 수정이나 되돌리기는 커밋 이력에 남고 순변경에서는 최종 결과만 반영됩니다.
 
-| 경로 | 내용 |
+| 범위 | 커밋 | 변경 파일 | 추가 줄 | 삭제 줄 |
+|---|---:|---:|---:|---:|
+| 전체 저장소 `e3a39757..98e825a0` | 1,638 | 2,135 | 399,066 | 16,830 |
+| 같은 범위에서 게이트웨이 프로젝트만 | 1,554¹ | 1,849 | 335,000 | 16,830 |
+| 원격 `origin/nds/dev` 종료점, 프로젝트 파일 통계 | 1,635² | 1,828 | 334,639 | 16,830 |
+| 로컬 `nds/dev` 종료점, 프로젝트 파일 통계 | 1,637² | 1,811 | 333,967 | 16,830 |
+
+¹ `git rev-list --count <range> -- projects/awsome-ai-gateway`의 경로 제한 이력입니다. 병합 단순화의 영향을 받습니다. ² 해당 종료점까지의 전체 저장소 커밋 수입니다. 고정 종료점의 전체 이력에는 병합 커밋 90개가 포함됩니다. 줄 통계는 소스, 테스트, 문서, 생성 명세를 합한 값입니다. 바이너리는 파일 수에만 포함됩니다.
+
+## 구성요소별 순변경
+
+아래는 `git diff --numstat`을 프로젝트의 최상위 경로별로 묶은 상위 항목입니다. `docs/`에는 문서, 이미지와 `docs/NDS/deploy` 구현·테스트가 함께 들어 있습니다.
+
+| 경로 | 파일 | 추가 줄 | 삭제 줄 | 무엇을 찾아볼 수 있나 |
+|---|---:|---:|---:|---|
+| `docs/` | 349 | 69,873 | 1,202 | NDS 배포 CLI·검증, 운영·고객 문서와 캡처 |
+| `admin-ui/` | 324 | 49,693 | 7,478 | 앱·팀·사용자 정책, 예산·비용·감사·로그 콘솔 |
+| `gateway-proxy/` | 251 | 60,573 | 2,872 | 요청 경로, 정책 집행, 분산 정산과 회복 동작 |
+| `admin-api/` | 236 | 60,803 | 2,555 | 관리 API, AICM 경계, 인증·조회·운영 기능 |
+| `deployment/` | 152 | 16,384 | 1,325 | Terraform, Helm, 실제 배포와 점검 도구 |
+| `installer/`와 `cowork-installer/` | 156 | 31,676 | 0 | 여러 운영체제용 직원 설치와 관리 정책 |
+| `notification-worker/`와 `cost-recorder-worker/` | 120 | 19,950 | 511 | 비용 원장·이상 알림·사용량 집계 |
+| `db/` | 75 | 8,266 | 162 | 스키마·집계·정책 및 감사의 데이터 계약 |
+| `gateway-cli/`, `policy-helper/`, `gateway-clients/` | 53 | 4,246 | 395 | 장치 로그인, 정책 공급, 일부 앱 실행 경로 |
+| `admin-chat-agent/`, `litellm-pricing-lambda/`, `loadtest/`, `mock/` | 39 | 2,911 | 182 | BI Insight, 외부 단가, 부하 검증 |
+
+upstream에도 `deployment/`, 핵심 서비스, CLI, BI 에이전트와 워커가 있었습니다. 새 최상위 구성에는 `deploy`, `installer/`, `cowork-installer/`, `policy-helper/`, `litellm-pricing-lambda/`, `mock/`, `loadtest/` 등이 포함됩니다. 기존 Cognito OIDC와 Codex 라우팅, 웹 검색 관련 필드도 기준 트리에 일부 있으므로 아래 문서는 **NDS에서 추가한 부분과 확장한 부분**을 나눠 설명합니다.
+
+## 분야별 상세 설명
+
+| 분야 | 문서 | 설명할 내용 |
+|---|---|---|
+| 배포 및 클라우드 소유권 | [배포](deployment.md) | 선언적 수명주기, 기존 배포 편입, TLS, 관리형 Terraform, 기능 플래그와 운영 검증 |
+| 로그인과 권한 | [인증·인가](identity.md) | Cognito 웹 등록, CLI VK, ADFS, 관리 주체와 서비스 키 경계 |
+| 관리·통합 계약 | [관리 API](admin-api.md) | AICM 미러, 보호 대상, 필드 소유권, 앱 그룹 예산, 데이터 마이그레이션 |
+| 요청 처리 | [Gateway Proxy](gateway-proxy.md) | 모델·앱·계정 라우팅, 예산 집행, 웹 검색, 계량과 장애 시 동작 |
+| 관리자 워크플로 | [관리자 UI](admin-ui.md) | 13개 관리자 메뉴, 유효 정책, 비용, 웹 검색 쿼터와 관측 |
+| 직원·클라이언트 | [클라이언트](clients.md) | 설치기, 세 가지 앱, 자격 증명과 정책 관리 |
+| 백그라운드·관측 | [워커와 부속 서비스](workers-aux.md) | 집계, 비용 대조, 알림, BI Insight, 복구와 용량 측정 |
+
+## 주요 이정표
+
+이 표는 설명을 위한 대표 커밋입니다. 각 커밋 이후의 수정·병합도 위 범위에 포함됩니다.
+
+| 커밋 | 의미 |
 |---|---|
-| `deploy` | `./deploy` 진입점 — `docs/NDS/deploy.sh` 위임 래퍼 |
-| `docs/NDS/` | NDS 통합 문서 + **배포 도구 전체**(deploy/*.py, render/, tests/) |
-| `deployment/` | terraform 모듈 12종·environments 3종, helm 차트, render 산출물, TUI |
-| `installer/` | 직원용 CLI 인스톨러 — Windows(Inno Setup)·Linux(deb), packaging, site-config |
-| `cowork-installer/` | Cowork용 별도 인스톨러 트리 |
-| `policy-helper/` | Claude Code 정책 조각 도구 — baseline 병합, macOS 설치 |
-| `litellm-pricing-lambda/` | LiteLLM 단가 조회 Lambda 프록시(직접 호출 격리) |
-| `mock/` | mock-bedrock — Bedrock 비용 $0 부하 인프라 |
-| `loadtest/` | k6·k8s 부하 시나리오 + SSE hold 로드젠 |
-| `tasks/` | 작업 추적 문서 |
+| `5faffc30` · `9664a2c3` | `gateway.yaml` 기반 배포 도구 도입, `docs/NDS`에 통합 |
+| `01b4b8d3` · `535684f6` · `a23e3932` · `92d64e0a` | 웹 검색 프로비저닝, Route 53/ACM, EKS/ECS 용량 밴드 |
+| `033d0632` · `1ab19b29` · `81f8d8c6` | OIDC 그룹 설정, 웹 로그인 등록, EKS 버전 업그레이드 경로 |
+| `7105fa70` · `e3e266d1` · `13912dbe` · `d8bddad4` | 본문 로그 뷰어, 사용자별 모델 분석, 웹 검색 비용과 쿼터 |
+| `87ff960b` · `11aad69c` · `23c0c6c8` · `93561142` | 비용 정밀성·내구성·대조 및 웹 검색 과거 이력 보정 |
+| `fafbf571` · `e5937270` · `3fb446f8` · `e47702c9` | Redis 장애 시 예산 보호, 요청 격리, 모델 캐시와 시작 warmup |
+| `26ba62b5` · `dab69252` · `7407f84d` | Redis 핫패스 최적화, 관리자 조회, 비용 워커 배치 처리 |
+| `e301ee8e` · `df3731a5` · `92e6178e` · `8040b1d5` | AICM 관리 필드·레거시 경로 제거·앱 그룹 집행·토큰 및 정산 계약 회귀 수정 |
+| `33ee0cfc` · `31072728` · `85f608a9` · `6d382cd4` | Alertmanager 게이트, 대상별 비용 알림 배선, ADFS 설치 도구와 SAML provider_details 선언 |
+| `288660c5` · `de4909bc` · `98e825a0` | dev 콘솔 캡처 74장과 관리자 HTML, 운영 문서 최신화, 한·영 목차 |
 
-## 변경의 축 — 한눈에
+## 통계와 변경을 재현하는 방법
 
-1. **배포 방식 교체**: 사이트 고정 스크립트(`docs/us-llm-gateway/`, update-scripts,
-   install-eks.sh 등) → **`gateway.yaml` 단일 선언 + `./deploy` 통합 도구**.
-   compose(t0)·ecs(t1/t2)·eks(t2/t3) 3대상, bootstrap/apply/doctor/teardown
-   수명주기, `doctor --capture` 역생성.
-2. **멀티앱·거버넌스**: 앱 단위 모델 허용·예산·라우팅(allowed_clients,
-   user>team>org 계층), CAP 약정 강제(cap_u=A_u×D), 모델·계정 레벨 라우팅.
-3. **인증 확장**: Cognito OIDC + SAML/AD FS + dev_login 공존 — JIT provision,
-   서비스 계정 장기키, 그룹→역할/팀 매핑.
-4. **관측·비용**: web search 정산, body logging(Firehose→S3), 장문 컨텍스트
-   티어 요금, LiteLLM 단가 Lambda, 예산 알림 임계값, notification SES.
-5. **운영 도구**: 인스톨러·정책 헬퍼·chat-agent·mock/loadtest·doctor·
-   캡처·마이그레이션 34개·리뷰 레포트(`docs/NDS/review/`).
+저장소 루트에서 실행합니다.
 
-각 문서는 "기능 → 무엇이 달라졌는가 → 왜(NDS 요구)" 순으로 정리한다.
+```bash
+git rev-list --count e3a39757..98e825a0
+git log --first-parent --oneline e3a39757..98e825a0
+git diff --shortstat e3a39757..98e825a0
+git diff --shortstat e3a39757..98e825a0 -- projects/awsome-ai-gateway
+git diff --name-status e3a39757..98e825a0 -- projects/awsome-ai-gateway
+```
+
+이 보고서는 소스 비교입니다. 2026년 11월 28일 dev 실측에서는 관리자 UI `4fe6d927`, 핵심 API·프록시·비용 워커·스케줄러 `8040b1d5`, 알림 워커 `62493ba1`로 나뉘었습니다. 변경별 적용 여부는 서비스 태그와 환경 설정을 확인합니다. [운영·배포 인수인계](../op-guide/README.ko.md)

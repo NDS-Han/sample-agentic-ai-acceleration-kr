@@ -44,7 +44,8 @@ Claude Code, Cowork, Codex를 연결하는 NDS Gateway의 배포·운영 문서�
 
 - 유지보수 · [upstream 동기화](upstream-sync.md) · [배포 설계 결정](decisions.md)
 - 기술 참고 · [Alertmanager 추가 수신자 예시](alerting-receivers.md) · [R7 외부 비용 대조 설계](cost-reconciliation-r7.ko.md)
-- 이전 기록 · [레거시 EKS 전환](upgrade-eks-legacy.md) · [NDS 전환 변경 기록](upstream-diff/README.md) · [리뷰 기록](review/README.md)
+- 변경 비교 · [upstream e3a39757 이후 NDS Gateway 변경 내역](upstream-diff/README.md)
+- 이전 기록 · [레거시 EKS 전환](upgrade-eks-legacy.md) · [리뷰 기록](review/README.md)
 
 ## 어떤 경로로 배포할까
 

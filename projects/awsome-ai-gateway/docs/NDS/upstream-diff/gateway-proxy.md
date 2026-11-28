@@ -1,63 +1,29 @@
-# gateway-proxy — upstream 대비 변경 전체
+# Gateway Proxy 요청 경로
 
-가장 큰 코드 델타(+48,837 라인). VK/JWT 인가·레이트리밋·예산·회계의
-기본 골격 위에 **web search 루프·body logging·Claude Code 모드·CAP
-강제·계정 라우팅·장문 티어**를 추가했다.
+**한국어** · [English](gateway-proxy.en.md) · [비교 목차](README.md)
 
-## 1. Web Search 루프 (`web_search`)
+## 요청 한 건에서 달라진 점
 
-| 변경 | 내용 |
-|---|---|
-| 네이티브 블록 | 검색 흔적을 Anthropic 네이티브 `tool_use`/`tool_result` 블록으로 기록 (1.0.70-native) |
-| 되돌아온 결과 | 검색 결과 발췌를 본문 600자→트림 전체(1500자)로 재작성, "전문은 그 턴에 봤다" 메모 (1.0.72/74/75) |
-| 균형 조정 ①~⑤ | 품질 우선 균형 (1.0.67-balance) |
-| 클라이언트 도구 공존 | web search + 클라이언트 자체 도구 혼합 턴 실행·soft final 턴 (1.0.78-clienttools) |
-| tool_search | `ENABLE_TOOL_SEARCH` 기본 활성 + `--tool-search` 플래그 |
-| 비용 상한 | EC2 values에 web search 비용 상한 4개 + 정산·상태전파·억제 정합 |
-| 프로비저닝 | AgentCore Gateway URL 자동 프로비저닝·values 반영 |
-| TTFT | 클라이언트 체감 TTFT 기록(web search 경로) |
+| 단계 | NDS 변경 | 운영 영향 |
+|---|---|---|
+| 인증과 정책 | VK/클라이언트 확인을 기존 경로에 유지하고 앱 기본값, 모델·사용자·팀·조직 허용 규칙과 `GET /v1/policy`를 연결 | 실제 앱과 유효 정책부터 확인 |
+| 모델 선택 | 모델별 역할 ARN → 앱/클라이언트별 역할 ARN → 워크로드 IAM, 모델 별칭과 provider ID 분리 | 실제 호출 계정·구독·허용 ARN 확인 |
+| 예산 | 사용자·팀 예약과 정산, 자동 다운그레이드, Claude Code/Cowork별 앱 그룹 집행 | 해당 사용자 앱 한도와 그룹 상한의 작은 값 적용. 0은 차단, 삭제는 그룹 제한 해제 |
+| 전송과 비용 | Anthropic 도구 블록·검색/클라이언트 도구 혼합 처리, Codex/스트리밍 경로, 장문 가격 및 검색 비용 | TTFT와 결과·원장 반영을 동일 요청으로 추적 |
+| 관측 | 요청·세션·키 prefix, 계정 라우팅·정산·executor 지표, 선택 본문 로그 | 메타데이터와 감사 로그로 먼저 조사하고 본문 수집 범위를 제한 |
 
-## 2. Body Logging
+## 웹 검색 및 비용
 
-- 요청/응답 본문 로깅 — **관리자 런타임 토글**, 위험 방향 가드
-- OpenAI 방언 + web-search 경로 포함
-- **싱크: Firehose → S3**, 모든 계층에서 기본 off (body-logging 모듈)
+기준의 검색 관련 필드를 AgentCore Gateway 프로비저닝, 네이티브 tool use/result, 검색 비용 정산, 쿼터와 backfill로 확장했습니다. 검색 쿼터는 조직·팀 풀과 사용자 예외를 별도로 관리합니다. 모델·웹 검색 금액을 나눠 계산하며, 역사 검색 backfill의 집계 표시는 당시 과금 여부와 구분해 해석해야 합니다. 장문 컨텍스트 가격은 입력·출력·캐시 밴드와 요청의 price tier를 대조합니다. [검색 쿼터 구현](../../../gateway-proxy/src/app/services/web_search_quota.py) · [비용 원장](../../../gateway-proxy/src/app/services/cost_ledger.py)
 
-## 3. Claude Code 모드·정책 조각
+## 가용성과 실제 제한
 
-- **Auto mode 서버 분류기** — beta 2개 + safeguards 전달, 웹 검색
-  응답에 판정 유지
-- `GET /v1/policy` — policy-helper가 VK로 받는 정책 조각, 거버넌스
-  허브 조각을 모델 조각 아래 병합, **허브 불통 → 503**, 허브 조각 키는
-  허용 목록만 통과
-- 조각의 `null`이 기본값 키를 지우도록 merge 확장
-- inline-tools·thinking-display-updates 전달, advisor를 가리키는
-  tool_addition 제거
-- safeguards passthrough
+`fafbf571`의 budget degraded 처리는 상태에 따라 이전 결과와 제한된 보호 범위를 적용합니다. 보호가 필요한 판단의 유효 상태를 확보하지 못하면 503을 반환할 수 있습니다. 분산 정산은 단일/클러스터 Redis의 Lua 경로와 캐시 무효화를 맞췄습니다. `8040b1d5`에서 정산 parity와 무효화 회귀를 수정했습니다. 모델 캐시, 시작 시 warmup, 핫패스 왕복 감소, 요청 격리와 포화 계측을 추가했습니다. 운영 시 503을 provider, executor, Redis·예산 보호, DB 중 어느 지점에서 냈는지 분류하고 제한과 캐시를 함께 확인합니다. [예산 로직](../../../gateway-proxy/src/app/services/budget_service.py) · [degraded 처리](../../../gateway-proxy/src/app/services/budget_degraded.py)
 
-## 4. CAP 약정 강제 (gateway enforcement)
+### 예산·공급자·비용의 구분
 
-`cap_u = A_u × D` 산식, `limit=0` 차단, 계층 조합
-(D-3,8,10,12,14,20) — 팀 기본 유저 cap(migration 0039)과 연동.
+사용자 앱 및 팀 예산은 처리 전에 예약하고 알려진 사용 비용으로 정산합니다. 다운그레이드가 설정된 팀은 한도 지표와 목적 모델의 권한·가격을 함께 검증합니다. 잡힌 예약, final event와 정산 결과의 상태가 어긋나면 먼저 원장·Redis·대사 지표를 비교합니다. 단가 정정은 신규 요청 가격과 집계 보정을 구분합니다. Provider error는 어떤 모델·역할·리전 경로가 실패했는지 구분해 분석합니다.
 
-## 5. 모델·계정 라우팅
+## 본문 로그와 클라이언트 정책
 
-- **모델 레벨 AWS 계정 라우팅** — 전 디스패치 경로에서 모델별
-  x-account ARN 선택(migration 0049), 클라이언트 라우팅 프로필
-  편집 + DR runbook
-- 허용 목록: user > team > org 계층 `allowed_clients` 해석(0038 소비자)
-
-## 6. 장문·요금 티어
-
-- **272K long-context tier** — 명시적 요금 + per-request tier audit,
-  Haiku 5.5 장문 요금 + cost-worker 정합
-- 단가 NUMERIC(12,8) 정밀도, 100K 초과 구간 단가
-
-## 7. 운영성
-
-- **bedrock executor inflight → custom-metric HPA 신호** — 포화 계측
-  + 스케일링 문서
-- 예산 복구·circuit breaker·자격증명·바디로그 보조 서비스군 정합
-- `Authorization: Bearer `(후속 공백) IndexError → 401 방어
-- session_id(0054)·key_prefix(0051) 사용 로그 컬럼
-- 요청별 tier audit·web search·비용 필드 회계 정합
+본문 로깅은 infra와 관리자 런타임 조건을 충족할 때 Firehose를 통해 S3에 수집할 수 있습니다. 비마스킹 데이터를 조회하므로 기간·접근과 감사 기록을 통제합니다. `/v1/policy`는 VK로 요청하는 클라이언트 정책 조각입니다. 선택된 거버넌스 공급자의 장애는 정책 응답에 영향을 주므로 실제 배포와 반환 코드를 확인합니다. [관측·로그](../observability.md) · [클라이언트 배포](clients.md)

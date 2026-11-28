@@ -11,6 +11,36 @@
 
 ---
 
+## Read this on your first day
+
+Use this handover with the [console walkthrough](../guides/admin-guide.en.html) and the [upstream comparison](../upstream-diff/README.en.md). Record an evidence link, operator and timestamp for each of the checks in `14.
+
+1. Inventory account, Region, deploy host, Terraform backend, EKS context or ECS cluster, namespace, ingress, and service ownership for each environment.
+2. From the approved deployment host, verify the target and review the running images, migration revision and feature flags. Preserve the previous compatible release configuration for rollback.
+3. Sign in as an administrator. With a separate employee test account, verify web provisioning, team and role, CLI VK issuance, a real gateway call and its later appearance in usage.
+4. Identify the DNS, SSO, network, database, on-call and cost owners. Confirm secret recovery access through the approved vault and test alert delivery and backup restoration in a designated non-production environment.
+
+### Observed development baseline
+
+The EKS deployment templates on 28 November 2026 KST specified these image tags:
+
+| Workload | Image tag |
+|---|---|
+| admin-ui | `4fe6d927` |
+| admin-api, gateway-proxy, cost-recorder-worker, scheduler | `8040b1d5` |
+| notification-worker | `62493ba1` |
+
+These are the desired Deployment images. Check Pod image IDs and rollout status separately. The check covered development. It showed `DEV_LOGIN_ENABLED=false` explicitly in admin-ui and admin-api, and `ROI_AGGREGATION_ENABLED=false` in scheduler. `AICM_API_ENABLED` and `BUSINESS_ALERTS_ENABLED` had no direct environment entry in the inspected templates and default to false in source. Check references to ConfigMaps and Secrets and verify the actual feature before relying on either gate. Development Prometheus was configured for 24 hours with no persistent storage.
+
+Run these checks from the gateway project root when taking a fresh EKS baseline. Substitute the approved context, namespace and config.
+
+```bash
+aws sts get-caller-identity
+kubectl --context "<eks-context>" -n llm-gateway get deployments
+kubectl --context "<eks-context>" -n llm-gateway get pods
+./deploy doctor --config "<config-path>" --context "<eks-context>"
+```
+
 ## 0. What changed: us-deploy → NDS
 
 The gateway is no longer deployed by per-site shell scripts. NDS makes the
@@ -241,7 +271,7 @@ network:
   allowed_cidrs: [<employee egress CIDRs>]
   admin_internal: true          # admin Ingress internal-only (S2S VPN)
 
-oidc:                           # issuer_url set = OIDC ON; empty = dev-login (never open)
+oidc:                           # issuer_url configures OIDC; dev login has a separate explicit gate
   issuer_url: https://cognito-idp.<region>.amazonaws.com/<pool-id>
   client_id: <app-client-id>
   authorize_url: https://<hosted-ui-domain>.auth.<region>.amazoncognito.com/oauth2/authorize
@@ -460,9 +490,15 @@ aws-marketplace:Subscribe` means subscribe in the target account.
 - **Auto-downgrade** redirects a member's requests to a cheaper alias at
   a usage threshold — shown as `downgrade N` on the team row.
 - Enforcement is fail-safe: a Redis settle failure leaves the reservation
-  over-counted — early block possible, overspend never.
+  over-counted — a temporary early block is possible. Check reconciliation and reserve/settle lag before adjusting limits.
 - Rate limits resolve per scope (member > team > org > default) —
   Effective Policy card shows the resolved result.
+
+Match the app shown in the request and the console before troubleshooting a denial. Claude Code and Cowork each use the lower of the user app limit and its corresponding app-group limit. A zero cap explicitly blocks; deleting the group cap removes that group constraint. Codex follows its own policy. Compare web-search organization/team quotas and user overrides separately from model spend, with the same reporting timezone and date window.
+
+#### AICM integration
+
+Check `AICM_API_ENABLED` before testing the `/aicm/v1/admin/*` mirror. Integration clients use scoped service tokens issued by an authenticated administrator via `POST /admin/service-tokens`. Record the client owner, scopes, CIDRs, expiration and rotation sequence. Limit verification to an approved integration environment. Newly issued or rotated credentials should pass one authorized read and fail a request outside their scope. With `AICM_MANAGED_LOCK_ENABLED`, verify field ownership and inspect the audit trail before resolving a 409 by releasing a lock. [AICM contract and migration changes](../upstream-diff/admin-api.en.md)
 
 ### 9.5 Models & pricing
 
@@ -521,7 +557,7 @@ destination. Review the impact dialog before entering the alias.
   not an always-on feature; every view is audited.
 - **Dashboards + opt-in alerts** — the Prometheus/Grafana stack collects
   metrics and feeds the HPA; Alertmanager sends gateway/cost alerts to
-  Slack once the per-env webhook Secret exists (observability.md §10), and
+  Slack with `observability.alerting.enabled` and its per-environment webhook Secret configured (observability.md §10), and
   `features.alerting` adds SNS + CloudWatch alarms for Aurora/
   ElastiCache plus optional Fargate→CloudWatch log shipping through the
   managed overlay. Confirm the SNS subscriptions to receive CloudWatch
@@ -548,6 +584,7 @@ in `REPORTING_TIMEZONE`, default **Asia/Seoul**):
 | `key_expiry` | `0 * * * *` | Expires VKs past TTL — a user's key "randomly" failing is often this |
 | `service_key_repair` | `*/15 * * * *` | Auto-heals agent-key auth mappings (what **Repair auth** does manually) |
 | `key_purge` | `30 3 * * *` | Deletes expired VKs after 90d retention — **disabled by default** (`KEY_PURGE_ENABLED`); enabling is a retention-policy decision |
+| Hourly usage rollup (cost-recorder) | `5 * * * *` | Refreshes hourly usage and cost aggregates |
 | `daily_usage_agg` (cost-recorder) | `10 0 * * *` | Daily usage/cost aggregation feeding Analytics |
 | `cost_reconciliation` (cost-recorder) | `0 1 * * *` when enabled | Checks the internal usage, cost, and budget ledgers |
 | notification-worker | event-driven | Budget alert emails via the configured provider — verify `ses_from`/recipient ownership |
@@ -562,13 +599,15 @@ in `REPORTING_TIMEZONE`, default **Asia/Seoul**):
 | Quarterly | DR rehearsal (§12.5); stale `ADFS_*` pool records cleanup; access review (`ClaudeAdmin` membership) |
 | On event | New-model Marketplace subscription; upstream sync (`upstream-sync.md`) |
 
+For an incident, capture environment, first occurrence and timezone, affected clients and user scope, a request ID, and the last release or policy change. Compare the symptom with service logs, metrics and the audit trail. For a spend discrepancy, check the reporting window, model and search components, stream lag, worker health, hourly/daily rollup status and any estimated or backfilled rows. Verify restored traffic and downstream cost recording before closing the incident. [Operations runbook](../operations.en.md)
+
 ### 9.9 Employee onboarding — final gate
 
 Before opening to employees (see the [pre-onboarding checks](../operations.en.md#before-onboarding-employees)):
 
 - [ ] OIDC login redirects to Cognito — **dev-login must be off**
-  (`DEV_LOGIN_ENABLED=false`). A blank `oidc` block = unsigned admin
-  tokens. Never open in that state.
+  (`DEV_LOGIN_ENABLED=false`). Verify a complete OIDC configuration and
+  successful signed-token login before enabling employee access.
 - [ ] `network.allowed_cidrs` = employee egress ranges (not `0.0.0.0/0`,
   not the installer's `/32`). This value reconciles to ALB SG ingress —
   **never edit the SG directly.**
@@ -622,6 +661,18 @@ Before opening to employees (see the [pre-onboarding checks](../operations.en.md
 
 ---
 
+### Release and rollback evidence
+
+Record the prior tag per workload, migration revision, rollout owner, rollback trigger and test identities. Review `./deploy apply --config "<config-path>" --context "<eks-context>" --plan` for replacement, environment drift, permission changes and image differences. After applying, verify migration completion, Pod/target health, gateway 5xx and time to first token, and worker lag. Then run an administrator sign-in and one approved employee request. In EKS:
+
+```bash
+kubectl --context "<eks-context>" -n llm-gateway rollout status deployment/gateway-proxy
+./deploy doctor --config "<config-path>" --context "<eks-context>"
+./deployment/scripts/smoke-test.sh --env "<dev-or-prod>" --context "<eks-context>"
+```
+
+Add `--with-bedrock` when the test is approved to make a live model invocation. If a rollback trigger fires, gather failed-workload and migration evidence, pin schema-compatible prior images, and repeat the plan and verification. An earlier image alone cannot revert migrated data.
+
 ## 12. Disaster recovery
 
 ### 12.1 What survives
@@ -641,6 +692,8 @@ Before opening to employees (see the [pre-onboarding checks](../operations.en.md
 |---|---|---|
 | compose | 24h (pg_dump cron) | hours |
 | ecs/eks | ~5 min (Aurora PITR, retention dev 7d / prod 14d) | 30–60 min |
+
+These are planning figures from the existing deployment guidance. At handover, measure achievable recovery time and verify retention and recoverable time ranges from the actual environment. Record which workloads use the direct cluster endpoint or RDS Proxy. A restore rehearsal should capture the recovery point, loss window, connection cutover and time to successful login, gateway request, usage recording and audit retrieval.
 
 ### 12.3 Aurora restore (eks/ecs)
 
@@ -760,11 +813,10 @@ received — an unchecked row here is a future incident.
       ([AWS alerts and logs](../observability.en.md#aws-alerts-and-logs)). ALB 5xx/UnHealthyHost
       alarms are auto-discovered by `deploy apply` (eks) — verify they
       exist after the apply following ingress creation
-      (§8-A). Pod/app-level alerts: in-cluster Alertmanager + gateway/cost
-      PrometheusRules ship with the observability stack; Slack delivery
-      starts once the user creates `alertmanager-slack-<env>`
-      ([EKS metrics and Alertmanager](../observability.en.md#eks-metrics-and-alertmanager)). Prometheus retention
-      is still 24h on emptyDir — persistent storage is a follow-up
+      (see the AWS alerts runbook). Pod/app-level alerts: in-cluster Alertmanager + gateway/cost
+      PrometheusRules ship with the observability stack; enable the
+      observability alerting flag and create `alertmanager-slack-<env>`
+      ([EKS metrics and Alertmanager](../observability.en.md#eks-metrics-and-alertmanager)). For each environment, record the observed Prometheus retention and storage. The development baseline is 24h with ephemeral storage.
 - [ ] **Notification channel** — `features.notifications.provider`
       (ses/smtp/internal_api): sender address ownership, who receives
       budget-alert emails
@@ -782,15 +834,15 @@ received — an unchecked row here is a future incident.
 
 ### Known limitations & deferred items
 
-- [ ] EKS API endpoint currently `0.0.0.0/0` — accepted for now,
-      **planned to restrict to internal** later
+- [ ] EKS API endpoint access — record live public/private settings and
+      allowed CIDRs, the owner of any exception, and its review date
 - [ ] `bi_insight` chat agent — opt-in via `features.bi_insight`;
       when enabled, `deploy apply` provisions its infra through the
       managed overlay (`module.agentcore_runtime`); off by default
 - [ ] Single-region design — full region loss is out of scope (§12.2)
 - [ ] Migrations are forward-only — no DB rollback (§11)
 - [ ] Body logging stores unmasked payloads — enable for debugging only
-- [ ] ECS path exists but is **deferred** — not the production target
+- [ ] ECS is a supported target. Record whether it is used in the environments covered by the handover
 - [ ] **policy-helper / AI Governance Hub (US-21) — deferred to the
       NDS repo restructure.** gateway-proxy ≥ `1.0.91` already serves
       `GET /v1/policy`, but nothing calls it until the PC helper is
@@ -802,6 +854,16 @@ received — an unchecked row here is a future incident.
       ([8-G-policy-helper](../../us-llm-gateway/ops/8-G-policy-helper.md))
       into `gateway.yaml` + the managed overlay, plus deciding whether
       the hub stays a separate repo — parked by agreement.
+
+### Environment handover record
+
+| Field | Evidence to attach |
+|---|---|
+| Access and routing | Account, Region, identity used to deploy, EKS context/namespace or ECS cluster, gateway/admin hostnames, DNS/SSO/network owners |
+| Release and rollback | Current and prior image per service, Pod image IDs or task revisions, migration result, deployment plan and rollback trigger |
+| Recovery | Backup timestamp, recoverable range, key escrow attestations, restore run time and validated queries |
+| Incident coverage | On-call contacts, provider escalation paths, first response expectations, per-environment alert route test and metrics retention |
+| Ownership and exceptions | Open issues, owner, review date and agreed follow-up. Link to restricted records that contain private configuration |
 
 ### Acceptance — SSIR's first week
 
@@ -815,6 +877,8 @@ received — an unchecked row here is a future incident.
       ([AWS alerts and logs](../observability.en.md#aws-alerts-and-logs))
 
 ---
+
+Add a separate acceptance record for each environment. Include service images and flags, verified DB restore point, declared retention, test user roles, configuration/state locations, the owner of each alert route, and the incident escalation channel. Keep credential values in the approved vault. Carry unresolved entries forward with a named owner and due date.
 
 ## 15. Where the details live
 
