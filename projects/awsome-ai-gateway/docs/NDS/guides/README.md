@@ -1,75 +1,14 @@
-# Admin UI Operations Guide
+# Dev 관리자 UI 가이드
 
-Operational guide for the AWSome AI Gateway admin console. Each document
-covers one page: what it shows, which controls it exposes, and the
-administrator workflows built on it.
+[Dev 관리자 콘솔](https://admin-dev.ssir-dev.nds.remu.one/)의 로그인과 주요 기능을 안내합니다.
 
-> All screenshots were captured from a live deployment with the UI locale
-> set to English (the **KO/EN** toggle in the top-right header). Emails,
-> endpoint URLs, and Cognito identifiers in the screenshots are masked
-> placeholders — the real deployment shows actual values.
+- [영문 관리자 상세 가이드 (HTML)](admin-guide.en.html)
+- [로그인과 비밀번호 재설정](login.md)
+- [관리자 UI 및 기능](admin-ui.md)
+- [관리자 화면 모음](admin-screens.md)
+- [모델 관리](models.md)
+- [운영 가이드](../op-guide/README.md)
 
-## Roles
+2026년 11월 28일 dev에 배포된 관리자 UI `4fe6d927`을 기준으로, 로그인 화면 2장과 관리자 메뉴 13개의 화면 72장을 제공합니다. 영문 HTML은 브라우저에서 열고 `screenshots` 폴더를 HTML 옆에 둡니다.
 
-The console is role-gated. A user's role is resolved by admin-api from
-Cognito group membership (admin mapping) or by the **Team leader** flag
-set inside the console.
-
-| Role | Sees |
-|---|---|
-| **Administrator** | Every page except My Usage |
-| **Team leader** | Budget Management, Analytics, Integration, CLI, My Usage |
-| **Developer** | Integration, CLI, My Usage |
-
-Routes that are not listed for a role are default-deny — the user is
-redirected to the [403 page](access-denied.md).
-
-## Page index
-
-| Page | Route | Roles | Guide |
-|---|---|---|---|
-| Dashboard | `/` | Admin | [dashboard.md](dashboard.md) |
-| Users/Teams | `/users` | Admin | [users-teams.md](users-teams.md) |
-| Model Management | `/models` | Admin | [models.md](models.md) |
-| App Policy | `/apps` | Admin | [app-policy.md](app-policy.md) |
-| Budget Management | `/budgets` | Admin, Team leader | [budgets.md](budgets.md) |
-| Auto-downgrade | `/budgets` (team row) | Admin, Team leader | [auto-downgrade.md](auto-downgrade.md) |
-| API Keys | `/keys` | Admin | [api-keys.md](api-keys.md) |
-| Agents | `/agents` | Admin | [agents.md](agents.md) |
-| Agent detail | `/agents/{userId}` | Admin | [agents.md](agents.md#agent-detail) |
-| Monitoring | `/monitoring` | Admin | [monitoring.md](monitoring.md) |
-| Body Logs | `/monitoring/body-logs` | Admin | [monitoring.md](monitoring.md#body-logs) |
-| Analytics | `/analytics` | Admin, Team leader | [analytics.md](analytics.md) |
-| BI Insight | `/chat` | Admin | [bi-insight.md](bi-insight.md) |
-| Audit Log | `/audit` | Admin | [audit-log.md](audit-log.md) |
-| Integration | `/integration` | All | [integration.md](integration.md) |
-| CLI | `/cli` | All | [cli.md](cli.md) |
-| My Usage | `/my` | Team leader, Developer | [my-usage.md](my-usage.md) |
-| Access denied | `/403` | — | [access-denied.md](access-denied.md) |
-
-### Legacy redirects
-
-These URLs still work but redirect to their replacement pages:
-
-| Old URL | Redirects to |
-|---|---|
-| `/service-accounts` | `/agents` |
-| `/analytics/models` | `/analytics` (filters preserved) |
-| `/rate-limits` | `/users?from=rate-limits` — rate limits now live per-scope on the Users/Teams page |
-
-## Common UI elements
-
-- **Sidebar** — primary navigation. Items the current role cannot open
-  are hidden, not disabled.
-- **Header** — language toggle (**KO/EN**), signed-in identity (display
-  name, email, role badge), and **Logout**.
-- **Period selectors** — Dashboard and Analytics default to the current
-  calendar month; use *This month / Last month / Select period / Custom
-  range* to change the window.
-- **Client tabs** — Dashboard and Analytics split metrics by client
-  family (*All, Claude Code, Cowork, Codex, Other*). Client identity is
-  derived from the `User-Agent` / key type of each request.
-
-## Screenshots
-
-All images referenced by the guides live in [screenshots/](screenshots/).
+계정과 그룹 등록은 [운영 런북](../operations.md), ADFS 사용자 등록과 그룹 매핑은 [AD 연동 가이드](../ad-sync.md), 직원 PC 설정은 [클라이언트 연결 가이드](../client-setup.md)를 참고합니다.

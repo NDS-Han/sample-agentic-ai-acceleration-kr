@@ -1,0 +1,802 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light">
+<title>NDS Gateway Administrator Guide</title>
+<style>
+:root {
+  --ink: #182b35;
+  --muted: #4d626b;
+  --accent: #006756;
+  --accent-light: #e7f4ee;
+  --line: #d5e0de;
+  --paper: #fff;
+  --canvas: #f1f6f4;
+  --dark: #112f31;
+  --warn: #7b451c;
+  --warn-light: #fcf1df;
+  font: 16px/1.6 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: var(--ink);
+  background: var(--canvas);
+}
+* { box-sizing: border-box; }
+body { margin: 0; }
+a { color: var(--accent); text-underline-offset: .2em; }
+a:focus-visible, summary:focus-visible, button:focus-visible { outline: 3px solid var(--accent); outline-offset: 4px; }
+h1, h2, h3, h4 { line-height: 1.18; margin: 0 0 .65em; text-wrap: balance; }
+h1 { font-size: clamp(2.4rem, 6vw, 4.65rem); letter-spacing: -.045em; max-width: 14ch; }
+h2 { font-size: clamp(1.85rem, 4vw, 2.8rem); letter-spacing: -.035em; }
+h3 { font-size: 1.2rem; margin-top: 1.4em; }
+h4 { font-size: 1rem; margin-top: .25em; }
+p { margin: 0 0 1em; }
+ol, ul { margin: 0 0 1em; padding-left: 1.35em; }
+li + li { margin-top: .42em; }
+code { padding: .1em .28em; background: #eaf0ef; border-radius: .2rem; font: .88em ui-monospace, SFMono-Regular, Consolas, monospace; overflow-wrap: anywhere; }
+.skip { position: absolute; z-index: 5; left: .75rem; top: .75rem; transform: translateY(-200%); background: var(--paper); padding: .65rem; }
+.skip:focus { transform: none; }
+.cover { background: var(--dark); color: #f4fcf9; padding: clamp(2rem, 7vw, 5.4rem) max(1.25rem, calc((100vw - 1330px) / 2)); }
+.cover p { color: #d3e9e1; max-width: 63ch; }
+.cover a { color: #a7f1d7; }
+.cover dl { display: flex; flex-wrap: wrap; gap: .85rem 2.3rem; margin: 1.5rem 0 0; }
+.cover dt { color: #bad7d0; font-size: .84rem; }
+.cover dd { margin: .14rem 0 0; font-weight: 600; }
+.layout { max-width: 1350px; margin: auto; display: grid; grid-template-columns: 235px minmax(0, 1fr); gap: clamp(1rem, 3vw, 2.8rem); padding: 2.4rem 1.25rem; }
+.contents { align-self: start; position: sticky; top: 1rem; max-height: calc(100vh - 2rem); overflow: auto; padding: .55rem .8rem .55rem .12rem; }
+.contents h2 { font-size: .95rem; letter-spacing: .02em; }
+.contents ul { list-style: none; padding: 0; margin: 0; }
+.contents li { margin: 0; }
+.contents a { display: block; padding: .24rem .48rem; border-left: 2px solid var(--line); text-decoration: none; }
+.contents a:hover, .contents a:focus-visible { border-color: var(--accent); background: var(--accent-light); text-decoration: underline; }
+.toolbar { margin: .95rem 0 0; }
+button { font: inherit; font-size: .82rem; color: var(--accent); background: var(--paper); border: 1px solid var(--line); border-radius: .3rem; padding: .38rem .55rem; cursor: pointer; }
+button:hover { border-color: var(--accent); }
+main { min-width: 0; }
+section.chapter { background: var(--paper); border: 1px solid var(--line); border-radius: .65rem; padding: clamp(1rem, 3.4vw, 2.6rem); margin-bottom: 1.35rem; scroll-margin-top: 1rem; }
+.lead { color: var(--muted); max-width: 77ch; font-size: 1.07rem; }
+.route { color: var(--accent); font-size: .86rem; margin: 0 0 .65rem; font-weight: 650; }
+.split { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 1.6rem; }
+.callout { padding: .85rem 1rem; border-left: 4px solid var(--accent); background: var(--accent-light); margin: 1.15rem 0; }
+.callout.warn { border-color: var(--warn); background: var(--warn-light); }
+.callout p:last-child { margin-bottom: 0; }
+.table-wrap { overflow-x: auto; margin: 1.1rem 0; }
+table { width: 100%; border-collapse: collapse; font-size: .94rem; }
+th, td { text-align: left; vertical-align: top; padding: .62rem .75rem; border-bottom: 1px solid var(--line); }
+thead th { color: var(--dark); background: var(--accent-light); }
+tbody th { min-width: 9rem; }
+figure { margin: 1.25rem 0; border: 1px solid var(--line); border-radius: .4rem; overflow: hidden; background: #f6f9f8; }
+figure a.image { display: block; background: #111719; }
+figure img { width: 100%; height: auto; display: block; }
+figcaption { padding: .66rem .8rem; font-size: .88rem; color: var(--muted); }
+figcaption strong { color: var(--ink); }
+figcaption a { white-space: nowrap; margin-left: .4em; }
+details { border: 1px solid var(--line); border-radius: .35rem; margin-top: 1.15rem; }
+summary { cursor: pointer; padding: .72rem .84rem; font-weight: 650; color: var(--accent); }
+.gallery { padding: 0 .84rem; display: grid; gap: 0 1rem; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; }
+.gallery figure { margin: .5rem 0 1rem; }
+.footer { padding: 0 0 .6rem; color: var(--muted); font-size: .92rem; }
+@media (max-width: 860px) {
+  .layout { display: block; padding-top: 1rem; }
+  .contents { position: static; max-height: none; padding: .75rem .25rem 1.25rem; }
+  .contents ul { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+}
+@media (max-width: 590px) {
+  .split, .gallery { grid-template-columns: minmax(0, 1fr); }
+  .table-wrap th, .table-wrap td { padding: .45rem; }
+}
+@page { size: A4; margin: 15mm; }
+@media print {
+  :root, body { background: #fff; font-size: 10.5pt; }
+  .cover { background: #fff; color: #000; padding: 0 0 8mm; border-bottom: 1px solid var(--line); }
+  .cover p, .cover dt, .cover a { color: var(--ink); }
+  .cover h1 { font-size: 34pt; }
+  .layout { display: block; padding: 7mm 0 0; }
+  .contents { position: static; max-height: none; overflow: visible; }
+  .contents ul { display: grid; grid-template-columns: repeat(3, 1fr); }
+  .toolbar, .skip, figcaption a { display: none; }
+  section.chapter { border: 0; padding: 0; margin: 0; break-before: page; }
+  h2, h3, summary { break-after: avoid; }
+  figure, .callout, tr { break-inside: avoid; }
+  figure img { width: auto; max-width: 100%; height: auto; max-height: 180mm; object-fit: contain; margin: auto; }
+  figure a.image { background: #f6f9f8; }
+}
+</style>
+</head>
+<body>
+<a class="skip" href="#main">Skip to the guide</a>
+<header class="cover">
+  <h1>NDS Gateway Administrator Guide</h1>
+  <p>Operate the development gateway from the administrator console. This guide covers access, model and application policy, budgets, credentials, usage analysis, and day-to-day troubleshooting.</p>
+  <dl>
+    <div><dt>Environment</dt><dd><a href="https://admin-dev.ssir-dev.nds.remu.one/">Development console</a></dd></div>
+    <div><dt>Admin UI revision</dt><dd>4fe6d927</dd></div>
+    <div><dt>Capture date</dt><dd>28 November 2026</dd></div>
+  </dl>
+</header>
+<div class="layout">
+<nav class="contents" aria-label="Table of contents">
+  <h2>Contents</h2>
+  <ul>
+    <li><a href="#operating">Operating workflow</a></li>
+    <li><a href="#access">Sign-in and access</a></li>
+    <li><a href="#dashboard">Dashboard</a></li>
+    <li><a href="#users-teams">Users/Teams</a></li>
+    <li><a href="#models">Model Management</a></li>
+    <li><a href="#app-policy">App Policy</a></li>
+    <li><a href="#budgets">Budget Management</a></li>
+    <li><a href="#api-keys">API Keys</a></li>
+    <li><a href="#agents">Agents</a></li>
+    <li><a href="#monitoring">Monitoring</a></li>
+    <li><a href="#analytics">Analytics</a></li>
+    <li><a href="#bi-insight">BI Insight</a></li>
+    <li><a href="#audit-log">Audit Log</a></li>
+    <li><a href="#integration">Integration</a></li>
+    <li><a href="#cli">CLI</a></li>
+    <li><a href="#troubleshooting">Troubleshooting</a></li>
+    <li><a href="#capture-notes">Screenshot notes</a></li>
+  </ul>
+  <div class="toolbar" hidden><button type="button" aria-pressed="false" id="screens-toggle">Expand all screenshots</button></div>
+</nav>
+<main id="main">
+<section class="chapter" id="operating">
+  <h2>Operating workflow</h2>
+  <p class="lead">Start from the affected app, user, team, or model. Use the table to find the relevant screen and identify what to verify before making a change.</p>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th scope="col">Task</th><th scope="col">Where to start</th><th scope="col">What to verify</th></tr></thead>
+      <tbody>
+        <tr><th scope="row">Onboard a user</th><td><a href="#access">Sign-in</a> and <a href="#users-teams">Users/Teams</a></td><td>Team, role, and effective app and model access.</td></tr>
+        <tr><th scope="row">Roll out a model</th><td><a href="#models">Model Management</a>, then <a href="#app-policy">App Policy</a></td><td>Alias, active status, pricing units, client routing, and effective access for the intended users.</td></tr>
+        <tr><th scope="row">Control spend</th><td><a href="#dashboard">Dashboard</a> and <a href="#budgets">Budget Management</a></td><td>App, reporting period, budget scope, and enforcement policy.</td></tr>
+        <tr><th scope="row">Connect a client</th><td><a href="#cli">CLI</a> for interactive users or <a href="#agents">Agents</a> and <a href="#integration">Integration</a> for server-side applications</td><td>Credential flow, gateway URL, model alias, and permitted app.</td></tr>
+        <tr><th scope="row">Investigate an incident</th><td><a href="#monitoring">Monitoring</a>, <a href="#analytics">Analytics</a>, and <a href="#audit-log">Audit Log</a></td><td>Request ID, time window, affected scope, and related administrative actions.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>Before saving a change, confirm that you are in the intended environment and verify the scope and target. After saving, reopen the affected screen and check the effective setting or status. Use Audit Log to check the corresponding administrative event when one is recorded.</p>
+</section>
+
+<section class="chapter" id="access">
+  <h2>Sign-in and access</h2>
+  <p class="lead">The development console redirects to the Cognito sign-in page. A successful administrator sign-in opens Dashboard.</p>
+  <div class="split">
+    <div>
+      <h3>Sign in</h3>
+      <ol>
+        <li>Open the <a href="https://admin-dev.ssir-dev.nds.remu.one/">development administrator console</a>.</li>
+        <li>Enter your assigned account in <strong>Email address</strong> and <strong>Password</strong>.</li>
+        <li>Select <strong>Sign in</strong>. Confirm that Dashboard and the administrator menus appear.</li>
+      </ol>
+    </div>
+    <div>
+      <h3>Reset your password</h3>
+      <ol>
+        <li>Select <strong>Forgot your password?</strong> on the sign-in page.</li>
+        <li>Enter your account email and select <strong>Reset my password</strong>.</li>
+        <li>Use the emailed code and follow the prompts to set a new password. Select <strong>Back</strong> to return to sign-in if needed.</li>
+      </ol>
+    </div>
+  </div>
+  <div class="callout">
+    <p>If you see <strong>User registration failed</strong>, check the account’s identity-provider group assignment and gateway registration. For <strong>403</strong>, check that the signed-in account has the role required by the page. Team leaders and developers see menus for their roles. Use <strong>Logout</strong> in the console header when you finish.</p>
+  </div>
+  <figure id="fig-01-login">
+  <a class="image" href="screenshots/01-login.png" target="_blank" rel="noopener"><img src="screenshots/01-login.png" width="1366" height="900" loading="lazy" decoding="async" alt="Cognito sign-in screen"></a>
+  <figcaption><strong>Cognito sign-in screen</strong> <a href="screenshots/01-login.png" target="_blank" rel="noopener" aria-label="Open PNG for Cognito sign-in screen">Open PNG</a></figcaption>
+</figure>
+  <details>
+<summary>Supporting screenshots (1)</summary>
+<div class="gallery">
+<figure id="fig-02-password-reset">
+  <a class="image" href="screenshots/02-password-reset.png" target="_blank" rel="noopener"><img src="screenshots/02-password-reset.png" width="1366" height="900" loading="lazy" decoding="async" alt="Cognito password reset screen"></a>
+  <figcaption><strong>Cognito password reset screen</strong> <a href="screenshots/02-password-reset.png" target="_blank" rel="noopener" aria-label="Open PNG for Cognito password reset screen">Open PNG</a></figcaption>
+</figure>
+</div>
+</details>
+</section>
+
+<section class="chapter" id="dashboard">
+  <p class="route">Dashboard</p>
+  <h2>Read cost, budget, and usage</h2>
+  <p class="lead">Dashboard summarizes cost, budget utilization, request activity, and usage distribution for the selected app and period.</p>
+  <ol>
+    <li>Use <strong>All</strong> for the overall view or select <strong>Claude Code</strong>, <strong>Cowork</strong>, <strong>Codex</strong>, or <strong>Other</strong> to isolate an app.</li>
+    <li>Choose <strong>This month</strong>, <strong>Last month</strong>, or <strong>Select period</strong>. Use the displayed time zone and refresh timestamp when comparing two views. The captured dashboard shows monthly boundaries in IST.</li>
+    <li>Review cost and budget cards alongside total requests, errors, and token usage. Use <strong>About web search pricing</strong> to see how web search contributes to the displayed cost.</li>
+    <li>Use the distribution view to identify the largest contributors. If the chart offers a <strong>Scope</strong> selector, choose a team to narrow the comparison. Open <a href="#analytics">Analytics</a> for a more detailed breakdown.</li>
+  </ol>
+  <figure id="fig-01-dashboard">
+  <a class="image" href="screenshots/admin/01-dashboard.png" target="_blank" rel="noopener"><img src="screenshots/admin/01-dashboard.png" width="1440" height="2524" loading="lazy" decoding="async" alt="Full dashboard including the cost and budget summary, activity, and distributions"></a>
+  <figcaption><strong>Full dashboard including the cost and budget summary, activity, and distributions</strong> <a href="screenshots/admin/01-dashboard.png" target="_blank" rel="noopener" aria-label="Open PNG for Full dashboard including the cost and budget summary, activity, and distributions">Open PNG</a></figcaption>
+</figure>
+  <details>
+<summary>Supporting screenshots (7)</summary>
+<div class="gallery">
+<figure id="fig-55-dashboard-app-claude-code">
+  <a class="image" href="screenshots/admin/55-dashboard-app-claude-code.png" target="_blank" rel="noopener"><img src="screenshots/admin/55-dashboard-app-claude-code.png" width="1440" height="900" loading="lazy" decoding="async" alt="Dashboard → App filter → Claude Code"></a>
+  <figcaption><strong>Dashboard → App filter → Claude Code</strong> <a href="screenshots/admin/55-dashboard-app-claude-code.png" target="_blank" rel="noopener" aria-label="Open PNG for Dashboard → App filter → Claude Code">Open PNG</a></figcaption>
+</figure>
+<figure id="fig-55-dashboard-app-codex">
+  <a class="image" href="screenshots/admin/55-dashboard-app-codex.png" target="_blank" rel="noopener"><img src="screenshots/admin/55-dashboard-app-codex.png" width="1440" height="900" loading="lazy" decoding="async" alt="Dashboard → App filter → Codex"></a>
+  <figcaption><strong>Dashboard → App filter → Codex</strong> <a href="screenshots/admin/55-dashboard-app-codex.png" target="_blank" rel="noopener" aria-label="Open PNG for Dashboard → App filter → Codex">Open PNG</a></figcaption>
+</figure>
+<figure id="fig-55-dashboard-app-cowork">
+  <a class="image" href="screenshots/admin/55-dashboard-app-cowork.png" target="_blank" rel="noopener"><img src="screenshots/admin/55-dashboard-app-cowork.png" width="1440" height="900" loading="lazy" decoding="async" alt="Dashboard → App filter → Cowork"></a>
+  <figcaption><strong>Dashboard → App filter → Cowork</strong> <a href="screenshots/admin/55-dashboard-app-cowork.png" target="_blank" rel="noopener" aria-label="Open PNG for Dashboard → App filter → Cowork">Open PNG</a></figcaption>
+</figure>
+<figure id="fig-55-dashboard-app-other">
+  <a class="image" href="screenshots/admin/55-dashboard-app-other.png" target="_blank" rel="noopener"><img src="screenshots/admin/55-dashboard-app-other.png" width="1440" height="900" loading="lazy" decoding="async" alt="Dashboard → App filter → Other"></a>
+  <figcaption><strong>Dashboard → App filter → Other</strong> <a href="screenshots/admin/55-dashboard-app-other.png" target="_blank" rel="noopener" aria-label="Open PNG for Dashboard → App filter → Other">Open PNG</a></figcaption>
+</figure>
+<figure id="fig-56-dashboard-last-month">
+  <a class="image" href="screenshots/admin/56-dashboard-last-month.png" target="_blank" rel="noopener"><img src="screenshots/admin/56-dashboard-last-month.png" width="1440" height="900" loading="lazy" decoding="async" alt="Dashboard → Last month"></a>
+  <figcaption><strong>Dashboard → Last month</strong> <a href="screenshots/admin/56-dashboard-last-month.png" target="_blank" rel="noopener" aria-label="Open PNG for Dashboard → Last month">Open PNG</a></figcaption>
+</figure>
+<figure id="fig-57-dashboard-period-menu">
+  <a class="image" href="screenshots/admin/57-dashboard-period-menu.png" target="_blank" rel="noopener"><img src="screenshots/admin/57-dashboard-period-menu.png" width="1440" height="900" loading="lazy" decoding="async" alt="Dashboard → Select period"></a>
+  <figcaption><strong>Dashboard → Select period</strong> <a href="screenshots/admin/57-dashboard-period-menu.png" target="_blank" rel="noopener" aria-label="Open PNG for Dashboard → Select period">Open PNG</a></figcaption>
+</figure>
+<figure id="fig-65-dashboard-search-pricing-help">
+  <a class="image" href="screenshots/admin/65-dashboard-search-pricing-help.png" target="_blank" rel="noopener"><img src="screenshots/admin/65-dashboard-search-pricing-help.png" width="1440" height="900" loading="lazy" decoding="async" alt="Dashboard → About web search pricing"></a>
+  <figcaption><strong>Dashboard → About web search pricing</strong> <a href="screenshots/admin/65-dashboard-search-pricing-help.png" target="_blank" rel="noopener" aria-label="Open PNG for Dashboard → About web search pricing">Open PNG</a></figcaption>
+</figure>
+</div>
+</details>
+</section>
+
+<section class="chapter" id="users-teams">
+  <p class="route">Users/Teams → Organization tree</p>
+  <h2>Manage organization, team, and user access</h2>
+  <p class="lead">The organization tree lets you find a member, inspect policies at the relevant scope, and see the access that applies to that user.</p>
+  <div class="split">
+    <div>
+      <h3>Find the account or team</h3>
+      <ol>
+        <li>Open <strong>Users/Teams</strong>. Expand the organization, department, and team, or use <strong>Search organization</strong>.</li>
+        <li>Select a team to view its membership, leader, access, and limits. Use <strong>Change leader</strong> when you need to assign or update the team leader.</li>
+        <li>Select a user to inspect the user’s role, organization assignment, and policy detail. Open <strong>Show full model × app table</strong> to inspect the effective combinations.</li>
+      </ol>
+    </div>
+    <div>
+      <h3>Review or change a policy</h3>
+      <ol>
+        <li>Choose the scope that matches the intended audience. Organization-wide settings can affect multiple teams.</li>
+        <li>Open <strong>Change</strong> beside <strong>App access</strong>, <strong>Allowed models</strong>, or <strong>Rate limit</strong> where the control is available.</li>
+        <li>Compare the inherited and configured values. Verify the unit and intended limit before saving. Reopen the user detail and check the effective policy after a change.</li>
+      </ol>
+    </div>
+  </div>
+  <div class="callout warn">
+    <p><strong>Force re-authentication for team</strong> can revoke active keys for team members. Review the target and member count in the confirmation dialog before proceeding. <strong>Sync Cognito</strong> updates gateway records from the identity source, so verify that you are using the intended environment before running it.</p>
+  </div>
+  <figure id="fig-02-users-teams">
+  <a class="image" href="screenshots/admin/02-users-teams.png" target="_blank" rel="noopener"><img src="screenshots/admin/02-users-teams.png" width="1440" height="900" loading="lazy" decoding="async" alt="Organization tree and user or team detail panel"></a>
+  <figcaption><strong>Organization tree and user or team detail panel</strong> <a href="screenshots/admin/02-users-teams.png" target="_blank" rel="noopener" aria-label="Open PNG for Organization tree and user or team detail panel">Open PNG</a></figcaption>
+</figure>
+  <details>
+<summary>Supporting screenshots (15)</summary>
+<div class="gallery">
+<figure id="fig-14-users-org-help">
+  <a class="image" href="screenshots/admin/14-users-org-help.png" target="_blank" rel="noopener"><img src="screenshots/admin/14-users-org-help.png" width="1440" height="900" loading="lazy" decoding="async" alt="Users/Teams → About the organization structure"></a>
+  <figcaption><strong>Users/Teams → About the organization structure</strong> <a href="screenshots/admin/14-users-org-help.png" target="_blank" rel="noopener" aria-label="Open PNG for Users/Teams → About the organization structure">Open PNG</a></figcaption>
+</figure>
+<figure id="fig-15-users-org-app-access">
+  <a class="image" href="screenshots/admin/15-users-org-app-access.png" target="_blank" rel="noopener"><img src="screenshots/admin/15-users-org-app-access.png" width="1440" height="900" loading="lazy" decoding="async" alt="Users/Teams → Default Organization → Change"></a>
+  <figcaption><strong>Users/Teams → Default Organization → Change</strong> <a href="screenshots/admin/15-users-org-app-access.png" target="_blank" rel="noopener" aria-label="Open PNG for Users/Teams → Default Organization → Change">Open PNG</a></figcaption>
+</figure>
+<figure id="fig-16-users-department">
+  <a class="image" href="screenshots/admin/16-users-department.png" target="_blank" rel="noopener"><img src="screenshots/admin/16-users-department.png" width="1440" height="900" loading="lazy" decoding="async" alt="Users/Teams → NDS"></a>
+  <figcaption><strong>Users/Teams → NDS</strong> <a href="screenshots/admin/16-users-department.png" target="_blank" rel="noopener" aria-label="Open PNG for Users/Teams → NDS">Open PNG</a></figcaption>
+</figure>
+<figure id="fig-17-users-team-detail">
+  <a class="image" href="screenshots/admin/17-users-team-detail.png" target="_blank" rel="noopener"><img src="screenshots/admin/17-users-team-detail.png" width="1440" height="1678" loading="lazy" decoding="async" alt="Users/Teams → NDS → Developers"></a>
+  <figcaption><strong>Users/Teams → NDS → Developers</strong> <a href="screenshots/admin/17-users-team-detail.png" target="_blank" rel="noopener" aria-label="Open PNG for Users/Teams → NDS → Developers">Open PNG</a></figcaption>
+</figure>
+<figure id="fig-18-users-change-leader">
+  <a class="image" href="screenshots/admin/18-users-change-leader.png" target="_blank" rel="noopener"><img src="screenshots/admin/18-users-change-leader.png" width="1440" height="900" loading="lazy" decoding="async" alt="Users/Teams → Developers → Change leader"></a>
+  <figcaption><strong>Users/Teams → Developers → Change leader</strong> <a href="screenshots/admin/18-users-change-leader.png" target="_blank" rel="noopener" aria-label="Open PNG for Users/Teams → Developers → Change leader">Open PNG</a></figcaption>
+</figure>
+<figure id="fig-68-users-team-reauth-confirm">
+  <a class="image" href="screenshots/admin/68-users-team-reauth-confirm.png" target="_blank" rel="noopener"><img src="screenshots/admin/68-users-team-reauth-confirm.png" width="1440" height="900" loading="lazy" decoding="async" alt="Users/Teams → Developers → Force re-authentication for team"></a>
+  <figcaption><strong>Users/Teams → Developers → Force re-authentication for team</strong> <a href="screenshots/admin/68-users-team-reauth-confirm.png" target="_blank" rel="noopener" aria-label="Open PNG for Users/Teams → Developers → Force re-authentication for team">Open PNG</a></figcaption>
+</figure>
+<figure id="fig-19-users-team-model-access">
+  <a class="image" href="screenshots/admin/19-users-team-model-access.png" target="_blank" rel="noopener"><img src="screenshots/admin/19-users-team-model-access.png" width="1440" height="900" loading="lazy" decoding="async" alt="Users/Teams → Developers → Allowed models → Change"></a>
+  <figcaption><strong>Users/Teams → Developers → Allowed models → Change</strong> <a href="screenshots/admin/19-users-team-model-access.png" target="_blank" rel="noopener" aria-label="Open PNG for Users/Teams → Developers → Allowed models → Change">Open PNG</a></figcaption>
+</figure>
+<figure id="fig-20-users-team-rate-limit">
+  <a class="image" href="screenshots/admin/20-users-team-rate-limit.png" target="_blank" rel="noopener"><img src="screenshots/admin/20-users-team-rate-limit.png" width="1440" height="900" loading="lazy" decoding="async" alt="Users/Teams → Developers → Rate limit → Change"></a>
+  <figcaption><strong>Users/Teams → Developers → Rate limit → Change</strong> <a href="screenshots/admin/20-users-team-rate-limit.png" target="_blank" rel="noopener" aria-label="Open PNG for Users/Teams → Developers → Rate limit → Change">Open PNG</a></figcaption>
+</figure>
+<figure id="fig-21-users-user-detail">
+  <a class="image" href="screenshots/admin/21-users-user-detail.png" target="_blank" rel="noopener"><img src="screenshots/admin/21-users-user-detail.png" width="1440" height="2779" loading="lazy" decoding="async" alt="Users/Teams → Developers → user"></a>
+  <figcaption><strong>Users/Teams → Developers → user</strong> <a href="screenshots/admin/21-users-user-detail.png" target="_blank" rel="noopener" aria-label="Open PNG for Users/Teams → Developers → user">Open PNG</a></figcaption>
+</figure>
+<figure id="fig-22-users-effective-policy-table-full">
+  <a class="image" href="screenshots/admin/22-users-effective-policy-table-full.png" target="_blank" rel="noopener"><img src="screenshots/admin/22-users-effective-policy-table-full.png" width="1440" height="2779" loading="lazy" decoding="async" alt="Users/Teams → user → Show full model × app table"></a>
+  <figcaption><strong>Users/Teams → user → Show full model × app table</strong> <a href="screenshots/admin/22-users-effective-policy-table-full.png" target="_blank" rel="noopener" aria-label="Open PNG for Users/Teams → user → Show full model × app table">Open PNG</a></figcaption>
+</figure>
+<figure id="fig-23-users-user-app-access">
+  <a class="image" href="screenshots/admin/23-users-user-app-access.png" target="_blank" rel="noopener"><img src="screenshots/admin/23-users-user-app-access.png" width="1440" height="900" loading="lazy" decoding="async" alt="Users/Teams → user → App access → Change"></a>
+  <figcaption><strong>Users/Teams → user → App access → Change</strong> <a href="screenshots/admin/23-users-user-app-access.png" target="_blank" rel="noopener" aria-label="Open PNG for Users/Teams → user → App access → Change">Open PNG</a></figcaption>
+</figure>
+<figure id="fig-24-users-user-model-access">
+  <a class="image" href="screenshots/admin/24-users-user-model-access.png" target="_blank" rel="noopener"><img src="screenshots/admin/24-users-user-model-access.png" width="1440" height="900" loading="lazy" decoding="async" alt="Users/Teams → user → Allowed models → Change"></a>
+  <figcaption><strong>Users/Teams → user → Allowed models → Change</strong> <a href="screenshots/admin/24-users-user-model-access.png" target="_blank" rel="noopener" aria-label="Open PNG for Users/Teams → user → Allowed models → Change">Open PNG</a></figcaption>
+</figure>
+<figure id="fig-25-users-user-rate-limit">
+  <a class="image" href="screenshots/admin/25-users-user-rate-limit.png" target="_blank" rel="noopener"><img src="screenshots/admin/25-users-user-rate-limit.png" width="1440" height="900" loading="lazy" decoding="async" alt="Users/Teams → user → Rate limit → Change"></a>
+  <figcaption><strong>Users/Teams → user → Rate limit → Change</strong> <a href="screenshots/admin/25-users-user-rate-limit.png" target="_blank" rel="noopener" aria-label="Open PNG for Users/Teams → user → Rate limit → Change">Open PNG</a></figcaption>
+</figure>
+<figure id="fig-61-users-team-app-access">
+  <a class="image" href="screenshots/admin/61-users-team-app-access.png" target="_blank" rel="noopener"><img src="screenshots/admin/61-users-team-app-access.png" width="1440" height="900" loading="lazy" decoding="async" alt="Users/Teams → Developers → App access → Change"></a>
+  <figcaption><strong>Users/Teams → Developers → App access → Change</strong> <a href="screenshots/admin/61-users-team-app-access.png" target="_blank" rel="noopener" aria-label="Open PNG for Users/Teams → Developers → App access → Change">Open PNG</a></figcaption>
+</figure>
+<figure id="fig-62-users-org-search">
+  <a class="image" href="screenshots/admin/62-users-org-search.png" target="_blank" rel="noopener"><img src="screenshots/admin/62-users-org-search.png" width="1440" height="900" loading="lazy" decoding="async" alt="Users/Teams → Search organization"></a>
+  <figcaption><strong>Users/Teams → Search organization</strong> <a href="screenshots/admin/62-users-org-search.png" target="_blank" rel="noopener" aria-label="Open PNG for Users/Teams → Search organization">Open PNG</a></figcaption>
+</figure>
+</div>
+</details>
+</section>
+
+<section class="chapter" id="models">
+  <p class="route">Model Management</p>
+  <h2>Manage the model catalog and pricing</h2>
+  <p class="lead">The catalog lists the gateway aliases available to configure for apps and users. Expand a row to verify the provider, upstream model ID, context, and detailed pricing.</p>
+  <div class="split">
+    <div>
+      <h3>Register or update a model</h3>
+      <ol>
+        <li>Select <strong>Add model</strong> and choose the deployment’s provider. Complete the fields shown for that provider.</li>
+        <li>Check the model ID, client-facing alias, context and output limits, endpoint where applicable, and price units. The pricing form presents rates in USD per million tokens.</li>
+        <li>For an existing alias, use <strong>Edit</strong> from the model row. After saving, expand the row and verify the values. If the rollout requires user access or a default route, also check <strong>App Policy</strong> and the user’s effective policy.</li>
+      </ol>
+    </div>
+    <div>
+      <h3>Review pricing changes</h3>
+      <ol>
+        <li>Open <strong>Sync Pricing</strong> and select an available source.</li>
+        <li>Preview the changes. Review matched aliases, proposed rates, and any model specification changes shown in the comparison.</li>
+        <li>Confirm which aliases are selected before applying. Reopen the affected rows to verify the resulting values.</li>
+      </ol>
+    </div>
+  </div>
+  <div class="callout warn">
+    <p><strong>Deactivate</strong> stops new requests to the alias. Review defaults, fallback routes, and dependent apps before confirming. <strong>Delete</strong> removes the catalog entry and linked configuration such as pricing history, allow lists, rate limits, or downgrade references. Review the confirmation dialog before entering the alias.</p>
+  </div>
+  <figure id="fig-03-model-management">
+  <a class="image" href="screenshots/admin/03-model-management.png" target="_blank" rel="noopener"><img src="screenshots/admin/03-model-management.png" width="1440" height="2502" loading="lazy" decoding="async" alt="Model catalog and model pricing controls"></a>
+  <figcaption><strong>Model catalog and model pricing controls</strong> <a href="screenshots/admin/03-model-management.png" target="_blank" rel="noopener" aria-label="Open PNG for Model catalog and model pricing controls">Open PNG</a></figcaption>
+</figure>
+  <details>
+<summary>Supporting screenshots (6)</summary>
+<div class="gallery">
+<figure id="fig-26-model-add-full">
+  <a class="image" href="screenshots/admin/26-model-add-full.png" target="_blank" rel="noopener"><img src="screenshots/admin/26-model-add-full.png" width="1440" height="2425" loading="lazy" decoding="async" alt="Model Management → + Add model"></a>
+  <figcaption><strong>Model Management → + Add model</strong> <a href="screenshots/admin/26-model-add-full.png" target="_blank" rel="noopener" aria-label="Open PNG for Model Management → + Add model">Open PNG</a></figcaption>
+</figure>
+<figure id="fig-27-model-edit">
+  <a class="image" href="screenshots/admin/27-model-edit.png" target="_blank" rel="noopener"><img src="screenshots/admin/27-model-edit.png" width="1440" height="2461" loading="lazy" decoding="async" alt="Model Management → Claude Sonnet 5.5 → Edit"></a>
+  <figcaption><strong>Model Management → Claude Sonnet 5.5 → Edit</strong> <a href="screenshots/admin/27-model-edit.png" target="_blank" rel="noopener" aria-label="Open PNG for Model Management → Claude Sonnet 5.5 → Edit">Open PNG</a></figcaption>
+</figure>
+<figure id="fig-28-model-expanded">
+  <a class="image" href="screenshots/admin/28-model-expanded.png" target="_blank" rel="noopener"><img src="screenshots/admin/28-model-expanded.png" width="1440" height="900" loading="lazy" decoding="async" alt="Model Management → Expand Claude Sonnet 5.5"></a>
+  <figcaption><strong>Model Management → Expand Claude Sonnet 5.5</strong> <a href="screenshots/admin/28-model-expanded.png" target="_blank" rel="noopener" aria-label="Open PNG for Model Management → Expand Claude Sonnet 5.5">Open PNG</a></figcaption>
+</figure>
+<figure id="fig-29-model-delete-confirm">
+  <a class="image" href="screenshots/admin/29-model-delete-confirm.png" target="_blank" rel="noopener"><img src="screenshots/admin/29-model-delete-confirm.png" width="1440" height="900" loading="lazy" decoding="async" alt="Model Management → Expand model → Delete confirmation"></a>
+  <figcaption><strong>Model Management → Expand model → Delete confirmation</strong> <a href="screenshots/admin/29-model-delete-confirm.png" target="_blank" rel="noopener" aria-label="Open PNG for Model Management → Expand model → Delete confirmation">Open PNG</a></figcaption>
+</figure>
+<figure id="fig-67-model-deactivate-confirm">
+  <a class="image" href="screenshots/admin/67-model-deactivate-confirm.png" target="_blank" rel="noopener"><img src="screenshots/admin/67-model-deactivate-confirm.png" width="1440" height="900" loading="lazy" decoding="async" alt="Model Management → Expand model → Deactivate"></a>
+  <figcaption><strong>Model Management → Expand model → Deactivate</strong> <a href="screenshots/admin/67-model-deactivate-confirm.png" target="_blank" rel="noopener" aria-label="Open PNG for Model Management → Expand model → Deactivate">Open PNG</a></figcaption>
+</figure>
+<figure id="fig-66-model-pricing-sync">
+  <a class="image" href="screenshots/admin/66-model-pricing-sync.png" target="_blank" rel="noopener"><img src="screenshots/admin/66-model-pricing-sync.png" width="1440" height="900" loading="lazy" decoding="async" alt="Model Management → Sync Pricing"></a>
+  <figcaption><strong>Model Management → Sync Pricing</strong> <a href="screenshots/admin/66-model-pricing-sync.png" target="_blank" rel="noopener" aria-label="Open PNG for Model Management → Sync Pricing">Open PNG</a></figcaption>
+</figure>
+</div>
+</details>
+</section>
+
+<section class="chapter" id="app-policy">
+  <p class="route">App Policy → Claude Code, Cowork, or Codex</p>
+  <h2>Configure policy for each client</h2>
+  <p class="lead">App Policy groups client defaults, model access, web search, and routing controls by app.</p>
+  <ol>
+    <li>Select the client tab. Confirm the selected app before reviewing or changing any setting.</li>
+    <li>Review the default model and routing settings. Open the default-model help when you need to confirm when the default is used.</li>
+    <li>Inspect model access and the users covered by the policy. Review the web-search setting separately if the app uses that capability.</li>
+    <li>Apply a change at the intended scope and verify the user’s effective app and model access in <strong>Users/Teams</strong>. Use a representative client request if you need to confirm routing behavior.</li>
+  </ol>
+  <figure id="fig-04-app-policy">
+  <a class="image" href="screenshots/admin/04-app-policy.png" target="_blank" rel="noopener"><img src="screenshots/admin/04-app-policy.png" width="1440" height="3389" loading="lazy" decoding="async" alt="Claude Code app policy, including default model, routing, and access"></a>
+  <figcaption><strong>Claude Code app policy, including default model, routing, and access</strong> <a href="screenshots/admin/04-app-policy.png" target="_blank" rel="noopener" aria-label="Open PNG for Claude Code app policy, including default model, routing, and access">Open PNG</a></figcaption>
+</figure>
+  <details>
+<summary>Supporting screenshots (3)</summary>
+<div class="gallery">
+<figure id="fig-30-app-policy-cowork">
+  <a class="image" href="screenshots/admin/30-app-policy-cowork.png" target="_blank" rel="noopener"><img src="screenshots/admin/30-app-policy-cowork.png" width="1440" height="3389" loading="lazy" decoding="async" alt="App Policy → Cowork"></a>
+  <figcaption><strong>App Policy → Cowork</strong> <a href="screenshots/admin/30-app-policy-cowork.png" target="_blank" rel="noopener" aria-label="Open PNG for App Policy → Cowork">Open PNG</a></figcaption>
+</figure>
+<figure id="fig-31-app-policy-codex">
+  <a class="image" href="screenshots/admin/31-app-policy-codex.png" target="_blank" rel="noopener"><img src="screenshots/admin/31-app-policy-codex.png" width="1440" height="3389" loading="lazy" decoding="async" alt="App Policy → Codex"></a>
+  <figcaption><strong>App Policy → Codex</strong> <a href="screenshots/admin/31-app-policy-codex.png" target="_blank" rel="noopener" aria-label="Open PNG for App Policy → Codex">Open PNG</a></figcaption>
+</figure>
+<figure id="fig-60-app-default-model-help">
+  <a class="image" href="screenshots/admin/60-app-default-model-help.png" target="_blank" rel="noopener"><img src="screenshots/admin/60-app-default-model-help.png" width="1440" height="900" loading="lazy" decoding="async" alt="App Policy → Default model help"></a>
+  <figcaption><strong>App Policy → Default model help</strong> <a href="screenshots/admin/60-app-default-model-help.png" target="_blank" rel="noopener" aria-label="Open PNG for App Policy → Default model help">Open PNG</a></figcaption>
+</figure>
+</div>
+</details>
+</section>
+
+<section class="chapter" id="budgets">
+  <p class="route">Budget Management</p>
+  <h2>Set budgets and web-search quotas</h2>
+  <p class="lead">Budget Management shows team and member usage and provides settings for monetary limits, enforcement, and web-search quotas.</p>
+  <div class="split">
+    <div>
+      <h3>Set or review a monetary budget</h3>
+      <ol>
+        <li>Find a team and review usage against its configured limit. Use <strong>Set Budget</strong> at team level or expand the team and use the member’s <strong>Set Budget</strong>.</li>
+        <li>Check the applicable limits, policy, and alert thresholds in the form. Review per-app limits when the budget needs to distinguish Claude Code, Cowork, and Codex.</li>
+        <li>For multiple members of one team, open <strong>Bulk edit member budgets</strong> and verify the selected rows before saving.</li>
+        <li>Reopen the team or member to confirm the saved amounts. A member limit above the team limit still leaves the team limit in effect.</li>
+      </ol>
+    </div>
+    <div>
+      <h3>Set or review a web-search quota</h3>
+      <ol>
+        <li>Find <strong>Web search quota</strong> and select <strong>Set limit</strong> for the organization or the applicable team pool.</li>
+        <li>For a user exception, go to <strong>User overrides</strong>, search for the member, and open the result.</li>
+        <li>Check the scope and the quota units shown in the form. After saving, verify the target and resulting limit in the same view.</li>
+      </ol>
+    </div>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th scope="col">Budget policy</th><th scope="col">Effect when the configured threshold or limit is reached</th></tr></thead>
+      <tbody>
+        <tr><th scope="row">Hard Block</th><td>Blocks requests once the applicable budget limit is exceeded.</td></tr>
+        <tr><th scope="row">Warning Only</th><td>Sends a warning notification when the limit is exceeded.</td></tr>
+        <tr><th scope="row">Throttle</th><td>Reduces requests per minute when the configured threshold is exceeded.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="callout warn"><p>Review all affected members before using a bulk change. <strong>Switch to Team Budget</strong> removes the personal budget. Saving automatic downgrade rules can affect routing immediately when the current usage has already reached a configured threshold.</p></div>
+  <figure id="fig-05-budget-management">
+  <a class="image" href="screenshots/admin/05-budget-management.png" target="_blank" rel="noopener"><img src="screenshots/admin/05-budget-management.png" width="1440" height="1296" loading="lazy" decoding="async" alt="Budget overview and team budget controls"></a>
+  <figcaption><strong>Budget overview and team budget controls</strong> <a href="screenshots/admin/05-budget-management.png" target="_blank" rel="noopener" aria-label="Open PNG for Budget overview and team budget controls">Open PNG</a></figcaption>
+</figure>
+  <details>
+<summary>Supporting screenshots (8)</summary>
+<div class="gallery">
+<figure id="fig-32-budget-team-edit">
+  <a class="image" href="screenshots/admin/32-budget-team-edit.png" target="_blank" rel="noopener"><img src="screenshots/admin/32-budget-team-edit.png" width="1440" height="900" loading="lazy" decoding="async" alt="Budget Management → Default Team → Set Budget"></a>
+  <figcaption><strong>Budget Management → Default Team → Set Budget</strong> <a href="screenshots/admin/32-budget-team-edit.png" target="_blank" rel="noopener" aria-label="Open PNG for Budget Management → Default Team → Set Budget">Open PNG</a></figcaption>
+</figure>
+<figure id="fig-33-budget-team-expanded">
+  <a class="image" href="screenshots/admin/33-budget-team-expanded.png" target="_blank" rel="noopener"><img src="screenshots/admin/33-budget-team-expanded.png" width="1440" height="3066" loading="lazy" decoding="async" alt="Budget Management → Expand NDS_Developers"></a>
+  <figcaption><strong>Budget Management → Expand NDS_Developers</strong> <a href="screenshots/admin/33-budget-team-expanded.png" target="_blank" rel="noopener" aria-label="Open PNG for Budget Management → Expand NDS_Developers">Open PNG</a></figcaption>
+</figure>
+<figure id="fig-34-budget-user-edit">
+  <a class="image" href="screenshots/admin/34-budget-user-edit.png" target="_blank" rel="noopener"><img src="screenshots/admin/34-budget-user-edit.png" width="1440" height="900" loading="lazy" decoding="async" alt="Budget Management → Expand team → user Set Budget"></a>
+  <figcaption><strong>Budget Management → Expand team → user Set Budget</strong> <a href="screenshots/admin/34-budget-user-edit.png" target="_blank" rel="noopener" aria-label="Open PNG for Budget Management → Expand team → user Set Budget">Open PNG</a></figcaption>
+</figure>
+<figure id="fig-35-budget-bulk-edit">
+  <a class="image" href="screenshots/admin/35-budget-bulk-edit.png" target="_blank" rel="noopener"><img src="screenshots/admin/35-budget-bulk-edit.png" width="1440" height="1181" loading="lazy" decoding="async" alt="Budget Management → Expand NDS_Developers → Bulk edit member budgets"></a>
+  <figcaption><strong>Budget Management → Expand NDS_Developers → Bulk edit member budgets</strong> <a href="screenshots/admin/35-budget-bulk-edit.png" target="_blank" rel="noopener" aria-label="Open PNG for Budget Management → Expand NDS_Developers → Bulk edit member budgets">Open PNG</a></figcaption>
+</figure>
+<figure id="fig-36-budget-search-org-limit">
+  <a class="image" href="screenshots/admin/36-budget-search-org-limit.png" target="_blank" rel="noopener"><img src="screenshots/admin/36-budget-search-org-limit.png" width="1440" height="900" loading="lazy" decoding="async" alt="Budget Management → Web search quota → Set limit"></a>
+  <figcaption><strong>Budget Management → Web search quota → Set limit</strong> <a href="screenshots/admin/36-budget-search-org-limit.png" target="_blank" rel="noopener" aria-label="Open PNG for Budget Management → Web search quota → Set limit">Open PNG</a></figcaption>
+</figure>
+<figure id="fig-37-budget-search-team-limit">
+  <a class="image" href="screenshots/admin/37-budget-search-team-limit.png" target="_blank" rel="noopener"><img src="screenshots/admin/37-budget-search-team-limit.png" width="1440" height="900" loading="lazy" decoding="async" alt="Budget Management → Web search quota → Set limit for NDS_Developers"></a>
+  <figcaption><strong>Budget Management → Web search quota → Set limit for NDS_Developers</strong> <a href="screenshots/admin/37-budget-search-team-limit.png" target="_blank" rel="noopener" aria-label="Open PNG for Budget Management → Web search quota → Set limit for NDS_Developers">Open PNG</a></figcaption>
+</figure>
+<figure id="fig-63-budget-user-search">
+  <a class="image" href="screenshots/admin/63-budget-user-search.png" target="_blank" rel="noopener"><img src="screenshots/admin/63-budget-user-search.png" width="1440" height="900" loading="lazy" decoding="async" alt="Budget Management → User overrides → search user"></a>
+  <figcaption><strong>Budget Management → User overrides → search user</strong> <a href="screenshots/admin/63-budget-user-search.png" target="_blank" rel="noopener" aria-label="Open PNG for Budget Management → User overrides → search user">Open PNG</a></figcaption>
+</figure>
+<figure id="fig-64-budget-search-user-limit">
+  <a class="image" href="screenshots/admin/64-budget-search-user-limit.png" target="_blank" rel="noopener"><img src="screenshots/admin/64-budget-search-user-limit.png" width="1440" height="900" loading="lazy" decoding="async" alt="Budget Management → User overrides → search → user result"></a>
+  <figcaption><strong>Budget Management → User overrides → search → user result</strong> <a href="screenshots/admin/64-budget-search-user-limit.png" target="_blank" rel="noopener" aria-label="Open PNG for Budget Management → User overrides → search → user result">Open PNG</a></figcaption>
+</figure>
+</div>
+</details>
+</section>
+
+<section class="chapter" id="api-keys">
+  <p class="route">API Keys → Active, Expired, or Revoked</p>
+  <h2>Review and revoke user virtual keys</h2>
+  <p class="lead">Users receive their gateway virtual keys through <code>gateway-cli</code> after Cognito sign-in. The API Keys page shows key records and provides revocation.</p>
+  <ol>
+    <li>Choose <strong>Active</strong>, <strong>Expired</strong>, or <strong>Revoked</strong>. Match the owner and the visible key prefix when investigating a specific credential.</li>
+    <li>For an active key that you intend to invalidate, select <strong>Revoke</strong> and verify the prefix in the confirmation dialog.</li>
+    <li>Confirm only after identifying the intended key. Check the <strong>Revoked</strong> view after the action. If the account still needs access, have the user follow the approved CLI sign-in flow.</li>
+  </ol>
+  <div class="callout warn"><p>Revocation makes the key unusable immediately and cannot be undone. The development capture had no active keys, so it shows the status lists.</p></div>
+  <figure id="fig-06-api-keys">
+  <a class="image" href="screenshots/admin/06-api-keys.png" target="_blank" rel="noopener"><img src="screenshots/admin/06-api-keys.png" width="1440" height="900" loading="lazy" decoding="async" alt="API Keys status view"></a>
+  <figcaption><strong>API Keys status view</strong> <a href="screenshots/admin/06-api-keys.png" target="_blank" rel="noopener" aria-label="Open PNG for API Keys status view">Open PNG</a></figcaption>
+</figure>
+  <details>
+<summary>Supporting screenshots (2)</summary>
+<div class="gallery">
+<figure id="fig-38-api-keys-expired">
+  <a class="image" href="screenshots/admin/38-api-keys-expired.png" target="_blank" rel="noopener"><img src="screenshots/admin/38-api-keys-expired.png" width="1440" height="900" loading="lazy" decoding="async" alt="API Keys → Expired keys"></a>
+  <figcaption><strong>API Keys → Expired keys</strong> <a href="screenshots/admin/38-api-keys-expired.png" target="_blank" rel="noopener" aria-label="Open PNG for API Keys → Expired keys">Open PNG</a></figcaption>
+</figure>
+<figure id="fig-39-api-keys-revoked">
+  <a class="image" href="screenshots/admin/39-api-keys-revoked.png" target="_blank" rel="noopener"><img src="screenshots/admin/39-api-keys-revoked.png" width="1440" height="900" loading="lazy" decoding="async" alt="API Keys → Revoked keys"></a>
+  <figcaption><strong>API Keys → Revoked keys</strong> <a href="screenshots/admin/39-api-keys-revoked.png" target="_blank" rel="noopener" aria-label="Open PNG for API Keys → Revoked keys">Open PNG</a></figcaption>
+</figure>
+</div>
+</details>
+</section>
+
+<section class="chapter" id="agents">
+  <p class="route">Agents → Issue long-lived key or select an agent</p>
+  <h2>Manage credentials for service accounts</h2>
+  <p class="lead">Agents manages server-side identities and their long-lived gateway virtual keys. The account is created in Cognito before an administrator selects it for issuance.</p>
+  <ol>
+    <li>Open <strong>Issue long-lived key</strong>. Select the intended account and review the lifetime and existing-key status in the form.</li>
+    <li>After authorized issuance, place the new credential in the application’s approved secret store and deploy or reload the application as needed. Use the key as a Bearer credential. Keep its full value out of logs, tickets, and documentation.</li>
+    <li>Open the agent detail to review <strong>Cost</strong> and <strong>Tokens</strong> for the selected period. The detail view also identifies usage that could not be attributed to a specific key when applicable.</li>
+    <li>If an application gets <code>401</code> while the key is still valid, check the configured secret and current key status. Use <strong>Repair auth</strong> when the cause is a lost key-to-account mapping and the action is available.</li>
+  </ol>
+  <div class="callout warn"><p>Issuing a replacement expires the previous key immediately. Plan the application’s secret update before issuing the replacement, then verify that the application can make an authenticated request.</p></div>
+  <figure id="fig-07-agents">
+  <a class="image" href="screenshots/admin/07-agents.png" target="_blank" rel="noopener"><img src="screenshots/admin/07-agents.png" width="1440" height="900" loading="lazy" decoding="async" alt="Service account list and long-lived key controls"></a>
+  <figcaption><strong>Service account list and long-lived key controls</strong> <a href="screenshots/admin/07-agents.png" target="_blank" rel="noopener" aria-label="Open PNG for Service account list and long-lived key controls">Open PNG</a></figcaption>
+</figure>
+  <details>
+<summary>Supporting screenshots (3)</summary>
+<div class="gallery">
+<figure id="fig-69-agents-key-issue-form">
+  <a class="image" href="screenshots/admin/69-agents-key-issue-form.png" target="_blank" rel="noopener"><img src="screenshots/admin/69-agents-key-issue-form.png" width="1440" height="900" loading="lazy" decoding="async" alt="Agents → Issue long-lived key"></a>
+  <figcaption><strong>Agents → Issue long-lived key</strong> <a href="screenshots/admin/69-agents-key-issue-form.png" target="_blank" rel="noopener" aria-label="Open PNG for Agents → Issue long-lived key">Open PNG</a></figcaption>
+</figure>
+<figure id="fig-40-agent-detail">
+  <a class="image" href="screenshots/admin/40-agent-detail.png" target="_blank" rel="noopener"><img src="screenshots/admin/40-agent-detail.png" width="1440" height="1861" loading="lazy" decoding="async" alt="Agents → Select an agent"></a>
+  <figcaption><strong>Agents → Select an agent</strong> <a href="screenshots/admin/40-agent-detail.png" target="_blank" rel="noopener" aria-label="Open PNG for Agents → Select an agent">Open PNG</a></figcaption>
+</figure>
+<figure id="fig-41-agent-tokens-trend">
+  <a class="image" href="screenshots/admin/41-agent-tokens-trend.png" target="_blank" rel="noopener"><img src="screenshots/admin/41-agent-tokens-trend.png" width="1440" height="900" loading="lazy" decoding="async" alt="Agents → Agent detail → Tokens"></a>
+  <figcaption><strong>Agents → Agent detail → Tokens</strong> <a href="screenshots/admin/41-agent-tokens-trend.png" target="_blank" rel="noopener" aria-label="Open PNG for Agents → Agent detail → Tokens">Open PNG</a></figcaption>
+</figure>
+</div>
+</details>
+</section>
+
+<section class="chapter" id="monitoring">
+  <p class="route">Monitoring → Usage log</p>
+  <h2>Investigate request failures and latency</h2>
+  <p class="lead">Use Monitoring for individual gateway events. Start with the request time and type, then use the request ID to correlate the client report with the gateway event.</p>
+  <ol>
+    <li>Open <strong>Monitoring</strong> and locate <strong>Usage log</strong>. Choose a <strong>Type</strong> such as <strong>Error</strong>, <strong>Timeout</strong>, <strong>Cancelled</strong>, <strong>Slow</strong>, or <strong>Abnormal</strong>. <strong>Abnormal</strong> groups errors, timeouts, and slow requests.</li>
+    <li>Record the request ID and compare the status, timing, app, and model with the incident details when those fields are available. Confirm whether the issue is isolated or appears across multiple clients.</li>
+    <li>Where request-body logging is enabled and authorized for the investigation, open <strong>View body logs</strong>. Use <strong>Sessions</strong> for session context or <strong>By request</strong> for a specific request. Narrow the view by time or client and verify the request before opening any payload.</li>
+  </ol>
+  <div class="callout"><p>Request bodies may contain user prompts, responses, and confidential data. The screenshots show metadata only. Use the minimum detail required for the investigation.</p></div>
+  <figure id="fig-08-monitoring">
+  <a class="image" href="screenshots/admin/08-monitoring.png" target="_blank" rel="noopener"><img src="screenshots/admin/08-monitoring.png" width="1440" height="970" loading="lazy" decoding="async" alt="Monitoring overview and usage log"></a>
+  <figcaption><strong>Monitoring overview and usage log</strong> <a href="screenshots/admin/08-monitoring.png" target="_blank" rel="noopener" aria-label="Open PNG for Monitoring overview and usage log">Open PNG</a></figcaption>
+</figure>
+  <details>
+<summary>Supporting screenshots (4)</summary>
+<div class="gallery">
+<figure id="fig-42-body-logs-sessions">
+  <a class="image" href="screenshots/admin/42-body-logs-sessions.png" target="_blank" rel="noopener"><img src="screenshots/admin/42-body-logs-sessions.png" width="1440" height="900" loading="lazy" decoding="async" alt="Monitoring → View body logs → Sessions metadata"></a>
+  <figcaption><strong>Monitoring → View body logs → Sessions metadata</strong> <a href="screenshots/admin/42-body-logs-sessions.png" target="_blank" rel="noopener" aria-label="Open PNG for Monitoring → View body logs → Sessions metadata">Open PNG</a></figcaption>
+</figure>
+<figure id="fig-43-body-logs-by-request">
+  <a class="image" href="screenshots/admin/43-body-logs-by-request.png" target="_blank" rel="noopener"><img src="screenshots/admin/43-body-logs-by-request.png" width="1440" height="900" loading="lazy" decoding="async" alt="Monitoring → View body logs → By request metadata"></a>
+  <figcaption><strong>Monitoring → View body logs → By request metadata</strong> <a href="screenshots/admin/43-body-logs-by-request.png" target="_blank" rel="noopener" aria-label="Open PNG for Monitoring → View body logs → By request metadata">Open PNG</a></figcaption>
+</figure>
+<figure id="fig-58-monitoring-type-menu">
+  <a class="image" href="screenshots/admin/58-monitoring-type-menu.png" target="_blank" rel="noopener"><img src="screenshots/admin/58-monitoring-type-menu.png" width="1440" height="900" loading="lazy" decoding="async" alt="Monitoring → Usage log → Type"></a>
+  <figcaption><strong>Monitoring → Usage log → Type</strong> <a href="screenshots/admin/58-monitoring-type-menu.png" target="_blank" rel="noopener" aria-label="Open PNG for Monitoring → Usage log → Type">Open PNG</a></figcaption>
+</figure>
+<figure id="fig-59-monitoring-abnormal">
+  <a class="image" href="screenshots/admin/59-monitoring-abnormal.png" target="_blank" rel="noopener"><img src="screenshots/admin/59-monitoring-abnormal.png" width="1440" height="900" loading="lazy" decoding="async" alt="Monitoring → Type → Abnormal"></a>
+  <figcaption><strong>Monitoring → Type → Abnormal</strong> <a href="screenshots/admin/59-monitoring-abnormal.png" target="_blank" rel="noopener" aria-label="Open PNG for Monitoring → Type → Abnormal">Open PNG</a></figcaption>
+</figure>
+</div>
+</details>
+</section>
+
+<section class="chapter" id="analytics">
+  <p class="route">Analytics → Group By</p>
+  <h2>Analyze consumption by model, team, or user</h2>
+  <p class="lead">Use Analytics for comparisons and trends across a period. Keep the date range and aggregation consistent when comparing results.</p>
+  <ol>
+    <li>Choose the reporting period. Use <strong>Custom Range</strong> when you need start and end dates for a specific incident or reporting window.</li>
+    <li>Switch <strong>Group By</strong> among <strong>By Model</strong>, <strong>By Team</strong>, and <strong>By User</strong>. Compare the request count, tokens, and cost shown for that view.</li>
+    <li>In <strong>By User</strong>, select a chart label or expand the relevant user in the <strong>User × model token usage</strong> table to inspect the model breakdown. Use the token columns and sort order that match the reporting question.</li>
+    <li>Open <strong>Export</strong> and choose the appropriate format where available. The observed menu includes CSV, JSON, and a user-by-model CSV. Record the timeframe and grouping with any shared report.</li>
+  </ol>
+  <figure id="fig-09-analytics">
+  <a class="image" href="screenshots/admin/09-analytics.png" target="_blank" rel="noopener"><img src="screenshots/admin/09-analytics.png" width="1440" height="1896" loading="lazy" decoding="async" alt="Analytics overview and grouping controls"></a>
+  <figcaption><strong>Analytics overview and grouping controls</strong> <a href="screenshots/admin/09-analytics.png" target="_blank" rel="noopener" aria-label="Open PNG for Analytics overview and grouping controls">Open PNG</a></figcaption>
+</figure>
+  <details>
+<summary>Supporting screenshots (6)</summary>
+<div class="gallery">
+<figure id="fig-44-analytics-by-team">
+  <a class="image" href="screenshots/admin/44-analytics-by-team.png" target="_blank" rel="noopener"><img src="screenshots/admin/44-analytics-by-team.png" width="1440" height="1896" loading="lazy" decoding="async" alt="Analytics → Group By → By Team"></a>
+  <figcaption><strong>Analytics → Group By → By Team</strong> <a href="screenshots/admin/44-analytics-by-team.png" target="_blank" rel="noopener" aria-label="Open PNG for Analytics → Group By → By Team">Open PNG</a></figcaption>
+</figure>
+<figure id="fig-45-analytics-by-user">
+  <a class="image" href="screenshots/admin/45-analytics-by-user.png" target="_blank" rel="noopener"><img src="screenshots/admin/45-analytics-by-user.png" width="1440" height="2413" loading="lazy" decoding="async" alt="Analytics → Group By → By User"></a>
+  <figcaption><strong>Analytics → Group By → By User</strong> <a href="screenshots/admin/45-analytics-by-user.png" target="_blank" rel="noopener" aria-label="Open PNG for Analytics → Group By → By User">Open PNG</a></figcaption>
+</figure>
+<figure id="fig-46-analytics-custom-range">
+  <a class="image" href="screenshots/admin/46-analytics-custom-range.png" target="_blank" rel="noopener"><img src="screenshots/admin/46-analytics-custom-range.png" width="1440" height="900" loading="lazy" decoding="async" alt="Analytics → Custom Range"></a>
+  <figcaption><strong>Analytics → Custom Range</strong> <a href="screenshots/admin/46-analytics-custom-range.png" target="_blank" rel="noopener" aria-label="Open PNG for Analytics → Custom Range">Open PNG</a></figcaption>
+</figure>
+<figure id="fig-47-analytics-export-menu">
+  <a class="image" href="screenshots/admin/47-analytics-export-menu.png" target="_blank" rel="noopener"><img src="screenshots/admin/47-analytics-export-menu.png" width="1440" height="900" loading="lazy" decoding="async" alt="Analytics → Export menu"></a>
+  <figcaption><strong>Analytics → Export menu</strong> <a href="screenshots/admin/47-analytics-export-menu.png" target="_blank" rel="noopener" aria-label="Open PNG for Analytics → Export menu">Open PNG</a></figcaption>
+</figure>
+<figure id="fig-48-analytics-user-model-breakdown">
+  <a class="image" href="screenshots/admin/48-analytics-user-model-breakdown.png" target="_blank" rel="noopener"><img src="screenshots/admin/48-analytics-user-model-breakdown.png" width="1440" height="900" loading="lazy" decoding="async" alt="Analytics → By User → user chart label"></a>
+  <figcaption><strong>Analytics → By User → user chart label</strong> <a href="screenshots/admin/48-analytics-user-model-breakdown.png" target="_blank" rel="noopener" aria-label="Open PNG for Analytics → By User → user chart label">Open PNG</a></figcaption>
+</figure>
+<figure id="fig-49-analytics-user-expanded">
+  <a class="image" href="screenshots/admin/49-analytics-user-expanded.png" target="_blank" rel="noopener"><img src="screenshots/admin/49-analytics-user-expanded.png" width="1440" height="900" loading="lazy" decoding="async" alt="Analytics → By User → User × model token usage → Expand user"></a>
+  <figcaption><strong>Analytics → By User → User × model token usage → Expand user</strong> <a href="screenshots/admin/49-analytics-user-expanded.png" target="_blank" rel="noopener" aria-label="Open PNG for Analytics → By User → User × model token usage → Expand user">Open PNG</a></figcaption>
+</figure>
+</div>
+</details>
+</section>
+
+<section class="chapter" id="bi-insight">
+  <p class="route">BI Insight</p>
+  <h2>Ask questions about gateway usage</h2>
+  <p class="lead">BI Insight provides a natural-language interface for usage and cost analysis when the capability is deployed.</p>
+  <ol>
+    <li>Open <strong>BI Insight</strong>. If the menu is missing, confirm the administrator role and the environment’s feature availability.</li>
+    <li>State the metric, date range, and any relevant app or team. For example, ask which teams had the highest gateway usage cost last month and request a breakdown by app.</li>
+    <li>Review the returned period and grouping. Cross-check totals and unusual findings against <strong>Analytics</strong> before sharing them or making a policy change.</li>
+  </ol>
+  <figure id="fig-10-bi-insight">
+  <a class="image" href="screenshots/admin/10-bi-insight.png" target="_blank" rel="noopener"><img src="screenshots/admin/10-bi-insight.png" width="1440" height="900" loading="lazy" decoding="async" alt="BI Insight start screen"></a>
+  <figcaption><strong>BI Insight start screen</strong> <a href="screenshots/admin/10-bi-insight.png" target="_blank" rel="noopener" aria-label="Open PNG for BI Insight start screen">Open PNG</a></figcaption>
+</figure>
+
+</section>
+
+<section class="chapter" id="audit-log">
+  <p class="route">Audit Log → Show details</p>
+  <h2>Trace administrative changes</h2>
+  <p class="lead">Audit Log shows recorded administrative actions. Use it to confirm who acted, when they acted, and which target or result was recorded.</p>
+  <ol>
+    <li>Choose a time window such as <strong>24h</strong>, <strong>7 days</strong>, or <strong>30 days</strong>. Start with the shortest window that covers the event.</li>
+    <li>Set <strong>Category</strong>, then <strong>Action</strong> where applicable. Use the actor search when you know who made the change.</li>
+    <li>Select <strong>Show details</strong> on the matching entry. Review the event time, actor, action, and target. Open <strong>Raw JSON</strong> when you need the exact recorded fields.</li>
+    <li>Compare the event to the corresponding configuration or incident window. Share only the audit fields needed for the case.</li>
+  </ol>
+  <figure id="fig-11-audit-log">
+  <a class="image" href="screenshots/admin/11-audit-log.png" target="_blank" rel="noopener"><img src="screenshots/admin/11-audit-log.png" width="1440" height="3082" loading="lazy" decoding="async" alt="Audit Log filters and event list"></a>
+  <figcaption><strong>Audit Log filters and event list</strong> <a href="screenshots/admin/11-audit-log.png" target="_blank" rel="noopener" aria-label="Open PNG for Audit Log filters and event list">Open PNG</a></figcaption>
+</figure>
+  <details>
+<summary>Supporting screenshots (3)</summary>
+<div class="gallery">
+<figure id="fig-52-audit-users-category">
+  <a class="image" href="screenshots/admin/52-audit-users-category.png" target="_blank" rel="noopener"><img src="screenshots/admin/52-audit-users-category.png" width="1440" height="900" loading="lazy" decoding="async" alt="Audit Log → Category → Users &amp; org"></a>
+  <figcaption><strong>Audit Log → Category → Users &amp; org</strong> <a href="screenshots/admin/52-audit-users-category.png" target="_blank" rel="noopener" aria-label="Open PNG for Audit Log → Category → Users &amp; org">Open PNG</a></figcaption>
+</figure>
+<figure id="fig-53-audit-detail">
+  <a class="image" href="screenshots/admin/53-audit-detail.png" target="_blank" rel="noopener"><img src="screenshots/admin/53-audit-detail.png" width="1440" height="900" loading="lazy" decoding="async" alt="Audit Log → Users &amp; org → Sync Cognito user → Show details"></a>
+  <figcaption><strong>Audit Log → Users &amp; org → Sync Cognito user → Show details</strong> <a href="screenshots/admin/53-audit-detail.png" target="_blank" rel="noopener" aria-label="Open PNG for Audit Log → Users &amp; org → Sync Cognito user → Show details">Open PNG</a></figcaption>
+</figure>
+<figure id="fig-54-audit-raw-json">
+  <a class="image" href="screenshots/admin/54-audit-raw-json.png" target="_blank" rel="noopener"><img src="screenshots/admin/54-audit-raw-json.png" width="1440" height="900" loading="lazy" decoding="async" alt="Audit Log → Sync Cognito user detail → Raw JSON"></a>
+  <figcaption><strong>Audit Log → Sync Cognito user detail → Raw JSON</strong> <a href="screenshots/admin/54-audit-raw-json.png" target="_blank" rel="noopener" aria-label="Open PNG for Audit Log → Sync Cognito user detail → Raw JSON">Open PNG</a></figcaption>
+</figure>
+</div>
+</details>
+</section>
+
+<section class="chapter" id="integration">
+  <p class="route">Integration → Claude, OpenAI, or LangChain</p>
+  <h2>Connect server-side applications</h2>
+  <p class="lead">Choose the example that matches your application’s client library. Use the gateway endpoint and the alias registered for that API family.</p>
+  <ol>
+    <li>Open <strong>Integration</strong> and select <strong>Claude</strong>, <strong>OpenAI</strong>, or <strong>LangChain</strong>. Review the environment-specific values displayed on the page.</li>
+    <li>Obtain an authorized long-lived virtual key through <strong>Agents</strong>. Store it in the application’s secret manager and load it at runtime as a Bearer credential.</li>
+    <li>Use a gateway-registered alias. Use <code>/v1/messages</code> for Claude-family calls or <code>/v1/chat/completions</code> for OpenAI-family calls, according to the documented integration example.</li>
+    <li>Run a minimal request with the intended alias. If it fails, check the gateway URL, current credential, endpoint and alias pairing, and the account’s effective access.</li>
+  </ol>
+  <figure id="fig-12-integration">
+  <a class="image" href="screenshots/admin/12-integration.png" target="_blank" rel="noopener"><img src="screenshots/admin/12-integration.png" width="1440" height="900" loading="lazy" decoding="async" alt="Claude integration example and configuration guidance"></a>
+  <figcaption><strong>Claude integration example and configuration guidance</strong> <a href="screenshots/admin/12-integration.png" target="_blank" rel="noopener" aria-label="Open PNG for Claude integration example and configuration guidance">Open PNG</a></figcaption>
+</figure>
+  <details>
+<summary>Supporting screenshots (2)</summary>
+<div class="gallery">
+<figure id="fig-50-integration-openai">
+  <a class="image" href="screenshots/admin/50-integration-openai.png" target="_blank" rel="noopener"><img src="screenshots/admin/50-integration-openai.png" width="1440" height="900" loading="lazy" decoding="async" alt="Integration → OpenAI"></a>
+  <figcaption><strong>Integration → OpenAI</strong> <a href="screenshots/admin/50-integration-openai.png" target="_blank" rel="noopener" aria-label="Open PNG for Integration → OpenAI">Open PNG</a></figcaption>
+</figure>
+<figure id="fig-51-integration-langchain">
+  <a class="image" href="screenshots/admin/51-integration-langchain.png" target="_blank" rel="noopener"><img src="screenshots/admin/51-integration-langchain.png" width="1440" height="1070" loading="lazy" decoding="async" alt="Integration → LangChain"></a>
+  <figcaption><strong>Integration → LangChain</strong> <a href="screenshots/admin/51-integration-langchain.png" target="_blank" rel="noopener" aria-label="Open PNG for Integration → LangChain">Open PNG</a></figcaption>
+</figure>
+</div>
+</details>
+</section>
+
+<section class="chapter" id="cli">
+  <p class="route">CLI → Operating system instructions</p>
+  <h2>Install and configure gateway-cli</h2>
+  <p class="lead">The CLI page provides operating-system-specific instructions for interactive users, Cognito login, and gateway setup.</p>
+  <ol>
+    <li>Open <strong>CLI</strong> and select the instructions for the target operating system. Check <strong>Binary Downloads</strong> for the package if one is available in the environment.</li>
+    <li>Install the client using the instructions shown in the console. Run <code>gateway-cli login</code> and complete Cognito sign-in in the browser. The first successful CLI sign-in can provision the user and team from Cognito claims.</li>
+    <li>Use the gateway URL shown for the environment with <code>gateway-cli setup --gateway-url</code> as instructed on the page. Run <code>gateway-cli status</code> to verify the resulting setup.</li>
+    <li>Use <code>gateway-cli logout</code> to clear local sign-in state when required. If you are removing managed configuration, follow the page’s instructions for <code>gateway-cli disable</code>.</li>
+  </ol>
+  <p>The captured development environment displayed no published download packages. If the page still shows none, obtain the approved build from the distribution owner.</p>
+  <figure id="fig-13-cli">
+  <a class="image" href="screenshots/admin/13-cli.png" target="_blank" rel="noopener"><img src="screenshots/admin/13-cli.png" width="1440" height="1894" loading="lazy" decoding="async" alt="CLI installation, sign-in, activation, and command reference"></a>
+  <figcaption><strong>CLI installation, sign-in, activation, and command reference</strong> <a href="screenshots/admin/13-cli.png" target="_blank" rel="noopener" aria-label="Open PNG for CLI installation, sign-in, activation, and command reference">Open PNG</a></figcaption>
+</figure>
+
+</section>
+
+<section class="chapter" id="troubleshooting">
+  <h2>Troubleshooting</h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th scope="col">Symptom</th><th scope="col">Checks</th></tr></thead>
+      <tbody>
+        <tr><th scope="row">Account signs in but registration fails</th><td>Verify the identity-provider group assignment and gateway registration. Confirm the expected team and role in <strong>Users/Teams</strong> after the account is registered.</td></tr>
+        <tr><th scope="row">A console page returns 403</th><td>Confirm the account role and environment. For a client request, inspect the app and model access of the affected user in <strong>Users/Teams</strong>.</td></tr>
+        <tr><th scope="row">An application receives 401</th><td>Check the gateway URL, current secret and key status, and whether the key was rotated or revoked. For a valid agent key with a lost auth mapping, see <a href="#agents">Agents</a>.</td></tr>
+        <tr><th scope="row">An alias is unavailable</th><td>Verify the registered alias, active status, API family, and effective app and model policy. Check whether a default or fallback points to a deactivated model.</td></tr>
+        <tr><th scope="row">Requests are throttled or blocked</th><td>Check <strong>Rate limit</strong> at the affected scope, then review team and member budget utilization and enforcement in <strong>Budget Management</strong>.</td></tr>
+        <tr><th scope="row">Cost figures differ across views</th><td>Match time period, timezone, selected app, and report grouping. Check whether an amount includes web search before comparing it with model-only costs.</td></tr>
+        <tr><th scope="row">The cause is still unclear</th><td>Record the request ID, time and timezone, app, model alias, and status. Inspect <strong>Monitoring</strong> for the request and <strong>Audit Log</strong> for relevant changes. Keep credentials and request payloads out of the case summary.</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="chapter" id="capture-notes">
+  <h2>Screenshot notes</h2>
+  <ul>
+    <li>The guide includes 74 screenshots from development. Screen values and available controls reflect the capture session. Long pages combine scroll positions at the original 1440px width. Administrator captures use a 1440 × 900 viewport at 100% zoom. Cognito captures use a 1366 × 900 viewport.</li>
+    <li>Expand <strong>Supporting screenshots</strong> in a chapter to see additional tabs, filters, details, and forms. <strong>Open PNG</strong> opens the original image for use in training material. Keep the <code>screenshots</code> folder beside this document when moving the guide.</li>
+    <li>Repeatable list and form states use representative examples. Browser-rendered native dropdown overlays may be absent from the PNG. Forms and confirmation dialogs were opened without submitting configuration changes, deleting data, or issuing credentials.</li>
+  </ul>
+</section>
+<footer class="footer"><a href="#main">Back to the guide</a></footer>
+</main>
+</div>
+<script>
+const toolbar = document.querySelector('.toolbar');
+const toggle = document.getElementById('screens-toggle');
+const galleries = Array.from(document.querySelectorAll('details'));
+toolbar.hidden = false;
+function updateToggle() {
+  const expanded = galleries.every(gallery => gallery.open);
+  toggle.setAttribute('aria-pressed', String(expanded));
+  toggle.textContent = expanded ? 'Collapse all screenshots' : 'Expand all screenshots';
+}
+toggle.addEventListener('click', () => {
+  const expand = !galleries.every(gallery => gallery.open);
+  galleries.forEach(gallery => { gallery.open = expand; });
+  updateToggle();
+});
+galleries.forEach(gallery => gallery.addEventListener('toggle', updateToggle));
+</script>
+</body>
+</html>
