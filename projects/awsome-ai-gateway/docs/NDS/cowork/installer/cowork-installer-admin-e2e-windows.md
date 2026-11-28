@@ -5,7 +5,7 @@
 
 ```text
 ┌─ BUILD PC   (admin) ───────────────────────────────────────────┐
-│ 1) git clone -b feat/cowork-installer-import                   │
+│ 1) git clone -b nds/dev                                       │
 │ 2) edit  packaging\site-config.json   (customer values)        │
 │ 3) run   packaging\build.ps1                                   │
 │    out:  dist\installer\gateway-cli-cowork-setup-<ver>.exe     │
@@ -44,7 +44,7 @@
 | 결정                      | 권장                                                                         | 한 줄 이유                                         |
 | ----------------------- | -------------------------------------------------------------------------- | ---------------------------------------------- |
 | 정책 스코프                  | **HKLM(머신 전역)** — 설치기 기본값                                                  | 필수                                             |
-| 자격 방식                   | **helper-script** — 기본값                                                    | TBD                                            |
+| 자격 방식                   | **helper-script** — 기본값                                                    | 사용자별 로그인에서 발급받은 VK를 앱에 전달 |
 | 코드 서명                   | 테스트 = 미서명 / 정식 배포 = 고객 IT 표준(사내 코드서명 인증서 `-SignThumbprint`, 없으면 EDR 허용 목록) | 미서명 PyInstaller exe 는 SmartScreen 경고·EDR 오탐 대상 |
 | Claude Desktop App 탭 구성 | **기본 = Chat + Cowork** / Chat 전용 고객 = IT 정책으로 제한(§6)                       | 설치기 빌드는 하나로 유지, 고객별 차이는 정책 값으로                 |
 
@@ -52,7 +52,7 @@
 
 [빌드 가이드](cowork-installer-build-windows.md) §0–§4. 결과물 = `dist\installer\gateway-cli-cowork-setup-<ver>.exe` 하나.
 
-소스는 fork 의 **`feat/cowork-installer-import`** 브랜치(빌드 가이드 §1) — 빌드 PC 에서:
+빌드 PC에서 `nds/dev`의 설치기 소스를 사용합니다. 환경별 설정은 빌드 가이드 §1–§2를 참고합니다.
 
 ▶ **실행** · 빌드 PC — 🔵 일반 PowerShell
 

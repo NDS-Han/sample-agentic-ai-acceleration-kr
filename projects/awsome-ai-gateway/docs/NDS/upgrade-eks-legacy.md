@@ -1,8 +1,9 @@
-# EKS prod 업그레이드 런북 — 레거시 스크립트 배포 → 최신 커밋
+# 레거시 EKS 배포 업그레이드 참고
 
-대상: `install-eks.sh` 경로로 배포된 기존 EKS 환경을 최신 커밋으로 올린다.
-(선언적 `./deploy` + `gateway.yaml` 경로로 온보딩했다면 [install-eks.md](install-eks.md)
-"2. 업데이트" 를 따른다 — 이 문서는 그 온보딩 **전**의 1회성 수동 업그레이드 경로다.)
+이 문서는 `install-eks.sh`로 구축한 환경의 수동 업그레이드 기록입니다. 현재 운영
+환경의 편입과 업데이트는 [EKS 설치 및 업데이트](install-eks.md)와
+[업데이트 런북](update.md)을 따릅니다. 아래 절차는 아직 선언적 배포로 편입하지 않은
+환경에서 이전 마이그레이션 조건을 확인할 때 사용합니다.
 
 > **환경 변수로 파라미터화** — 맨 위 블록만 채우면 아래 명령을 그대로 붙여 쓸 수 있다.
 
@@ -13,7 +14,7 @@ export GW_CLUSTER="llm-gateway-prod"     # EKS 클러스터 이름
 export GW_KCTX="llm-gateway-prod"        # kube context 이름
 export GW_NS="llm-gateway"               # namespace
 export GW_REL="llm-gateway"              # helm release
-export GW_TAG="0ad5689c"                 # 배포할 git short SHA (RDS Proxy fix 포함 — 아래 ⚠️)
+export GW_TAG=""                         # 이 환경의 배포 대상 이미지 태그·커밋을 지정
 export GW_DB_CLUSTER=""                  # Aurora cluster 식별자 (스냅샷용)
 export GW_REPO_DIR="$PWD"                # 레포 루트 (projects/awsome-ai-gateway 의 상위)
 # ─────────────────────────────────────────────────────────────────
@@ -37,6 +38,7 @@ kc() { kubectl --context "$GW_KCTX" -n "$GW_NS" "$@"; }
 ## 0. 사전 조건 (prod 배포 EC2, 1회)
 
 ```bash
+: "${GW_TAG:?이 환경의 배포 대상 이미지 태그를 지정하세요}"
 helm version --short                    # v3.14+ 필수 (--reset-then-reuse-values)
 aws sts get-caller-identity             # prod 계정인지 확인 — dev 계정이면 중단
 aws eks update-kubeconfig --name "$GW_CLUSTER" --region "$GW_REGION" --alias "$GW_KCTX"

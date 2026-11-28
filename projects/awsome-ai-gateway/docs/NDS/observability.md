@@ -7,12 +7,14 @@
 메트릭:   pod → otel-collector → Prometheus → Grafana / prometheus-adapter → HPA
 알림:     Aurora·ElastiCache·RDS events → CloudWatch alarms → SNS topic → email
           앱 메트릭 → PrometheusRule → Alertmanager → Slack (env 별 Secret 이 있을 때, §10)
+          비용 대조·실패 기록·단가 누락 → notification-worker → Slack (§11)
 로그:     AWS managed 서비스 → CloudWatch Logs (이미 동작)
           컨테이너 stdout/stderr → kubectl logs 만 (log_shipping 켜면 CloudWatch)
 ```
 
-> 관측 스택은 있으나 **알림 발송체는 기본 꺼짐**입니다 — 대시보드는 보는
-> 도구고, 깨우는 도구는 `features.alerting` 을 켜야 생깁니다.
+> 알림 목적에 맞는 설정을 선택합니다. AWS 인프라 알림은 `features.alerting`,
+> EKS Prometheus 알림은 `observability.alerting`, 비용 정확성 알림은
+> `features.business_alerts`에서 켭니다. 세 경로의 사용 설정은 각각 기본값이 꺼져 있습니다.
 
 ---
 
@@ -24,8 +26,9 @@
 | **AWS managed** | CloudWatch alarms + SNS + Fargate 로그 라우터 | `module.alerting` — `features.alerting` 선언 시 **managed overlay** | ✅ 이 문서의 기능 |
 
 In-cluster 스택은 부하테스트 관측용으로 만들어진 상태입니다:
-Prometheus retention **24h**, `emptyDir` 스토리지(파드 재시작 시 메트릭 소실).
-Alertmanager 1 파드 + 게이트웨이/비용 PrometheusRule 이 있고, 수신자는 Slack 하나입니다(§10). HPA 의
+Prometheus 기본 보관 기간은 **24h**, 스토리지는 `emptyDir`입니다.
+게이트웨이·비용 PrometheusRule은 기본 설치합니다. Alertmanager는
+`observability.alerting.enabled: true`에서 파드 1개를 설치하며, Slack 전달은 §10을 따릅니다. HPA 의
 `executorInflightTarget` 커스텀 메트릭은 prometheus-adapter 경유로 이미
 동작합니다 — 스택을 지우면 HPA 가 깨집니다.
 
@@ -334,7 +337,8 @@ aws cloudwatch put-metric-alarm --region <region> \
 
 | 파일 (`deployment/observability/kube-prometheus-stack/`) | 내용 |
 |---|---|
-| `values.yaml` | Alertmanager 1 replica(emptyDir), 기본 route = `"null"`(전달 꺼짐), 억제 규칙, Slack 메시지 템플릿, EKS 컨트롤 플레인 잡음 규칙 끄기 |
+| `values.yaml` | 기본 Prometheus 보관 기간 24h와 `emptyDir` 스토리지 |
+| `values-alerting.yaml` | Alertmanager 1 replica, 자체 알림 상태 보관 기간 120h, `emptyDir` 스토리지, 기본 `"null"` 라우트 및 EKS 잡음 규칙 제어 |
 | `alerting-rules.yaml` | 게이트웨이/비용 알림 규칙 (항상 적용) |
 | `alertmanager-slack.yaml` | Slack 수신자 + route (Secret 이 있을 때만 `install.sh` 가 적용) |
 | `install.sh` | env 판별 → Secret 확인 → 오버레이·마운트 결정, Prometheus `externalLabels.env` 설정 |
@@ -416,3 +420,32 @@ kubectl -n observability exec alertmanager-kps-alertmanager-0 -c alertmanager --
 silence 는 emptyDir 이라 Alertmanager 파드 재시작 시 사라집니다.
 
 다른 수신자(Teams, webhook, PagerDuty, Opsgenie, Discord, email/SES, SNS) 예시: [alerting-receivers.md](alerting-receivers.md).
+
+## 11. 비용 이상 알림 — notification-worker
+
+`features.business_alerts`는 세 배포 대상에서 비용 원장 대조 결과, dead-letter 증가,
+단가 누락을 주기적으로 확인합니다. 알림을 보낼 점검만 선택합니다.
+
+```yaml
+features:
+  business_alerts:
+    enabled: true
+    reconciliation_mismatch: true
+    dead_letter_growth: true
+    pricing_missing: true
+    slack: true
+```
+
+| 배포 대상 | Slack 웹훅 전달 방식 |
+|---|---|
+| EKS | notification-worker의 네임스페이스에서 Secret `alertmanager-slack-<env>`의 `api_url`을 읽습니다. Alertmanager를 별도 네임스페이스에 설치한 경우 이쪽 Secret도 확인합니다. |
+| ECS | 태스크 시작 전에 앱의 Secrets Manager 값에 `slack_webhook_url` 키가 있어야 합니다. 누락되면 태스크가 시작하지 못합니다. |
+| Compose | 배포 호스트의 `.env`에 있는 `SLACK_WEBHOOK_URL`을 사용합니다. |
+
+`./deploy apply --plan`으로 notification-worker 설정을 확인한 뒤 적용합니다. 워커가
+시작됐는지, 켠 점검이 실행되는지, 이상이 발생한 경우 대상 Slack 채널에 전달되는지
+확인합니다. 비용 대조 불일치와 미처리 건수는 §10에서 사용하는 Prometheus 알림과
+별도로 전달될 수 있으므로 두 경로를 같은 채널에 켤 때 확인합니다.
+
+현재 비용 대조는 내부 원장과 집계의 정합성을 확인합니다. AWS 청구와의 대조는
+[R7 설계](cost-reconciliation-r7.md)에 기록되어 있습니다.

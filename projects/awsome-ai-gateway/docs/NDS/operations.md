@@ -2,11 +2,13 @@
 
 배포가 끝난 뒤 **반복되는 운영 작업**을 모읍니다. 설치 자체는
 install-{compose,ecs,eks}.md, 변경은 [update.md](update.md) 참조.
+관리자 화면과 버튼별 절차는 [관리자 가이드](guides/README.md)에서 확인합니다.
 
 ## 1. 직원 등록 (Cognito 사용자 + 그룹)
 
 `bootstrap`은 **첫 관리자 1명**만 만듭니다(`ClaudeAdmin` + 첫 팀 그룹 자동 배정).
-직원은 운영자가 계속 추가합니다 — 세 단계:
+아래 절차는 Cognito에 직접 생성하는 사용자 기준입니다. ADFS 사용자는
+[AD 그룹 및 사용자 등록](ad-sync.md)을 함께 확인합니다.
 
 ```bash
 POOL_ID=$(terraform -chdir=<terraform env dir> output -raw cognito_user_pool_id)
@@ -27,12 +29,18 @@ aws cognito-idp admin-add-user-to-group --user-pool-id $POOL_ID \
 
 | 그룹 | 의미 | 안 넣으면 |
 |---|---|---|
-| `Claude_<dept>_<team>` (bootstrap 의 `infra.cognito_groups`가 만든 것) | 팀 소속 — VK 발급의 전제 | 로그인은 되는데 **VK 발급 403** |
+| `Claude_<dept>_<team>` (bootstrap 의 `infra.cognito_groups`가 만든 것) | 네이티브 모드에서 팀 소속을 결정 | 그룹 매핑이 필수인 환경에서는 웹 등록 또는 VK 발급이 실패할 수 있음 |
 | `ClaudeAdmin` | admin-ui(`/models`·예산 등) 접근 | 관리 UI 403 — 의도된 제한 |
 
-3) **동기화** — admin-ui ▸ 사용자/팀 관리의 **Cognito 동기화** 버튼을 누르면
-Cognito 사용자·그룹이 게이트웨이 조직 트리로 반영됩니다(팀·예산·비용 집계
-단위). 동기화 전에는 사용자가 조직에 안 보일 뿐 로그인·VK는 곧바로 됩니다.
+3) **게이트웨이 등록을 확인합니다.** 배포에 적용된 그룹 클레임으로 팀과 역할이
+결정됩니다. 첫 웹 로그인은 그룹 매핑을 검증해 사용자를 등록하며, 웹에서는 VK를
+발급하거나 교체하지 않습니다. `gateway-cli login`에서도 사용자를 등록하거나
+갱신하고 VK를 발급합니다. 직원이 로그인하기 전에 조직 트리에 표시해야 하거나
+배치 정합성이 필요하면 **Users/Teams → Sync Cognito**를 실행합니다.
+
+웹 등록이 성공하면 **Users/Teams**에서 해당 사용자의 소속과 역할을 확인합니다.
+**User registration failed**가 표시되면 사용자에게 현재 `oidc.groups_claim`과
+팀 매핑 규약에 맞는 그룹이 전달되는지 확인합니다.
 
 > 그룹 목록 확인: `aws cognito-idp list-groups --user-pool-id $POOL_ID`.
 > 팀 그룹이 없으면 `infra.cognito_groups`(ecs) 또는 env tfvars `cognito_groups`

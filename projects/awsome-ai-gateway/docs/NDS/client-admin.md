@@ -8,7 +8,7 @@
 
 | | 앤드유저가 하는 것 | 관리자가 하는 것 |
 |---|---|---|
-| 인증 | `gateway-cli login` (브라우저 OIDC) | Cognito 사용자·그룹 생성 ([operations.md §1](operations.md)) |
+| 인증 | `gateway-cli login` (브라우저 OIDC) | 네이티브 계정의 Cognito 그룹 또는 ADFS 클레임 확인 |
 | 설정 | setup/config.toml 1회 | site-config 베이크 + 인스톨러 빌드·배포 |
 | 네트워크 | 없음 | `network.allowed_cidrs` + SG 에 직원 IP 등록 |
 | 진단 | 증상 보고 | `usage_logs`·라우팅 프로필·VK scope 확인 |
@@ -26,8 +26,10 @@
 | `OIDC_ISSUER_URL` / `OIDC_CLIENT_ID` | `gateway.yaml` `oidc:` → 없으면 terraform output `cognito_*` |
 | `ANTHROPIC_BASE_URL` / `ADMIN_API_URL` | eks: values ingress host / ecs: `alb_dns_name` / compose+도메인: `gateway.<domain>` / 무도메인: 공인 IP:8000 |
 
-- **계정**: Cognito 사용자 생성 + `Claude_<dept>_<team>` 그룹 배정 — [operations.md §1](operations.md).
-  팀 그룹이 없으면 로그인은 되는데 **VK 발급이 403** — 직원이 가장 먼저 만나는 함정.
+- **계정**. 네이티브 사용자는 [운영 런북](operations.md#1-직원-등록-cognito-사용자--그룹)에
+  따라 팀 그룹을 배정합니다. ADFS 사용자는 [AD 그룹 및 사용자 등록](ad-sync.md)에 따라
+  `custom:groups`가 팀과 역할로 해석되는지 확인합니다. 웹 로그인으로 조직에 등록된
+  사용자도 CLI에서 사용할 VK는 `gateway-cli login`으로 발급받습니다.
 - **IP 허용**: `gateway.yaml` `network.allowed_cidrs` 에 직원 대역 추가 후 `./deploy apply`.
   admin-api·게이트웨이 둘 다 IP로 막히므로, 빠뜨리면 "로그인은 되는데 키 발급·추론만 타임아웃".
 - **https**: Cowork 는 `https://` 필수 — `domain.mode`가 `none`이면 Cowork 사용자는 제외 안내.
@@ -95,7 +97,7 @@ powershell -File installer\packaging\build.ps1 -SignThumbprint <인증서>   # W
 
 | 직원 증상 | 서버에서 확인할 것 |
 |---|---|
-| `no group mapping found` | Cognito 그룹 배정 누락 → operations.md §1 (팀 그룹 필수) |
+| `no group mapping found` 또는 웹의 **User registration failed** | 환경의 `oidc.groups_claim`, 실제 전달된 그룹 값, 팀 접두어 및 필수 그룹 확인 |
 | 로그인 OK, VK 발급 실패·타임아웃 | 직원 공인 IP가 `allowed_cidrs`/SG 밖 — Cognito(공개)는 통과, admin-api(차단)에서 막힘 |
 | `403 Model not allowed` | VK `allowed_models` scope 또는 routing profile client/alias 상태 |
 | 사용량이 `client=other`로 잡힘 | Codex Desktop: `originator` 헤더 누락 → config.toml §2-C 블록 재적용 |
@@ -123,6 +125,7 @@ powershell -File installer\packaging\build.ps1 -SignThumbprint <인증서>   # W
 
 | 문서 | 내용 |
 |---|---|
+| [영문 관리자 상세 가이드](guides/admin-guide.en.html#cli) | 콘솔의 CLI 설치·로그인 화면과 확인 절차 |
 | [client-setup.md](client-setup.md) | 앤드유저용 — 이 문서의 산출물(env 4줄·인스톨러)을 쓰는 절차 |
 | [operations.md](operations.md) | Cognito 사용자·그룹, 오픈 전 하드닝 체크리스트, 라우팅 프로필 SQL |
 | `installer/packaging/README.md` | Windows 빌드 상세 (서명·site-config·site-extra·오프라인) |

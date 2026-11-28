@@ -49,7 +49,7 @@ Components the deploy tool manages:
 |---|---|
 | `gateway-proxy` | Request entrypoint — VK auth, model routing, streaming, budget reservation/settle |
 | `admin-api` | Ops API — users/teams/keys/models/budgets/audit; Cognito sync; service-account keys |
-| `admin-ui` | Next.js console for admins (see [guides/](../guides/README.md)) |
+| `admin-ui` | Next.js console for admins. See the [Administrator Guide](../guides/admin-guide.en.html). |
 | `scheduler`, `notification-worker`, `cost-recorder-worker` | Background jobs — alerts, usage/cost persistence |
 | Aurora PostgreSQL | System of record — keys, users, budgets, usage, audit |
 | ElastiCache (Redis/Valkey) | Auth cache, budget counters, rate-limit windows |
@@ -318,8 +318,10 @@ aws cognito-idp admin-add-user-to-group --user-pool-id $POOL_ID \
 | `Claude_<dept>_<team>` | Team membership — prerequisite for VK issuance | Login works, **VK issuance 403** |
 | `ClaudeAdmin` | admin-ui access | admin pages 403 (intended) |
 
-Then press **Sync Cognito** in admin-ui → Users/Teams to reflect
-users/groups into the org tree.
+A successful web sign-in provisions the user from the configured group
+claim. `gateway-cli login` handles virtual key (VK) issuance. To populate the organization
+tree before a user signs in, use **Users/Teams → Sync Cognito**. See
+[Sign-in and access](../guides/admin-guide.en.html#access).
 
 ### 8.2 ADFS ↔ Cognito SAML (AD integration)
 
@@ -343,58 +345,65 @@ login → browser to ADFS → AD auth → signed assertion (email/name/groups)
   switching `group_prefix` to `SSIR_` makes native `Claude_*` pool-group
   members "unmatched" and rejected; keep `reject_unmatched_groups: false`
   or grant `custom:groups` to native accounts during migration).
-- **Hand to the ADFS admin:** multiple groups must be sent as **one
-  `;`-joined string** in the `groups` claim. If ADFS emits a repeated
-  attribute instead, only the last value may survive — team mapping
-  silently drops all but one group.
-- **Required plumbing:** `custom:groups` schema + client
-  `read_attributes` (declared in the cognito terraform module — apply
-  `-target=module.cognito`), SAML IdP registration
-  (`urn:amazon:cognito:sp:<pool-id>` entity, `/saml2/idpresponse` ACS),
-  ADFS enabled on the app client, then `oidc` block in `gateway.yaml` +
-  `./deploy apply`.
-- **Provisioning:** SAML users land in `sync-cognito`'s full-user
-  enumeration via `custom:groups` — run a sync after first logins.
-  Admin-ui login alone does **not** provision (`user_not_provisioned`).
-- **Preserve existing admins** before switching `groups_claim` — grant
-  them `custom:groups=SSIR_Claude_Admin` or `admin_emails`.
-- Deactivated AD users lose new sessions immediately; existing tokens
-  live until expiry — `admin-user-global-sign-out` for instant cut-off.
+- **Group claim format.** Send multiple gateway group names as one
+  `;`-joined string. Cognito serializes multivalued attributes with brackets
+  and commas. The current gateway parser expects plain group names.
+  [AWS attribute mapping](https://docs.aws.amazon.com/cognito/latest/developerguide/cognito-user-pools-specifying-attribute-mapping.html)
+- **Relying party settings.** Give the ADFS administrator the Cognito
+  **RP identifier** `urn:amazon:cognito:sp:<pool-id>` and the HTTPS **ACS URL**
+  ending in `/saml2/idpresponse`. The administrator console URL is the
+  entry point for users. See [AD integration](../ad-sync.md) and
+  [declarative SAML deployment](../adfs-sso.md).
+- **Attribute permissions.** Cognito needs a mutable `custom:groups`
+  attribute and app-client write access to populate it from the SAML
+  mapping. Read access controls its availability in the ID token. The
+  repository module currently grants read access only. Review the live app
+  client and the declarative configuration before rollout.
+- **Provisioning.** After a successful web sign-in, `POST /v1/auth/provision`
+  registers or updates the gateway user from the token's group claim. Web
+  sign-in leaves existing VKs alone. **Sync Cognito** also reconciles users
+  in bulk using their pool records and mapped attributes.
+- **Preserve existing admins** before switching `groups_claim`. Test a native
+  emergency account with a compatible `custom:groups` value. `admin_emails`
+  matches verified email addresses for the ADMIN role and does not supply a team.
+- Disabling an account in AD prevents new federation sign-ins. Review active
+  Cognito sessions and gateway VKs separately when removing access.
 
 ---
 
 ## 9. Day-2 operations
 
-The console is documented page-by-page in [guides/](../guides/README.md)
-(15 guides, every dialog and flow screenshotted). This section is the
-ops contract behind the UI.
+The [Administrator Guide](../guides/admin-guide.en.html) provides procedures
+and 74 dev captures for sign-in and 13 administrator menus. Use this section
+for the operational behavior behind those screens.
 
 ### 9.1 User lifecycle
 
 | Task | Where | Notes |
 |---|---|---|
-| Add user | Cognito + `Claude_*` group → **Sync Cognito** | Or self-provision via `gateway-cli login` (`/v1/auth/exchange`) |
-| Team leader | Users/Teams → team node → **Set as team leader** | Console flag, survives syncs |
+| Add user | Cognito account or first federated sign-in, then web or CLI sign-in | **Sync Cognito** can reconcile existing pool users in bulk |
+| Team leader | Users/Teams → team node → **Change leader** | Assignment is managed in the console |
 | Deactivate | Member node → deactivate | Revokes active VKs in the same transaction |
 | Force re-auth | Team/member → **Force re-authentication** | Invalidates all VKs in scope |
-| Remove (AD) | Delete in AD → `admin-user-global-sign-out` + `admin-delete-user` | Pool record is housekeeping |
+| Offboard an AD user | Disable AD access, review the Cognito session, deactivate gateway access | Verify that active VKs are revoked and handle pool record cleanup separately |
 
-**Provisioning — when does a new user actually appear?** Two paths create
-the DB record, and either one unlocks the rest:
+**When does a new user appear?** Three routes can create or update the
+gateway record:
 
 - **Sync Cognito** (admin-driven) — pool groups **+ full user enumeration**;
   each user's `custom:groups` attribute is read for team/role resolution,
-  so SAML users are covered too. Recommended right after adding users —
-  it makes them visible in the org tree before they ever log in.
+  so SAML users already created in the pool are covered too. Native users can
+  appear in the organization tree before their first sign-in.
+- **`/v1/auth/provision`** (web sign-in callback) — validates the token, then
+  registers the user and resolves the team and role.
 - **`/v1/auth/exchange`** (user-driven) — the first `gateway-cli login`
-  auto-provisions the account from token claims (email-verified link only).
+  provisions the account from verified token claims and issues a VK.
 
-Until **one** of these runs, admin-ui pages return `user_not_provisioned`
-(403) — VKs work fine via CLI, but the user's own usage page and any
-admin-ui route are locked. Team membership also gates VK issuance itself:
-no `Claude_*` group → exchange is a 403. Granular sync endpoints exist
-for partial updates (`sync-cognito/user/{username}`,
-`sync-cognito/group/{groupname}`) when a full sync is unnecessary.
+If a session predates registration and receives `user_not_provisioned`
+(403), sign out and sign in again. If the callback displays **User
+registration failed**, check the claim, required groups, and team mapping.
+Granular sync endpoints are available for targeted updates
+(`sync-cognito/user/{username}`, `sync-cognito/group/{groupname}`).
 
 ### 9.2 Keys — two kinds, never mixed
 
@@ -405,8 +414,9 @@ for partial updates (`sync-cognito/user/{username}`,
 
 - Issuing on a non-agent account **converts it to an agent** (interactive
   login + short-lived keys blocked) — the dialog warns.
-- Agent key rotation = **Unflag** (revokes live key + drops marker) →
-  re-issue. The backend refuses unflag while a live key exists.
+- Use **Agents → Issue long-lived key** to replace a key on an existing agent.
+  Issuing the replacement expires the previous key immediately. Prepare the
+  application's secret update and verify a request after the switch.
 - **Repair auth** re-registers a lost auth mapping — the fix for "401 on
   a still-valid key" (cache eviction, manual DB edit). Agents only —
   user VKs get a fresh `gateway-cli login`.
@@ -497,8 +507,10 @@ aliases keep their current price — a sync never blanks a price; changing
 the source after previewing clears the result and a server-side drift
 guard rejects stale applies.
 
-Lifecycle: **Deactivate** preserves history (preferred for retiring);
-**Delete** is gated on models with no dependents.
+**Deactivate** stops new requests and preserves the catalog and history.
+**Delete** removes linked pricing and access settings but keeps usage history.
+Deletion is blocked while another model uses the alias as a budget downgrade
+destination. Review the impact dialog before entering the alias.
 
 ### 9.6 Monitoring, audit, analytics
 
@@ -510,8 +522,11 @@ Lifecycle: **Deactivate** preserves history (preferred for retiring);
   Slack once the per-env webhook Secret exists (observability.md §10), and
   `features.alerting` adds SNS + CloudWatch alarms for Aurora/
   ElastiCache plus optional Fargate→CloudWatch log shipping through the
-  managed overlay. See [observability.md](../observability.md) — until
-  it is enabled and subscriptions confirmed, detection is pull-only.
+  managed overlay. Confirm the SNS subscriptions to receive CloudWatch
+  notifications. See [Observability and alerting](../observability.md).
+- **Cost accuracy alerts** are sent by notification-worker when
+  `features.business_alerts` is enabled. Review the target-specific Slack
+  configuration before enabling [cost accuracy alerts](../observability.md#11-비용-이상-알림--notification-worker).
 - **Audit Log**: every mutation, atomically committed — first stop for
   "who changed X". Body-log views are themselves logged.
 - **Analytics**: aggregated reporting (KPIs, cost trend, per-model,
@@ -527,11 +542,12 @@ in `REPORTING_TIMEZONE`, default **Asia/Seoul**):
 
 | Job | Schedule (default) | What it does |
 |---|---|---|
-| `roi_aggregation` | `*/15 * * * *` | Analytics ROI data rollup |
+| `roi_aggregation` | Disabled by default. `*/15 * * * *` when enabled | Optional legacy job (`ROI_AGGREGATION_ENABLED`). Analytics calculates ROI from usage rollups. |
 | `key_expiry` | `0 * * * *` | Expires VKs past TTL — a user's key "randomly" failing is often this |
 | `service_key_repair` | `*/15 * * * *` | Auto-heals agent-key auth mappings (what **Repair auth** does manually) |
 | `key_purge` | `30 3 * * *` | Deletes expired VKs after 90d retention — **disabled by default** (`KEY_PURGE_ENABLED`); enabling is a retention-policy decision |
 | `daily_usage_agg` (cost-recorder) | `10 0 * * *` | Daily usage/cost aggregation feeding Analytics |
+| `cost_reconciliation` (cost-recorder) | `0 1 * * *` when enabled | Checks the internal usage, cost, and budget ledgers |
 | notification-worker | event-driven | Budget alert emails via the configured provider — verify `ses_from`/recipient ownership |
 
 ### 9.8 Recurring ops cadence
@@ -675,7 +691,7 @@ second escrow location.
 | Every request fails AssumeRole | `model.routing_profiles` or `model.model_aliases` carrying non-NULL ARNs intended for another account → NULL for in-account (§9.3) |
 | 401 on a valid agent key | **Repair auth** on Agents page |
 | VK issuance 403 for a user | Missing `Claude_*` team group |
-| admin-ui 403 for a user | Missing `ClaudeAdmin` / not provisioned → Sync Cognito |
+| admin-ui 403 or user registration fails | Verify the configured group claim, team mapping, and page role. For `user_not_provisioned`, sign out and sign in again (§9.1). |
 | Login loops / SSO broken | Cognito callback URLs vs actual hostnames (`domain.hosts`, `nextauthUrl`) |
 | Model call `AccessDenied … Subscribe` | Marketplace subscription missing in the **target** account |
 | Slow + 503 under load | Executor queue depth → capacity band (§10) |
@@ -806,15 +822,16 @@ received — an unchecked row here is a future incident.
 | EKS install/update/adopt | [install-eks.md](../install-eks.md) ([install-compose.md](../install-compose.md), [install-ecs.md](../install-ecs.md) for other backends) |
 | Full `gateway.yaml` reference | [gateway-yaml.md](../gateway-yaml.md) |
 | Domain modes | [domain.md](../domain.md) |
-| ADFS/SAML details | [ad-sync.md](../ad-sync.md) |
+| ADFS/SAML deployment and user registration | [SAML deployment](../adfs-sso.md), [AD integration](../ad-sync.md) |
 | Ops runbook depth | [operations.md](../operations.md) |
 | Update/rollback/teardown | [update.md](../update.md) |
-| Cluster/engine upgrades | [upgrade-eks-cluster.md](../upgrade-eks-cluster.md), [upgrade-eks-legacy.md](../upgrade-eks-legacy.md) |
+| Cluster/engine upgrades | [EKS and Aurora upgrades](../upgrade-eks-cluster.md) |
+| Legacy EKS migration reference | [Pre-adoption EKS procedure](../upgrade-eks-legacy.md) |
 | DR | [dr-runbook.md](../dr-runbook.md) |
 | Observability & alerting | [observability.md](../observability.md) |
 | Load testing | [loadtest.md](../loadtest.md) |
 | BI chat agent | [chat-agent.md](../chat-agent.md) |
-| Per-page console guide (screenshots) | [guides/](../guides/README.md) |
+| Administrator procedures and screenshots | [English HTML guide](../guides/admin-guide.en.html), [Korean guide index](../guides/README.md) |
 | Employee setup | [client-setup.md](../client-setup.md), [client-admin.md](../client-admin.md), [cowork/](../cowork/README.md) |
 | Design rationale | [decisions.md](../decisions.md) |
 

@@ -261,16 +261,16 @@ protection을 해제한 뒤 삭제하므로 **최종 스냅샷 없이 완전 삭
 필요하면 먼저 `aws rds create-db-cluster-snapshot`을 실행하세요.
 상세는 [update.md](update.md#배포-삭제-teardown) 참조.
 
-## 9. 아직 안 되는 것 (솔직한 목록)
+## 9. 기능 지원 범위
 
 | 기능 | 상태 |
 |---|---|
 | `web_search` | ✅ 지원 — `apply`가 AgentCore Gateway를 자동 프로비저닝하고 URL을 tfvars/`extra-vars.json`에 기록 (재apply 시 재사용) |
 | `pricing_lambda` | ✅ 지원 — `apply`가 LiteLLM Lambda + invoke 정책을 자동 배포하고 task env에 `LITELLM_PRICING_LAMBDA` 주입 |
-| `bi_insight` | `agentcore_runtime` 모듈 배선 미구현 — env main.tf 에 추가 필요 |
+| `bi_insight` | `features.bi_insight: true`로 활성화합니다. `apply`가 ECS의 `agentcore_runtime` 모듈과 Runtime 설정을 반영합니다. [BI Insight 배포](chat-agent.md) |
 | `observability` | CloudWatch logs + container insights 는 기본. OTel/Grafana 스택은 미구현 |
 | `cloudfront-temp` | ECS 경로에 CloudFront 없음 → `none` (HTTP) 또는 `route53-acm` |
-| 외부 OIDC | ECS 경로는 Cognito 생성이 기본 — 외부 IdP 는 모듈 변수 직접 주입으로만 가능 |
+| 외부 IdP | ECS가 생성한 Cognito가 토큰을 발급합니다. SAML IdP는 `infra.cognito_saml`로 연결합니다. [ADFS SAML 배포](adfs-sso.md) |
 
 ## 10. public → private 전환
 

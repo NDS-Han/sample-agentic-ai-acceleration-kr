@@ -73,6 +73,12 @@ features:
     enabled: false          # SNS topic + Aurora/ElastiCache CloudWatch alarms + RDS event sub
     emails: []              # SNS email 구독 — apply 후 수신자 confirm 필요(자동화 불가). enabled 필수
     log_shipping: false     # eks 전용 — Fargate stdout/stderr → CloudWatch Logs 라우터
+  business_alerts:         # notification-worker 비용 정확성 알림 — eks/ecs/compose
+    enabled: false
+    reconciliation_mismatch: false
+    dead_letter_growth: false
+    pricing_missing: false
+    slack: false
   bi_insight: false
   pricing_lambda: false
   web_search: false
@@ -123,6 +129,7 @@ infra:                         # 신규 설치 인프라 입력 — `deploy boot
   vpc_cidr: ""                 # 비우면 backend 기본 (eks 10.30/16, ecs 10.40/16)
   cognito_domain_suffix: ""    # 비우면 <region-code>-auth-<account> (예: apne2-auth-123…)
   cognito_groups: []           # 'Claude_<team>' / 'Claude_<dept>_<team>' — ClaudeAdmin 자동 포함
+  cognito_saml: {}             # ecs/eks Cognito SAML IdP 선언 (adfs-sso.md)
   bedrock_allowed_model_arns: []  # 비우면 backend 기본 — 명시 시 models_profile 매핑을 덮어씀
   db: {}                       # ecs 전용 — Aurora override (아래 'infra.*' 표)
   cache: {}                    # ecs 전용 — ElastiCache override (아래 'infra.*' 표)
@@ -288,6 +295,7 @@ deploy:
 | `vpc_cidr` | VPC 대역. 바꾸면 위 서브넷 CIDR 도 이 대역에서 생성됩니다 |
 | `cognito_domain_suffix` | Hosted UI suffix. 비우면 `<region-code>-auth-<account>` 자동 (us-east-1→use1, ap-northeast-2→apne2) |
 | `cognito_groups` | OIDC 팀 그룹. `Claude_` 접두 필수(없는 그룹은 로그인 거부 — 스키마 검증). `ClaudeAdmin`은 자동 포함 |
+| `cognito_saml` | ECS/EKS Cognito SAML IdP의 메타데이터와 속성 매핑. [ADFS SAML 배포](adfs-sso.md)에 따라 선언하고 앱 클라이언트 권한을 검증합니다. |
 | `bedrock_allowed_model_arns` | IRSA 정책 허용 ARN 패턴. 비우면 backend 기본(eks=variables.tf 최신 목록, ecs=`clients.models_profile` 매핑) — 명시 시 그 목록을 덮어씁니다 |
 | `mantle_regions` | **eks 전용** — in-account Bedrock Mantle 호출 허용 리전. 비우면 env variables.tf 기본값. 선언하면 managed overlay 가 module.irsa 정책을 소유합니다 |
 | `eks_version` | **eks 전용** — EKS 컨트롤플레인 기대 버전 (`"1.34"` 처럼 **따옴표 필수** — 따옴표 없는 `1.30`은 yaml이 float `1.3`으로 읽어 minor가 왜곡됩니다). 실제 적용 선언은 env `terraform.tfvars`의 `eks_cluster_version`/`eks_addon_versions`이고, 이 키는 라이브와의 drift 감지용입니다 — capture가 `describe-cluster` 실측으로 채우고, apply가 라이브와 다르면 안내를 띄웁니다. `apply`는 클러스터 버전을 바꾸지 않습니다 |
@@ -295,10 +303,9 @@ deploy:
 | `db.*` | **ecs 전용** — tier 프리셋 위에 얹는 DB 세부 override: `mode`(serverless\|provisioned), `min_acu`/`max_acu`(0.5 단위, 0=일시정지), `instance_class`(provisioned 시). 매 `apply`마다 tfvars로 내려가므로 **업데이트 경로에서도 동작** — `configure`의 고급 분기나 직접 편집 후 apply. mode 전환은 재생성급 변경(노트 출력) |
 | `cache.*` | **ecs 전용** — ElastiCache override: `mode`(single\|replicated\|cluster), `node_type`(non-cluster·cluster 모두에 적용), `num_clusters`(non-cluster 노드 수 1~6 — replicated면 ≥2: primary+replica로 failover/Multi-AZ 자동), `num_node_groups`(cluster 샤드 수 1~90), `replicas_per_node_group`(cluster 샤드당 replica 1~5). `db.*`와 같은 override 관계. 토폴로지 키는 effective mode와 맞아야 하며 어긋나면 스키마가 거부합니다(terraform 무시 방지). node_type/mode 변경은 캐시 재기동·failover를 동반 |
 
-`infra.*` 는 bootstrap 의 managed overlay/generated tfvars 로만 내려갑니다 —
-단 `infra.db`/`infra.cache`(ecs)는 `deploy.sizing`처럼 매 apply의 tfvars에
-포함되므로 설치 후 크기 변경에도 씁니다. `validate`가 worst-case DB 커넥션
-예산을 이 override를 반영한 실효값으로 계산합니다.
+`infra.*`는 bootstrap의 인프라 입력입니다. `infra.db`와 `infra.cache`의 ECS
+설정은 매 apply의 tfvars에도 포함되며, `infra.cognito_saml`은 설치된 환경의 IdP
+변경에도 사용합니다. `validate`는 DB 크기 오버라이드를 반영해 연결 예산을 계산합니다.
 
 ### `./deploy upgrade eks --to 1.<minor>` — EKS 버전 업그레이드
 
@@ -422,6 +429,7 @@ domain:
 |---|---|---|
 | `notifications.provider` | mock=발송안함, ses=SES 발송, smtp=외부 SMTP, internal_api=사내 메일 API | ses는 `ses_from`, smtp는 `smtp_host`, internal_api는 `internal_api_url` 필수(없으면 worker crashloop). eks의 smtp 자격증명은 `smtp_credentials_secret` |
 | `alerting` | 인프라 헬스 알림 (SNS + CW alarms + Fargate 로그) | **eks/ecs 전용**. `enabled` 가 `module.alerting`(SNS topic + Aurora/ElastiCache alarms + RDS event subscription)을 managed overlay 로 만든다. `emails` 는 `enabled` 필요 — 구독은 수신자 confirm 전 pending. `log_shipping` 은 eks 전용(Fargate→CloudWatch, eks 단독 토글 가능). 상세: [observability.md](observability.md) |
+| `business_alerts` | 비용 대조 불일치, dead-letter 증가, 단가 누락 | **EKS/ECS/Compose**. `enabled`로 워커 점검을 켜고 개별 항목을 선택합니다. `slack`의 대상별 설정은 [비용 이상 알림](observability.md#11-비용-이상-알림--notification-worker)을 참고합니다. |
 | `bi_insight` | BI 어시스턴트 (AgentCore Runtime) | compose 미지원. 별도 이미지 배포 필요 |
 | `pricing_lambda` | LiteLLM 단가 조회 Lambda | **ecs/eks는 apply가 자동 보장** (role+함수+env+invoke 권한, 멱등 — 코드 수정 후 apply만 돌리면 됨) — compose는 ops/NDS-01 수동. api.litellm.ai 종료로 cost-map 모드(LITELLM_COST_MAP_URL 자동 주입)로 동작. 단가 데이터는 DB 시드가 따로 필요 |
 | `web_search` | AgentCore 기반 웹검색 | **us-east-1 전용 인프라**, apply가 자동 프로비저닝 (compose는 .env 주입) |

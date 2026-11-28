@@ -1,6 +1,7 @@
 # AICM integration guide — `/aicm/v1`
 
-`aicm-v1-openapi.json` in this directory is the machine-readable contract. The surface is
+[`aicm-v1-openapi.json`](aicm-v1-openapi.json) is the machine-readable API contract. The
+[`aicm-client-contract.json`](aicm-client-contract.json) file lists the mirrored client operations. The surface is
 mounted only when `AICM_API_ENABLED=true`.
 
 > **환경 결정(2026-11-26):** AICM 통합 시험은 내부(prod) 환경에서만 한다. dev 는 공개 환경이므로

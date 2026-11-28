@@ -1,9 +1,11 @@
 # Alertmanager 수신자 예시 — Slack 외 (문서 전용, 미구현)
 
-> **구현된 수신자는 Slack 하나뿐입니다** — `deployment/observability/kube-prometheus-stack/alertmanager-slack.yaml`
+> **이 저장소에서 제공하는 Alertmanager 수신자 오버레이는 Slack입니다.** `deployment/observability/kube-prometheus-stack/alertmanager-slack.yaml`
 > + `install.sh` 의 Secret 감지([observability.md](observability.md) §10).
 > 이 문서의 수신자는 **예시**입니다. 저장소에 오버레이 파일도, `install.sh` 연결도 없습니다.
 > 쓰려면 아래 패턴대로 오버레이를 만들고 `install.sh` 의 Slack 블록을 복사해 연결하세요.
+
+notification-worker의 비용 이상 Slack 알림과 CloudWatch·SNS 알림은 [관측 및 알림 가이드](observability.md)에서 확인합니다.
 
 대상: kube-prometheus-stack 60.1.0 에 포함된 **Alertmanager v0.27.0**. 필드 이름은
 [v0.27 configuration](https://github.com/prometheus/alertmanager/blob/v0.27.0/docs/configuration.md) 기준입니다.

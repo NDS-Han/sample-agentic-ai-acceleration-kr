@@ -4,26 +4,30 @@
 복사되거나 동기화되는 게 아니라, **로그인할 때마다 SAML assertion으로 속성이
 전달**됩니다.
 
+IdP 설정과 배포 순서는 [ADFS SAML 배포 가이드](adfs-sso.md)를 따릅니다.
+콘솔의 일반 로그인 절차는 [로그인 가이드](guides/login.md)에서 확인합니다.
+
 ```
 사용자 로그인 → 브라우저가 ADFS로 이동 → AD 인증
   → ADFS가 서명된 assertion 발급 (email, name, groups 속성)
   → 브라우저가 assertion을 Cognito에 POST (ADFS↔Cognito 직통 통신 없음)
-  → Cognito가 JIT 사용자 생성 + custom:groups 속성에 그룹 저장
-  → 토큰 발급 → admin-api가 custom:groups로 역할·팀 판별
+  → Cognito가 federated 사용자 생성 또는 갱신 + 매핑된 custom:groups 저장
+  → 토큰 발급 → 웹 로그인 콜백이 게이트웨이 사용자 등록 → 역할·팀 확인
 ```
 
 - **첫 로그인에 JIT 생성** — 풀에 미리 사용자가 없는 게 정상입니다
-- **AD 그룹 변경은 다음 로그인에 반영** — 동기화 주기 없음
-- **풀 Groups에는 안 들어갑니다** — SAML 사용자는 `cognito:groups` 멤버십이
-  비어 있고, 그룹은 `custom:groups` **속성**으로만 옵니다 (풀 그룹은 네이티브
-  사용자용)
+- 값이 바뀐 그룹 클레임은 다음 페더레이션 로그인에서 갱신됩니다. IdP가
+  클레임을 생략하면 이전 값이 남을 수 있습니다. 그룹 회수 테스트에서 변경과
+  생략을 각각 확인합니다. [AWS 속성 매핑 문서](https://docs.aws.amazon.com/cognito/latest/developerguide/cognito-user-pools-specifying-attribute-mapping.html)
+- SAML의 AD 그룹 매핑 결과는 사용자 속성 `custom:groups`에 저장됩니다.
+  게이트웨이는 환경에 선언된 `oidc.groups_claim`을 읽습니다.
 
 ## 역할 결정 — 그룹이 결정하는 것과 아닌 것
 
 | 역할 | 결정 방식 |
 |---|---|
-| **ADMIN** | `oidc.admin_groups` 정확일치 (또는 `admin_emails`) — **AD 그룹으로 결정** |
-| **DEVELOPER** | 기본값 — 로그인만 하면 부여 |
+| **ADMIN** | `oidc.admin_groups` 정확 일치 또는 검증된 이메일의 `admin_emails` 일치 |
+| **DEVELOPER** | 등록 검증을 통과하고 관리자·팀 리더 조건에 해당하지 않는 사용자의 기본 역할 |
 | **TEAM_LEADER** | 그룹이 아님 — admin-ui "팀 리더 지정"으로만 부여 (앱 내부 작업) |
 
 팀/부서 배정은 `group_prefix` 규약으로 자동 파싱됩니다:
@@ -44,9 +48,10 @@ SSIR_Platform_Engineers → tail "Platform_Engineers"→ 부서 Platform, 팀 En
 
 1. **그룹 생성·사용자 배정** — `SSIR_<부서>_<팀>` 규약
    (예: `SSIR_Claude_Admin`, `SSIR_Claude_Developers`)
-2. **Relying Party Trust 등록** — Entity ID:
-   `urn:amazon:cognito:sp:<user-pool-id>` / ACS:
-   `https://<hosted-ui-domain>.auth.<region>.amazoncognito.com/saml2/idpresponse`
+2. **Relying Party Trust 등록**. **RP Identifier (Entity ID)**에는
+   `urn:amazon:cognito:sp:<user-pool-id>`를 그대로 등록합니다.
+   **ACS (SAML 응답) URL**에는 `https://<hosted-ui-host>/saml2/idpresponse`를 등록합니다.
+   Admin 콘솔 주소는 사용자가 로그인 흐름을 시작하는 주소입니다.
 3. **클레임 룰** — 아래 속성을 assertion에 실어 보냄:
 
    | SAML attribute | 내용 | 주의 |
@@ -57,85 +62,32 @@ SSIR_Platform_Engineers → tail "Platform_Engineers"→ 부서 Platform, 팀 En
 
 4. **`FederationMetadata.xml` 제공** — AWS 측 IdP 등록에 필요
 
-> 참고: `groups`가 `;` join이 아니라 속성 반복 방식이면 마지막 값만 남을 수
-> 있습니다 — join 룰로 보내는지 반드시 확인하세요.
+> 여러 값을 받으면 Cognito는 대괄호로 둘러싼 쉼표 구분 문자열로 변환합니다.
+> 게이트웨이의 현재 그룹 파서는 `;`와 `,`로 분리하며 대괄호와 인코딩을
+> 해제하지 않으므로 ADFS에서 `;`로 연결한 단일 문자열을 전달합니다.
+> [AWS 속성 매핑 문서](https://docs.aws.amazon.com/cognito/latest/developerguide/cognito-user-pools-specifying-attribute-mapping.html)
 
 ## ② AWS 측 작업 (우리)
 
-아래 값은 예시입니다 — 실제 풀 ID·클라이언트 ID·리전으로 바꿔 실행하세요.
-
-### 1. custom attribute 생성 + ReadAttributes 추가
-
-terraform 모듈(`deployment/terraform/modules/cognito`)은 `custom:groups`
-schema와 클라이언트 `read_attributes`를 **이미 선언**하고 있습니다 — 정석
-경로는 targeted apply입니다:
-
-```bash
-cd deployment/terraform/environments/<env명>
-terraform apply -target=module.cognito
-# → aws_cognito_user_pool.this(schema) + user_pool_client.cli(read_attributes)
-#   두 건 update만 나와야 정상
-```
-
-`domain.name`을 쓰는 배포는 `./deploy apply`가 `module.cognito` 타깃 apply를
-자동 실행합니다(`deploy.tf_env_dir`이 가리키는 env — Cognito 풀 소유 env와
-일치하는지 확인). 수동으로 만들 수도 있습니다:
-
-```bash
-aws cognito-idp add-custom-attributes \
-  --user-pool-id <user-pool-id> \
-  --custom-attributes Name=groups,AttributeDataType=String,Mutable=true \
-  --region <region>
-```
-
-> ⚠️ **클라이언트 ReadAttributes에 `custom:groups`가 없으면 토큰에 실리지
-> 않습니다** — app client가 속성 allowlist를 쓰면(`["email","email_verified",
-> "name"]` 등) 여기에 `custom:groups`를 추가해야 합니다. 콘솔로만 만들면
-> terraform plan이 되돌리려다 `cannot modify or remove schema items`
-> 에러를 냅니다 — 위 targeted apply가 선언·상태를 정합으로 맞춥니다.
-
-### 2. SAML IdP 등록
-
-```bash
-aws cognito-idp create-identity-provider \
-  --user-pool-id <user-pool-id> \
-  --provider-name ADFS --provider-type SAML \
-  --provider-details MetadataFile=file://FederationMetadata.xml \
-  --attribute-mapping '{"email":"email","name":"name","custom:groups":"groups"}' \
-  --region <region>
-```
-
-| SAML attribute | User pool attribute |
-|---|---|
-| `email` | `email` |
-| `name` | `name` |
-| `groups` | `custom:groups` |
-
-### 3. App client에서 ADFS 활성화
-
-콘솔 권장 — App integration → client `llm-gateway-prod-cli` → Edit → Hosted
-UI의 Identity providers에 `ADFS` 체크. (CLI `update-user-pool-client`는 설정
-전체를 교체하니 주의. 이 클라이언트는 terraform 소유 — drift 감안해 변수로
-반영하면 더 좋음.)
-
-### 4. `gateway.yaml` 선언 → `./deploy apply`
-
-```yaml
-oidc:
-  groups_claim: custom:groups        # 속성을 그룹 클레임으로 (Lambda 불요)
-  group_prefix: SSIR_                # AD 그룹 prefix → 부서/팀 파싱
-  admin_groups: [SSIR_Claude_Admin]  # ADMIN 역할 정확일치
-```
-
-eks는 `adminApi.oidc.*`/`adminBootstrap` 키로, compose는 env로, ecs는 tfvars로
-자동 렌더됩니다 — env values 직접 편집 불요 (`configure` 마법사에도 해당
-질문 있음).
-
-### 5. 검증
-
-hosted UI에 `ADFS` 버튼 표시 → 로그인 →
-`aws cognito-idp admin-get-user --user-pool-id <user-pool-id>
---username ADFS_<id>`로 `custom:groups` 확인 → 대시보드에서 부서/팀·역할 확인.
+1. [ADFS SAML 배포 가이드](adfs-sso.md)의 설치 도구로
+   `infra.cognito_saml`과 `oidc.groups_claim: custom:groups`를 선언합니다.
+   기존 수동 IdP가 있으면 설치 도구가 안내하는 Terraform 편입 순서를 따릅니다.
+2. Cognito IdP의 attribute mapping에서 실제 assertion의 속성 이름 또는 URI가
+   `custom:groups`에 연결되는지 확인합니다. 예를 들어 `ds_dm`이 assertion
+   **속성 이름**이면 매핑의 원본이고, **그룹 값**이면 현재 팀 접두어와 관리자
+   그룹 규칙으로 해석합니다.
+3. 로그인에 사용하는 앱 클라이언트의 **ReadAttributes**와 **WriteAttributes**를
+   확인합니다. Cognito가 SAML 매핑 값을 저장하려면 `custom:groups`가 mutable이며
+   **WriteAttributes**에 포함되어야 합니다. **ReadAttributes**는 토큰에서
+   해당 값을 읽는 데 필요합니다. 현재 저장소 Terraform 모듈은 읽기만 선언합니다.
+   실제 앱 클라이언트 설정과 선언 상태를 확인하고, 사용자 자신의 그룹 수정이
+   허용되지 않는지 검토한 뒤 SAML 오픈 여부를 판단합니다.
+   [AWS 속성 매핑 문서](https://docs.aws.amazon.com/cognito/latest/developerguide/cognito-user-pools-specifying-attribute-mapping.html) ·
+   [AWS 사용자 속성 변경 API](https://docs.aws.amazon.com/cognito-user-identity-pools/latest/APIReference/API_UpdateUserAttributes.html)
+4. `./deploy doctor`에서 SAML IdP 등록과 클라이언트 활성화를 점검한 뒤 ADFS
+   테스트 계정으로 웹에 로그인합니다. Cognito 사용자 레코드의 `custom:groups`,
+   웹 로그인에 사용한 ID 토큰의 그룹 클레임, **Users/Teams**의 팀과 역할을
+   순서대로 검증합니다. 토큰 원문은 공유하지 않습니다.
 
 ## ③ AD 없이 미리 테스트
 
@@ -206,7 +158,10 @@ Virtual Key를 발급하지 않으므로 웹 로그인으로 CLI 키가 교체�
 로그아웃 후 다시 로그인해 등록 단계를 실행하세요. 등록이 실패하면
 콜백에서 오류를 표시하며 새 로그인 세션을 발급하지 않습니다.
 
-## 검증된 테스트 결과 (prod, AD 없이)
+## 네이티브 계정을 사용한 사전 테스트 결과
+
+아래 기록은 SAML IdP를 거치지 않고 수행한 테스트입니다. ADFS에서 실제 그룹
+값이 전달되는지는 별도로 검증합니다.
 
 - 네이티브 사용자에 `custom:groups=SSIR_NDS_Users` 부여 → `USER_PASSWORD_AUTH`
   토큰에 `custom:groups` 클레임 확인 ✅
@@ -216,17 +171,18 @@ Virtual Key를 발급하지 않으므로 웹 로그인으로 CLI 키가 교체�
 
 ## 운영 참고
 
-- **사용자가 AD에서 삭제되면** — ADFS가 로그인 자체를 거부해 신규 세션은
-  차단됩니다. 다만 **기존 토큰은 만료까지 유효**(refresh 기본 30일) —
-  즉시 차단이 필요하면:
+- AD에서 계정이 해지되면 신규 ADFS 로그인은 차단됩니다. 기존 Cognito 세션과
+  이미 발급된 게이트웨이 VK는 별도로 확인합니다. Cognito 세션 정리에는 다음
+  명령을 사용합니다.
 
   ```bash
   aws cognito-idp admin-user-global-sign-out \
     --user-pool-id <user-pool-id> --username ADFS_<id>
   ```
 
-  풀의 `ADFS_<id>` 레코드는 자동 정리되지 않습니다 — 정리하려면
-  `admin-delete-user` (housekeeping).
+  즉시 게이트웨이 접근을 중단해야 하면 **Users/Teams**에서 계정 상태를 확인하고
+  활성 VK가 폐기됐는지 확인합니다. 풀의 federated 사용자 레코드 정리는 별도
+  계정 수명주기 작업입니다.
 - **네이티브 계정과의 혼용 주의** — `group_prefix`를 `SSIR_`로 바꾸면
   `Claude_*` 풀 그룹은 unmatched가 됩니다. 관리자 계정은 `admin_emails`로
   살리거나 `custom:groups`를 부여하세요.

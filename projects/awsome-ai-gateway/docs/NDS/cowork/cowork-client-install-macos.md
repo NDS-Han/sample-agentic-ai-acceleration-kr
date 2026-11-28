@@ -32,7 +32,7 @@
 
 **운영자에게 미리 받을 것** — ① env 값 4개(`./deploy client-values` 출력) ② 로그인 계정(이메일+임시 비밀번호) ③ 이 Mac 공인 IP 의 `inbound-cidrs` 등록(운영자가 gateway.yaml inbound-cidrs 에 추가 후 apply).
 
-⚠️ **순서를 바꾸지 마십시오.** 설정(절차 4) 전에 앱을 켜면 claude.ai 로그인 화면에서 개인 계정으로 들어가 버릴 여지가 생깁니다. ⏱️ 앱 내려받기 제외 30분 안팎(Windows 실측 기준).
+관리형 프로파일을 설치하는 절차 4를 완료한 뒤 Claude Desktop을 처음 실행합니다. 앱이 claude.ai 로그인 화면으로 열리면 프로파일 설치 상태부터 확인합니다.
 
 > 로그인 방식(Cognito)은 나중에 회사 통합 로그인으로 바뀔 수 있습니다 — 그때도 절차·명령은 동일하고 `OIDC_ISSUER_URL`·`OIDC_CLIENT_ID` 값만 달라집니다.
 

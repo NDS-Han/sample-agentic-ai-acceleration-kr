@@ -4,12 +4,14 @@
 NDS 브랜치 사이의 **기능 단위 차이 전체**를 정리한다. 기준 커밋:
 
 - **merge-base**: `e3a39757` (upstream PR #17 머지 — 2026년 초)
-- **비교 시점**: `nds/dev` HEAD
+- **비교 시점**: 2026년 11월 16일 문서 작성 당시의 `nds/dev` (`5963902b`의 변경 기록)
 - **규모**: `projects/awsome-ai-gateway` 기준 1560 파일, +269,782/−14,988 라인,
   커밋 ~1,384개
 
 upstream은 merge-base 이후 거의 정지해 있어, 사실상 **모든 차이가 NDS 쪽
 추가·변경**이다. 삭제된 top-level 디렉토리는 없다.
+
+현재 절차는 [NDS 문서 목차](../README.md), 이후 upstream 반영 절차는 [upstream 동기화](../upstream-sync.md)를 참고합니다.
 
 ## 문서 구성
 

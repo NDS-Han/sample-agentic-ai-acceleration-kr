@@ -19,6 +19,8 @@ NDS 배포 방식을 따른다 — 설치자가 `gateway.yaml` 을 갱신하면 
    - 예: prefix `ssir_` + 그룹 `ssir_claude_users` → dept `claude`, team `users`
    - **대소문자 구분** — AD assertion 값 · prefix · admin_groups 전부 일치 필요
 3. admin 부트스트랩 그룹명 (예: `ssir_claude_admin`)
+4. ADFS Relying Party Trust 값. **RP Identifier**는 `urn:amazon:cognito:sp:<user-pool-id>`이며,
+   **ACS URL**은 `https://<hosted-ui-host>/saml2/idpresponse`입니다. 설치 도구가 환경별 값을 출력합니다.
 
 ## 설치
 
@@ -59,9 +61,10 @@ python3 deployment/scripts/setup-adfs-sso.py setup \
   이다. 이것이 설치자 기본값(`--groups-claim`)과 일치해야 하며, 고객사가 다른 URI
   (예: `http://schemas.microsoft.com/ws/2008/06/identity/claims/groups`)를 쓰면
   설치 시 `--groups-claim` 으로 맞춰야 한다 — attribute mapping 의 값이 이 URI 이다.
-- ⚠ **2048자 절단** — custom attribute 는 2048자 제한이 있어, AD 그룹이 많은
-  사용자는 목록이 잘린다. 게이트웨이용 그룹만 보내도록 ADFS 에 regex 필터 규칙
-  (예: `^ssir_`)을 두는 것을 권장한다.
+- **형식과 길이**. Cognito가 다중 값을 대괄호로 감싸면 현재 그룹 파서가 양 끝의
+  대괄호와 인코딩을 제거하지 않습니다. 게이트웨이용 그룹만 골라 `;`로 연결한
+  단일 문자열을 보내고 2,048자 이내인지 확인합니다. 제한을 넘으면 Cognito가 로그인 중
+  오류를 반환할 수 있습니다. [AWS 속성 매핑 문서](https://docs.aws.amazon.com/cognito/latest/developerguide/cognito-user-pools-specifying-attribute-mapping.html)
 
 ## 핵심 정합성 — groups_claim
 
@@ -70,12 +73,21 @@ SAML attribute 경로에서 그룹은 토큰의 **`custom:groups`** 클레임에
 없어 `reject_unmatched_groups` 하에서 **전원 403** 이 된다. schema 가 이
 조합을 경고하며, 설치자는 항상 정합성 있게 함께 쓴다.
 
+Cognito에서 SAML 값을 저장하려면 mutable `custom:groups`와, 로그인에 사용하는 앱
+클라이언트의 `WriteAttributes`에 `custom:groups`가 필요합니다. 토큰에서 읽으려면
+`ReadAttributes`에도 포함되어야 합니다. 현재 저장소의 Terraform 모듈은
+`custom:groups`를 읽기 목록에만 선언합니다. `saml-idp` 점검이 통과해도 실제
+클레임 저장과 사용자 등록을 확인해야 합니다. 그룹 값은 권한 결정에 쓰이므로,
+쓰기 권한을 변경하기 전에 사용자가 자기 그룹 속성을 수정할 수 없는지 함께 검토합니다.
+[AWS 속성 매핑 문서](https://docs.aws.amazon.com/cognito/latest/developerguide/cognito-user-pools-specifying-attribute-mapping.html) ·
+[AWS 사용자 속성 변경 API](https://docs.aws.amazon.com/cognito-user-identity-pools/latest/APIReference/API_UpdateUserAttributes.html)
+
 ## 동작 구조
 
 - 로그인 화면: hosted UI 에 네이티브 폼 + "Sign in with <IdP>" 버튼 공존 (혼합 기본 지원)
 - JIT 프로비저닝: SAML 첫 로그인 시 풀에 federated 사용자 자동 생성, 매 로그인마다 attribute 갱신
 - 팀/역할 해석: `custom:groups` attribute → 기존 그룹 파싱 규칙. sync 는 attribute+풀멤버십 이중 경로 backstop
-- gateway-cli: 동일 hosted UI/클라이언트라 추가 작업 없음
+- 웹 로그인: 로그인 콜백이 게이트웨이의 팀과 역할을 등록하고 세션을 발급합니다. VK는 `gateway-cli login`에서 발급합니다.
 
 ## 혼합 운영 — 네이티브 + federated 사용자 공존
 
@@ -92,15 +104,14 @@ hosted UI 는 네이티브 폼과 SAML 버튼이 공존한다. 그런데 `groups
 
 ### break-glass 네이티브 계정 절차 (현재 — 코드 변경 없음)
 
-ADFS 배포에서 실사용자는 admin 포함 전원 federated 라서, 네이티브 계정은
-초기 부트스트랩/break-glass 용도다. 이 계정이 ADFS 모드에서도 동작하게
-하는 절차:
+운영 사용자가 federated 인증을 사용하는 환경에서는 초기 부트스트랩과 비상 복구에
+네이티브 계정을 사용합니다. 이 계정의 ADFS 모드 호환성을 다음과 같이 확인합니다.
 
 1. 풀에서 해당 네이티브 사용자의 속성에 `custom:groups` 를 수동 설정
    (예: `ssir_claude_admin`) — attribute 는 사용자 종류와 무관하게 읽힌다
-2. 사용자가 스스로 바꿀 수는 없다 — 클라이언트 `write_attributes` 가
-   `["email", "name"]` 뿐이라 관리자만 설정 가능 (보안상 안전)
-3. AD 측 장애로 SAML 로그인이 전면 불가할 때 이 계정으로 네이티브 로그인
+2. 해당 계정이 사용하는 앱 클라이언트와 인증 흐름에서 사용자가 그룹 속성을 직접
+   변경할 수 없는지 확인합니다.
+3. 전환 전에 네이티브 로그인으로 팀과 관리자 역할이 정상인지 확인합니다.
 
 ### 구조적 해결 (AICM 전환 프로젝트 범위로 예약) — union 병합
 
@@ -144,5 +155,8 @@ yaml 정리 후 안내되는 env terraform destroy 절차 실행 (managed overla
 
 - [ ] `./deploy doctor` 의 `saml-idp` OK — IdP 등록 + 클라이언트 활성화 수렴
 - [ ] hosted UI 에 SAML 버튼 표시 (admin-ui / gateway-cli 동일 화면)
-- [ ] SAML 사용자 1명 로그인 — 토큰의 `custom:groups` 에 AD 그룹 존재
-- [ ] 팀 배정 정상 + admin 사용자는 ADMIN 역할
+- [ ] 테스트 사용자가 처음 웹 로그인한 뒤 Cognito 사용자 속성과 ID 토큰의 `custom:groups` 확인
+- [ ] Sync Cognito 실행 전에 **Users/Teams**에서 팀과 역할 확인, 관리자 계정과 일반 계정을 각각 검증
+- [ ] ADFS 그룹 변경 또는 제거 후 재로그인하여 갱신 및 권한 회수 확인
+- [ ] `gateway-cli login`에서 별도로 VK 발급 확인
+- [ ] 네이티브 비상 계정의 접근 확인

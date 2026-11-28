@@ -135,9 +135,9 @@ aws eks describe-cluster --name "$GW_CLUSTER" --region "$GW_REGION" \
 
 ## 3. Aurora 엔진 (의존성 업그레이드)
 
-`aurora_engine_version`(현재 기본 `16.11`)도 env tfvars로 올립니다 —
-컨트롤플레인 홉과는 **독립 작업**이며 같은 apply에 묶지 않는 게 좋습니다
-(장애 격리).
+Aurora 엔진은 대상 환경의 `aurora_engine_version`으로 관리합니다. 저장소의
+Terraform 기본값은 dev `16.13`, prod `16.11`입니다. 업그레이드 전에 실제 엔진
+버전과 해당 환경의 tfvars를 확인합니다. Aurora 변경과 EKS 컨트롤플레인 홉은 각각 적용합니다.
 
 ```bash
 aws rds create-db-cluster-snapshot --region "$GW_REGION" \

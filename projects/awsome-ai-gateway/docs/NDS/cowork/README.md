@@ -1,7 +1,7 @@
 # Cowork (Claude Desktop) 클라이언트 문서
 
 > **독자**: Cowork를 게이트웨이에 붙이는 사람 — 설치는 아래 표에서 갈래를 고릅니다.
-> **전제**: 게이트웨이가 https 도메인으로 배포돼 있어야 합니다(없으면 ../domain.md).
+> **전제**. [HTTPS 게이트웨이 도메인](../domain.md)이 필요합니다.
 
 
 Cowork 를 게이트웨이에 붙이는 방법은 두 갈래다. **지금 새로 배포한다면 설치기(installer) 계열**을 읽는다.
@@ -25,7 +25,6 @@ Cowork 를 게이트웨이에 붙이는 방법은 두 갈래다. **지금 새로
 | 문서 | 읽는 사람 | 무엇 |
 |---|---|---|
 | [Windows 수동 설치](manual/cowork-client-install-windows.md) | 운영자·직원 | Python·pip 로 CLI 설치 후 개인 PC 설정 (본편) |
-| [Windows 자동 설치](manual/cowork-client-install-windows-auto.md) | 운영자 | 2026-08-12 판 설치기 기준 — **설치기 계열로 대체됨** |
 | [Windows 수동 제거](manual/cowork-client-uninstall-windows-manual.md) | 운영자 | 수동 설치분 정리. 설치기로 넘어가기 전 §1·§2·§5·§6 만 적용 |
 
 ## macOS
@@ -36,5 +35,5 @@ Cowork 를 게이트웨이에 붙이는 방법은 두 갈래다. **지금 새로
 
 ---
 
-- 설치기 소스는 upstream 머지 전까지 fork 브랜치 `feat/cowork-installer-import` 의 `cowork-installer/` 에 있다(벤더 원본 = CodeCommit phase-2 `1c11531`).
-- 게이트웨이 쪽 작업(모델 등록·클라이언트 값 조회·IP 허용)은 [../client-admin.md](../client-admin.md) + `../operations.md`.
+- 설치기 소스는 `nds/dev`의 [`cowork-installer/installer/`](../../../cowork-installer/installer/)에 있습니다. [빌드 가이드](installer/cowork-installer-build-windows.md)에 따라 대상 배포의 값으로 빌드합니다.
+- 모델 등록, 클라이언트 값 조회, IP 허용은 [클라이언트 관리자 가이드](../client-admin.md)와 [운영 런북](../operations.md)을 참고합니다.

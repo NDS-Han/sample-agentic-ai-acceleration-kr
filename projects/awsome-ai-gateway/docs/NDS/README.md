@@ -72,12 +72,14 @@ LLM Gateway(Claude Code · Cowork · Codex 지원)를 **어느 AWS 계정·리�
 | ecs | **인프라까지 전부**: VPC/Aurora/ElastiCache/ALB/ECS/Cognito/Secrets/ECR · 이미지 build+push · 마이그레이션 task · private ALB |
 | eks | `bootstrap`: tfstate · env terraform(EKS/Aurora/ElastiCache/Cognito/Secrets/IRSA) · SM 시드 · 이미지 build+push · Cognito admin → 이후 helm release 관리(apply와 동일 범위) |
 
+ECS는 자체 Cognito 풀을 사용합니다. SAML IdP는 `infra.cognito_saml`로 연결하고
+팀과 역할을 결정할 그룹 클레임은 `oidc.groups_claim`으로 설정합니다. [ADFS SAML 배포](adfs-sso.md)
+
 **하지 않는 것:**
 
 - **eks의 인프라 갱신 자체** — `bootstrap`은 최초 생성까지 담당하지만, 이후 클러스터 버전·노드 변경 같은 인프라 변경은 terraform env가 소유합니다(`apply`는 helm/앱 레이어 + feature 인프라 보강만)
 - **ecs 기존 인프라 편입** — 모듈이 전부 새로 만듭니다(기존 VPC/RDS 재사용 불가)
 - **bi_insight 기본 비활성** — `features.bi_insight: true` 시 managed overlay(`module.agentcore_runtime`)가 인프라를 프로비저닝 (`web_search` Gateway는 `features.web_search`로 자동)
-- **외부 IdP on ecs** — ecs 경로는 Cognito를 직접 생성하므로 yaml의 oidc 값은 무시됩니다(`required_group`만 반영)
 - **DB 롤백** — 마이그레이션은 forward only
 - **유실된 시크릿 복구** — `.env`의 `VIRTUAL_KEY_ENCRYPTION_KEY`를 잃으면 발급된 Virtual Key 전부 재발급 필요
 
@@ -109,22 +111,26 @@ docs/NDS/.venv/bin/pip install -r docs/NDS/deploy/requirements.txt
 | [install-ecs.md](install-ecs.md) | **t1/t2 — ECS Fargate 신규 구축** |
 | [install-eks.md](install-eks.md) | **t2/t3 — EKS 신규 구축(bootstrap)·기존 배포 온보딩·업데이트** |
 | [domain.md](domain.md) | **도메인 획득 → 배포에 등록** — backend별 자동화 정도 |
-| [ad-sync.md](ad-sync.md) | **AD 연동** — ADFS↔Cognito SAML, `custom:groups`로 그룹→역할/팀 매핑 |
+| [ADFS SAML 배포](adfs-sso.md) | `gateway.yaml`로 SAML IdP와 앱 클라이언트 설정 관리 |
+| [AD 그룹 및 사용자 등록](ad-sync.md) | RP Identifier, ACS URL, `custom:groups`, 로그인 후 역할·팀 검증 |
+| [Cognito Managed Login](managed-login.md) | 호스팅 로그인 화면 브랜딩 설정과 검증 |
 | [update.md](update.md) | 업데이트·롤백·기존 배포 온보딩(capture) |
 | [upgrade-eks-cluster.md](upgrade-eks-cluster.md) | EKS 컨트롤플레인/애드온/Aurora 업그레이드 |
-| [upgrade-eks-legacy.md](upgrade-eks-legacy.md) | 레거시 스크립트 배포 → 최신 커밋 업그레이드 |
 | [gateway-yaml.md](gateway-yaml.md) | 설정 파일 전체 항목 설명서 |
 
 **🧭 나는 게이트웨이를 운영하는 사람** (관리자)
 
 | 문서 | 내용 |
 |---|---|
+| [영문 관리자 상세 가이드](guides/admin-guide.en.html) | 로그인, 관리자 메뉴 13개, 단계별 작업 절차와 dev 캡처 74장. 브라우저에서 열 때 `screenshots` 폴더를 HTML과 함께 둡니다. |
+| [한국어 관리자 UI 가이드](guides/README.md) | 로그인 및 비밀번호 재설정, 기능별 화면과 진입 경로, 모델 관리 |
+| [영문 운영·배포 인수인계 가이드](op-guide/README.md) | 설치부터 운영, 변경, 장애 복구까지의 절차와 체크리스트 |
 | [operations.md](operations.md) | **운영 런북** — 직원 등록·오픈 전 체크리스트·크로스계정 라우팅·Marketplace |
+| [관측 및 알림](observability.md) | CloudWatch·SNS, Alertmanager, 비용 원장 이상 알림 |
 | [dr-runbook.md](dr-runbook.md) | **재해 복구** — 백업 복원·시크릿 유실·RTO/RPO·리허설 |
 | [loadtest.md](loadtest.md) | **부하테스트** — mock-bedrock SSE 동시성·executor-HPA 검증·원복 절차 |
 | [chat-agent.md](chat-agent.md) | **admin-chat-agent (BI 챗)** — 기본 미배포, 옵트인 활성화 절차 |
 | [client-admin.md](client-admin.md) | **클라이언트 관리자용** — env 4줄 산출·인스톨러 빌드/배포·서버측 진단 |
-| [upstream-sync.md](upstream-sync.md) | upstream → nds/dev 머지 절차 |
 
 **💻 나는 이 게이트웨이에 내 PC를 연결하는 직원**
 
@@ -133,7 +139,17 @@ docs/NDS/.venv/bin/pip install -r docs/NDS/deploy/requirements.txt
 | [client-setup.md](client-setup.md) | **시작은 여기** — Claude Code · Cowork · Codex (한 페이지, 3×3 매트릭스) |
 | [cowork/](cowork/README.md) | Cowork 상세 — macOS 수동·Windows 인스톨러/수동/제거 |
 
-**📐 설계 배경이 궁금하면**: [decisions.md](decisions.md)
+**통합 및 저장소 유지보수**
+
+| 문서 | 내용 |
+|---|---|
+| [AICM 통합 계약](aicm/README.md) | `/aicm/v1` 인증·권한·예산 동작과 OpenAPI 계약 |
+| [upstream 동기화](upstream-sync.md) | upstream 변경을 `nds/dev`에 병합하는 절차 |
+
+**설계 및 이전 배포 참고**
+
+- [배포 설계 결정](decisions.md) · [R7 외부 비용 대조 설계](cost-reconciliation-r7.md)
+- [`install-eks.sh` 배포의 전환 참고](upgrade-eks-legacy.md) · [NDS 전환 변경 기록](upstream-diff/README.md) · [리뷰 기록](review/README.md)
 
 ## 지원 클라이언트와 모델
 

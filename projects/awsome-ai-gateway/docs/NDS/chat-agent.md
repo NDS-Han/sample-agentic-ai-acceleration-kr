@@ -154,7 +154,7 @@ email `sample_values` 는 합성 값 — 실 PII 넣지 말 것.)
 
 - `deploy doctor` + capture 의 `bi_insight` 플래그가 `AGENTCORE_RUNTIME_ARN`
   존재로 켜지는지 확인
-- admin-ui `/chat` (ADMIN) 에서 질의 → `chat_agent.sessions/messages` 에 기록
+- 관리자 콘솔의 [BI Insight](guides/admin-guide.en.html#bi-insight) 메뉴(`/chat`)에서 질의하여 `chat_agent.sessions`와 `chat_agent.messages`의 기록을 확인합니다.
 - query_db Lambda 가 Aurora **cluster endpoint** 로 접속함을 확인 —
   RDS Proxy 가 아니다(chat_reader 는 proxy 미등록, 의도된 직결)
 

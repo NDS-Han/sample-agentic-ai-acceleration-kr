@@ -3,6 +3,9 @@
 `gateway.yaml` 의 `branding.managed_login: true` 로 켜는 로그인 화면입니다.
 ecs/eks 전용(Cognito 를 terraform `module.cognito` 가 만드는 배포).
 
+사용자에게 전달할 콘솔 로그인 및 비밀번호 재설정 화면은 [로그인 가이드](guides/login.md)에서 확인합니다.
+ADFS 버튼이 표시되는 조건과 그룹 검증은 [ADFS SAML 배포 가이드](adfs-sso.md)를 따릅니다.
+
 ## 무엇이 바뀌나
 
 | 항목 | 값 | 변경 방식 |
