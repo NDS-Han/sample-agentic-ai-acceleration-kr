@@ -30,6 +30,13 @@ kubectl apply -f otel-collector/serviceaccount.yaml
 kubectl apply -f otel-collector/configmap.yaml
 kubectl apply -f otel-collector/service.yaml
 kubectl apply -f otel-collector/deployment.yaml
+# CLUSTER_NAME 주입 — deployment.yaml 의 value 는 빈 문자열로 두고 여기서 채운다.
+# 미주입 시 resource processor 가 빈 value 로 pipeline build 에 실패해
+# collector 가 CrashLoopBackOff 에 빠진다. context 가 ARN 이면 마지막 조각(클러스터명).
+CLUSTER_NAME="$(kubectl config current-context | sed 's|.*/||')"
+info "otel-collector CLUSTER_NAME=${CLUSTER_NAME} 주입"
+kubectl -n observability set env deployment/otel-collector \
+  CLUSTER_NAME="${CLUSTER_NAME}"
 kubectl -n observability rollout status deployment/otel-collector --timeout=3m
 ok "OTel Collector ready"
 
