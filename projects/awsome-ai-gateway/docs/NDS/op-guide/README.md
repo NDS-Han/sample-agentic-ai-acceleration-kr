@@ -11,6 +11,8 @@
 
 ---
 
+Use the [AWS infrastructure operations guide](../aws-infrastructure-operations.en.md) for console checks and the environment inventory.
+
 ## Read this on your first day
 
 Use this handover with the [console walkthrough](../guides/admin-guide.en.html) and the [upstream comparison](../upstream-diff/README.en.md). Record an evidence link, operator and timestamp for each of the checks in `14.

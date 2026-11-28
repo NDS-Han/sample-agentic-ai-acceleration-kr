@@ -9,6 +9,7 @@ NDS Gateway connects Claude Code, Cowork, and Codex to a managed model gateway. 
 | Manage users, models, and policies in the console | [Administrator guide](guides/admin-guide.en.html) |
 | Take over or deploy a gateway environment | [Operations and deployment handover](op-guide/README.md) |
 | Connect Claude Code, Cowork, or Codex on your computer | [Employee quick start](client-setup.en.md) |
+| Check infrastructure in the AWS console | [AWS infrastructure operations guide](aws-infrastructure-operations.en.md) |
 | Investigate or recover an environment | [Operations runbook](operations.en.md) · [Observability and alerts](observability.en.md) · [Disaster recovery](dr-runbook.en.md) |
 
 ## Deployment engineers

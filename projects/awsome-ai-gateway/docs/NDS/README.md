@@ -10,6 +10,7 @@ Claude Code, Cowork, Codex를 연결하는 NDS Gateway의 배포·운영 문서�
 | 관리자 콘솔에서 계정·모델·정책 관리 | [관리자 상세 가이드](guides/admin-guide.ko.md) |
 | 게이트웨이 신규 설치 또는 운영 인수 | [운영·배포 인수인계](op-guide/README.ko.md) |
 | 내 PC에서 Claude Code·Cowork·Codex 사용 | [직원 PC 빠른 시작](client-setup.md) |
+| AWS 콘솔에서 인프라 점검 | [AWS 인프라 운영 가이드](aws-infrastructure-operations.md) |
 | 장애 조사 또는 복구 | [운영 런북](operations.md) · [관측·알림](observability.md) · [재해 복구](dr-runbook.md) |
 
 ## 문서 목록 — 나는 누구인가

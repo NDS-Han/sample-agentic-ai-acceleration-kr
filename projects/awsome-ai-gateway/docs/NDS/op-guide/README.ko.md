@@ -4,6 +4,8 @@
 
 SSIR 게이트웨이를 인수하는 운영자가 환경과 권한을 확인하고, 변경·장애·복구를 수행하는 데 쓰는 문서입니다. 콘솔의 버튼과 화면은 [관리자 상세 가이드](../guides/admin-guide.ko.md)에서, 기준 upstream 이후의 변경 이유와 범위는 [upstream 비교](../upstream-diff/README.md)에서 확인할 수 있습니다.
 
+AWS 콘솔에서의 서비스별 점검과 환경 인벤토리는 [AWS 인프라 운영 가이드](../aws-infrastructure-operations.md)를 사용합니다.
+
 ## 0. 인수 첫날에 확인할 것
 
 1. 대상 환경별로 AWS 계정, 리전, 배포 대상과 호스트, Kubernetes context 또는 ECS 클러스터, 도메인, Terraform 상태 위치와 소유자를 기록합니다. 운영과 dev는 각각 기록합니다.
