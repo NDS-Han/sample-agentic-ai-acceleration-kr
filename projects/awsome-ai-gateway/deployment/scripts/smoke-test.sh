@@ -228,9 +228,30 @@ try:
 except Exception as e:
     emit("sts", "FAIL", "get_caller_identity: %s: %s" % (type(e).__name__, e))
 
-# --- 4b. VPC interface endpoint: 호스트명이 사설 IP 로 풀려야 한다 ---
+# --- 4b. VPC interface endpoint: 호스트명이 VPC 내부 IP 로 풀려야 한다 ---
 # private DNS 가 붙은 interface endpoint 가 실제로 경로에 있다는 증거.
-# 공인 IP 로 풀리면 NAT/IGW 로 나가고 있다는 뜻 → endpoint 미사용.
+# VPC 밖(공인 AWS 서비스 IP)으로 풀리면 NAT/IGW 로 나가고 있다는 뜻 → endpoint 미사용.
+#
+# ⚠️ RFC1918(is_private) 만으로는 판정할 수 없다: 조직 내부 대역으로 공인 대역을
+# 쓰는 VPC 가 있다(예: SSIR prod — VPC CIDR 이 107.97.128.0/20). endpoint ENI 는
+# VPC 서브넷 IP 를 받으므로, 정확한 판정은 "VPC CIDR 안에 드는가" 다.
+# 호스트측이 실측한 CIDR 을 SMOKE_VPC_CIDRS(쉼표 구분)로 받고, 미전달 시에는
+# 기존 is_private 판정으로만 동작한다(공인대역-내부 VPC 에서는 오탐 가능).
+vpc_nets = []
+for c in os.environ.get("SMOKE_VPC_CIDRS", "").replace(" ", "").split(","):
+    if not c:
+        continue
+    try:
+        vpc_nets.append(ipaddress.ip_network(c))
+    except ValueError:
+        pass
+
+def is_vpc_internal(ip):
+    addr = ipaddress.ip_address(ip)
+    if addr.is_private:
+        return True
+    return any(addr in net for net in vpc_nets)
+
 for svc in ("bedrock-runtime", "sts", "bedrock"):
     host = "%s.%s.amazonaws.com" % (svc, region)
     try:
@@ -241,11 +262,11 @@ for svc in ("bedrock-runtime", "sts", "bedrock"):
     if not ips:
         emit("dns:" + svc, "FAIL", "%s → A 레코드 없음" % host)
         continue
-    public = [ip for ip in ips if not ipaddress.ip_address(ip).is_private]
-    if public:
-        emit("dns:" + svc, "FAIL", "%s → %s (공인 IP — VPC endpoint 미경유)" % (host, ips))
+    external = [ip for ip in ips if not is_vpc_internal(ip)]
+    if external:
+        emit("dns:" + svc, "FAIL", "%s → %s (VPC 밖 IP — VPC endpoint 미경유)" % (host, ips))
     else:
-        emit("dns:" + svc, "PASS", "%s → %s (사설)" % (host, ips))
+        emit("dns:" + svc, "PASS", "%s → %s (VPC 내부)" % (host, ips))
 
 # --- 4c. 실제 InvokeModel (토큰 소모) ---
 body = json.dumps({
@@ -418,6 +439,30 @@ test_bedrock_e2e() {
         warn "ServiceAccount 의 eks.amazonaws.com/role-arn annotation 을 못 읽음 — role 이름 대조 생략"
     fi
 
+    # ---- VPC CIDR 실측 (DNS 판정용) ----
+    # 조직 내부 대역으로 공인 대역을 쓰는 VPC 에서는 endpoint ENI 의 IP 가
+    # is_private 기준 "공인"으로 보여 DNS 검사가 오탐한다. 정확한 판정 기준은
+    # VPC CIDR 이니, kubeconfig context → EKS describe → describe-vpcs 로 실측해
+    # pod 프로브에 넘긴다. aws cli/권한이 없어도 비치명 — 미전달 시 프로브가
+    # 기존 is_private 판정으로 돌아간다. 수동 지정도 가능(SMOKE_VPC_CIDRS).
+    local vpc_cidrs="${SMOKE_VPC_CIDRS:-}"
+    if [ -z "$vpc_cidrs" ] && command -v aws >/dev/null 2>&1; then
+        local ctx_name cluster_entry cluster_name vpc_id=""
+        ctx_name="${KUBE_CONTEXT:-$(kubectl config current-context 2>/dev/null)}"
+        cluster_entry=$(kubectl config view -o jsonpath="{.contexts[?(@.name==\"${ctx_name}\")].context.cluster}" 2>/dev/null) || cluster_entry=""
+        # EKS kubeconfig 는 cluster 가 ARN 인 경우가 많다 — 마지막 / 뒤가 클러스터명.
+        cluster_name="${cluster_entry##*/}"
+        if [ -n "$cluster_name" ]; then
+            vpc_id=$(aws eks describe-cluster --name "$cluster_name" \
+                        --query 'cluster.resourcesVpcConfig.vpcId' --output text 2>/dev/null) || vpc_id=""
+        fi
+        if [ -n "$vpc_id" ] && [ "$vpc_id" != "None" ]; then
+            vpc_cidrs=$(aws ec2 describe-vpcs --vpc-ids "$vpc_id" \
+                           --query 'Vpcs[0].CidrBlockAssociationSet[].CidrBlock' \
+                           --output text 2>/dev/null | tr '\t' ',' | sed 's/,$//') || vpc_cidrs=""
+        fi
+    fi
+
     # ---- 4a~4c: pod 안 boto3 프로브 (앱 DB 무기록) ----
     local out=""
     out=$(_bedrock_probe_py \
@@ -425,6 +470,7 @@ test_bedrock_e2e() {
                 -c gateway-proxy --request-timeout="$BEDROCK_EXEC_TIMEOUT" \
                 -- env "SMOKE_BEDROCK_MODEL_ID=${BEDROCK_MODEL_ID}" \
                        "SMOKE_EXPECT_ROLE=${expect_role}" \
+                       "SMOKE_VPC_CIDRS=${vpc_cidrs}" \
                        python - 2>&1) || true
     _consume_smoke_lines "$out" "bedrock"
 
