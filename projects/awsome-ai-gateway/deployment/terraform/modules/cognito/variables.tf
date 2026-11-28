@@ -84,12 +84,32 @@ variable "saml_providers" {
   # attribute_mapping: { <cognito 속성> = <SAML assertion 속성명> }.
   #   AD 그룹은 "custom:groups" 로 매핑 — 게이트웨이 팀/역할 해석 소스.
   #   AICM 전환(cutover) 시 이 키 한 줄을 지우면 attribute 경로가 닫힌다.
+  # provider_details 완전 소유 키 (전부 optional):
+  #   Cognito 는 SAML IdP 의 provider_details 에 메타데이터 파생 값(SSO/SLO
+  #   RedirectBindingURI)과 풀 생성 암호화 인증서(ActiveEncryptionCertificate)
+  #   를 스스로 채우고, 수동 설정 시 IDPSignout 도 들어있다. terraform 선언이
+  #   MetadataURL 만 가지면 이 키들을 "삭제"하는 영구 drift 가 매 plan 마다
+  #   뜨고, 특히 IDPSignout 은 Cognito 가 재파생하지 않는 동작 플래그라
+  #   실제로 로그아웃 연동이 제거된다 — 선언하지 않은 값이 바뀌면 안 되므로
+  #   adopt 시 실측값을 내려받아 여기 선언해 완전 소유한다 (setup-adfs-sso.py
+  #   가 메타데이터 파싱 + live describe 로 자동 기입).
+  #   sso/slo_redirect_binding_uri: IdP 의 SAML 엔드포인트 (ADFS 는 보통
+  #     https://<adfs-host>/adfs/ls/). 메타데이터의 SingleSignOnService/
+  #     SingleLogoutService Location 과 동일해야 한다.
+  #   idp_signout: true 면 Cognito 로그아웃 시 IdP 에도 SAML logout 전파.
+  #   active_encryption_certificate: Cognito 가 IdP 생성 시점에 발행하는 풀
+  #     암호화 인증서(base64, PEM 헤더 없음). 예측 불가라 adopt 때 실측 기입 —
+  #     수명(~10년) 동안 안정적이며 재기입은 인증서 로테이션 시에만 필요.
   description = "SAML IdP 맵 (ADFS 연동). gateway.yaml infra.cognito_saml 에서 managed overlay 로 내려옴"
   type = map(object({
-    metadata_url      = optional(string, null)
-    metadata_xml      = optional(string, null)
-    attribute_mapping = map(string)
-    idp_identifiers   = optional(list(string), [])
+    metadata_url                  = optional(string, null)
+    metadata_xml                  = optional(string, null)
+    attribute_mapping             = map(string)
+    idp_identifiers               = optional(list(string), [])
+    sso_redirect_binding_uri      = optional(string, null)
+    slo_redirect_binding_uri      = optional(string, null)
+    idp_signout                   = optional(bool, null)
+    active_encryption_certificate = optional(string, null)
   }))
   default = {}
 

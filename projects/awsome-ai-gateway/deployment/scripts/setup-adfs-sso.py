@@ -130,6 +130,44 @@ def list_pool_idps(pool_id: str, region: str) -> list[str]:
         return []
 
 
+def describe_identity_provider(pool_id: str, region: str, provider: str) -> dict:
+    """live IdP 의 전체 정의 실측 — adopt 시 선언적 완전 소유의 정본.
+    ProviderDetails(Cognito 파생 SSO/SLO URI·발행 인증서·IDPSignout)뿐 아니라
+    AttributeMapping 도 가져온다 — 고객사 ADFS claim 명명(DS_DM 등)이 script
+    기본값과 다르면 기본값으로 덮어써 그룹/이메일 매핑이 깨지므로, adopt 는
+    있는 그대로 소유하는 게 안전하다."""
+    r = _run(["aws", "cognito-idp", "describe-identity-provider",
+              "--user-pool-id", pool_id, "--provider-name", provider,
+              "--region", region, "--output", "json"])
+    if r.returncode != 0:
+        return {}
+    try:
+        return json.loads(r.stdout).get("IdentityProvider") or {}
+    except json.JSONDecodeError:
+        return {}
+
+
+def parse_binding_uris(xml_text: str) -> tuple[str, str]:
+    """페더레이션 메타데이터에서 HTTP-Redirect 바인딩의 SSO/SLO Location 추출.
+    terraform 선언값은 Cognito 파생값과 같아야 diff 가 없다 — 같은 소스(메타데이터)에서 읽는다."""
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:
+        return "", ""
+    sso = slo = ""
+    for svc in root.iter():
+        tag = svc.tag.rsplit("}", 1)[-1]
+        binding = svc.attrib.get("Binding", "")
+        if not binding.endswith("HTTP-Redirect"):
+            continue
+        loc = svc.attrib.get("Location", "")
+        if tag == "SingleSignOnService" and not sso:
+            sso = loc
+        elif tag == "SingleLogoutService" and not slo:
+            slo = loc
+    return sso, slo
+
+
 # ------------------------------------------------------------------------------
 # 3. gateway.yaml 갱신
 # ------------------------------------------------------------------------------
@@ -197,11 +235,7 @@ def cmd_setup(args) -> int:
     xml_text, entity_id = fetch_and_validate_metadata(args)
     log(f"메타데이터 검증 통과 — entityID: {entity_id or '(없음)'}")
 
-    entry = {"attribute_mapping": {
-        "email": args.email_claim,
-        "name": args.name_claim,
-        "custom:groups": args.groups_claim,
-    }}
+    entry: dict = {}
     if args.metadata_url:
         entry["metadata_url"] = args.metadata_url
     else:
@@ -232,6 +266,58 @@ def cmd_setup(args) -> int:
             detection_failed = True
     else:
         detection_failed = True
+
+    # adopt 정본 결정 — provider_details/attribute_mapping 모두 live 실측 우선.
+    # 미선언 시 terraform 이 Cognito 파생/수동 설정값을 지우는 영구 drift 가 생기고
+    # (IDPSignout 은 실제 삭제됨), attribute_mapping 을 script 기본값으로 덮어쓰면
+    # 고객사 고유 claim 명명(DS_DM 등)이 깨진다.
+    live_prov: dict = {}
+    if pool_id and args.provider_name in existing_idps:
+        live_prov = describe_identity_provider(pool_id, region, args.provider_name)
+        if live_prov:
+            log("기존 IdP 실측값을 adopt 합니다 — provider_details + attribute_mapping 완전 소유")
+    live: dict = live_prov.get("ProviderDetails") or {}
+    live_mapping: dict = live_prov.get("AttributeMapping") or {}
+
+    # attribute_mapping — adopt 는 live 그대로, 명시 인자만 override, 신규는 기본값.
+    if live_mapping:
+        mapping = dict(live_mapping)
+        if args.email_claim:
+            mapping["email"] = args.email_claim
+        if args.name_claim:
+            mapping["name"] = args.name_claim
+        if args.groups_claim:
+            mapping["custom:groups"] = args.groups_claim
+        if "email" not in mapping:
+            mapping["email"] = ADFS_EMAIL_CLAIM
+    else:
+        mapping = {
+            "email": args.email_claim or ADFS_EMAIL_CLAIM,
+            "name": args.name_claim or ADFS_NAME_CLAIM,
+            "custom:groups": args.groups_claim or ADFS_GROUPS_CLAIM,
+        }
+    entry["attribute_mapping"] = mapping
+
+    meta_sso, meta_slo = parse_binding_uris(xml_text)
+    sso = live.get("SSORedirectBindingURI") or meta_sso
+    slo = live.get("SLORedirectBindingURI") or meta_slo
+    if sso:
+        entry["sso_redirect_binding_uri"] = sso
+    if slo:
+        entry["slo_redirect_binding_uri"] = slo
+    if "IDPSignout" in live:
+        entry["idp_signout"] = live["IDPSignout"].lower() == "true"
+    else:
+        # 신규 — ADFS 로그아웃 연동이 일반적으로 원하는 동작. Cognito 파생이
+        # 아니라 동작 플래그라 미선언 시 terraform 적용 때마다 지워진다.
+        entry["idp_signout"] = True
+    cert = live.get("ActiveEncryptionCertificate")
+    if cert:
+        entry["active_encryption_certificate"] = cert
+    elif pool_id and not detection_failed and args.provider_name not in existing_idps:
+        log("ⓘ ActiveEncryptionCertificate 는 IdP 생성 시 Cognito 가 발행 — "
+            "첫 apply 후 이 스크립트를 다시 실행하면 실측값이 기입됩니다 "
+            "(그 전까지 plan 에 cert 제거 noise 가 보이지만 실제로는 지워지지 않습니다)")
 
     update_yaml(config_path, args.provider_name, entry,
                 group_prefix=args.group_prefix, admin_group=args.admin_group)
@@ -298,7 +384,7 @@ def cmd_setup(args) -> int:
     print("  ⚠ LDAP attribute 는 반드시 'Token-Groups - Unqualified Names' 여야 합니다.")
     print("    'Token-Groups' 또는 'as SIDs' 는 그룹명이 아니라 SID(S-1-5-21-...) 를")
     print("    보내 그룹 파싱이 전부 실패합니다. outgoing 'Group' 의 URI")
-    print(f"    ({args.groups_claim}) 가 --groups-claim 기본값과 다르면 인자로 맞추세요.")
+    print(f"    ({args.groups_claim or ADFS_GROUPS_CLAIM}) 가 기본값과 다르면 인자로 맞추세요.")
     print("  ⚠ 사용자의 AD 그룹이 많으면 custom 속성 2048자 제한에 잘릴 수 있습니다 —")
     print("    게이트웨이용 그룹만 보내도록 regex 필터 규칙(예: ^ssir_)을 권장합니다.")
     print()
@@ -350,9 +436,11 @@ def main() -> int:
     src.add_argument("--metadata-file", help="메타데이터 XML 파일 경로 (내부망 전용일 때)")
     sp.add_argument("--group-prefix", default="", help="그룹 파싱 prefix (예: ssir_)")
     sp.add_argument("--admin-group", default="", help="admin 부트스트랩 그룹 (예: ssir_claude_admin)")
-    sp.add_argument("--email-claim", default=ADFS_EMAIL_CLAIM)
-    sp.add_argument("--name-claim", default=ADFS_NAME_CLAIM)
-    sp.add_argument("--groups-claim", default=ADFS_GROUPS_CLAIM)
+    # claim 인자 기본값 None — adopt 시 live 매핑과 "사용자 명시" 를 구분하기 위함.
+    # None 이면 live(있으면) → ADFS 기본값 순으로 fallback 한다.
+    sp.add_argument("--email-claim", default=None)
+    sp.add_argument("--name-claim", default=None)
+    sp.add_argument("--groups-claim", default=None)
     sp.add_argument("--idp-identifier", action="append", default=[],
                     help="IdP identifier (이메일 도메인 라우팅용, 반복 가능)")
     sp.add_argument("--import-existing", action="store_true",

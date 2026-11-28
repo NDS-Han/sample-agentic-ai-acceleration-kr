@@ -1243,6 +1243,24 @@ def _parse_cognito_saml(v: Any, errors: list[str]) -> dict[str, dict]:
             items = _str_items(idps, f"{path}.idp_identifiers", errors)
             if items:
                 entry["idp_identifiers"] = items
+        # provider_details 완전 소유 키 — Cognito 파생/수동 설정값을 terraform 이
+        # 지우는 영구 drift 방지 (모듈 variables.tf 주석 참조). adopt 시
+        # setup-adfs-sso.py 가 실측값을 기입한다.
+        for key in ("sso_redirect_binding_uri", "slo_redirect_binding_uri",
+                    "active_encryption_certificate"):
+            sv = spec.get(key)
+            if sv is None:
+                continue
+            if not isinstance(sv, str) or not sv.strip():
+                errors.append(f"{path}.{key} 는 비어있지 않은 문자열이어야 합니다: {sv!r}")
+                continue
+            entry[key] = sv.strip()
+        signout = spec.get("idp_signout")
+        if signout is not None:
+            if not isinstance(signout, bool):
+                errors.append(f"{path}.idp_signout 은 bool 이어야 합니다: {signout!r}")
+            else:
+                entry["idp_signout"] = signout
         out[ns] = entry
     return out
 

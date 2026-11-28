@@ -201,6 +201,12 @@ resource "aws_cognito_identity_provider" "saml" {
   provider_details = merge(
     each.value.metadata_url != null ? { MetadataURL = each.value.metadata_url } : {},
     each.value.metadata_xml != null ? { MetadataFile = each.value.metadata_xml } : {},
+    # 완전 소유 키 — 미선언 시 cognito 파생값/수동 설정을 terraform 이 지우려는
+    # 영구 drift 가 생긴다 (특히 IDPSignout 은 실제로 삭제된다 — variables.tf 주석).
+    each.value.sso_redirect_binding_uri != null ? { SSORedirectBindingURI = each.value.sso_redirect_binding_uri } : {},
+    each.value.slo_redirect_binding_uri != null ? { SLORedirectBindingURI = each.value.slo_redirect_binding_uri } : {},
+    each.value.idp_signout != null ? { IDPSignout = tostring(each.value.idp_signout) } : {},
+    each.value.active_encryption_certificate != null ? { ActiveEncryptionCertificate = each.value.active_encryption_certificate } : {},
   )
 
   attribute_mapping = each.value.attribute_mapping
