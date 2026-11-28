@@ -305,7 +305,17 @@ Alertmanager/Slack alerting과 business alerts는 Admin UI의 새 설정 화면�
 
 ## 9. 로그인/세션 흐름
 
+![로그인 — 로컬 개발 로그인 진입 화면](images/admin-ui/login-local-dev.png)
+
+위 화면은 로컬/개발용 `DEV_LOGIN_ENABLED=true` 진입 화면이다. 운영 배포의 로그인 화면은 아래 Cognito hosted UI 절을 참조한다.
+
 ![로그인 — 세션 만료 후 리다이렉트](images/admin-ui/login-session-expired.png)
+
+세션 만료 판정 후에는 보호 페이지 대신 로그인 진입점으로 돌아온다. 로컬 개발 모드에서는 같은 dev-login 화면이 결과로 보인다.
+
+![로그인 — 로그아웃 후 결과](images/admin-ui/login-logout-result.png)
+
+로그아웃은 로컬 `admin_jwt`와 역할 보조 쿠키를 지우고 로그인 진입점으로 돌아간다. OIDC 배포에서는 IdP 세션 종료를 위한 제공자 로그아웃 위치로 먼저 이동할 수 있다.
 
 ### 무엇이 달라졌나
 
@@ -321,7 +331,11 @@ Alertmanager/Slack alerting과 business alerts는 Admin UI의 새 설정 화면�
 
 ### Cognito hosted UI 참고
 
-로그인 화면 자체는 AWS 관리형 hosted UI를 사용하는 환경에서는 AWS가 제공하는 화면이다. 이 저장소의 Admin UI 코드와 별개이며, 이번 배포에서 hosted UI의 시각적 디자인을 직접 변경한 것은 아니다. 문서와 스크린샷에는 내부 도메인이나 쿼리 값을 포함하지 않는다.
+![로그인 — AWS 관리형 Cognito hosted UI(식별자 마스킹)](images/admin-ui/login-cognito-hosted-masked.png)
+
+로그인 화면 자체는 AWS 관리형 hosted UI를 사용하는 환경에서는 AWS가 제공하는 화면이다. 이 저장소의 Admin UI 코드와 별개이며, 이번 배포에서 hosted UI의 시각적 디자인을 직접 변경한 것은 아니다. 위 캡처는 로그인 진입까지만 확인한 것이며 자격 증명 입력이나 로그인 제출은 수행하지 않았다. 문서와 스크린샷에는 내부 도메인이나 쿼리 값을 포함하지 않는다.
+
+Admin UI가 통제하는 범위는 로그인 진입 리다이렉트, OIDC `state`/PKCE 임시 쿠키, 콜백 검증, `admin_jwt`·`admin_role` 쿠키 발급과 수명, 그리고 로그아웃 리다이렉트까지다. 반대로 Cognito hosted UI의 렌더링, IdP federation 화면 전환, 비밀번호 정책, MFA 정책/장치 등록, 비밀번호 재설정과 AWS/IdP 측 오류 메시지는 AWS Cognito와 연결된 IdP가 관리한다. 이들 화면의 문구나 동작은 Admin UI 배포의 회귀로 해석하면 안 된다.
 
 ### 운영자가 체감하는 변화
 
