@@ -1,5 +1,7 @@
 # Cowork(Claude Desktop 3P) 제거 — Windows - 수동설치시
 
+**한국어** · [English](cowork-client-uninstall-windows-manual.en.md)
+
 > **독자**: 수동 설치한 Cowork를 제거하는 사람 — 목적(완전 제거 vs 설정만)에 따라 멈추는 절이 다릅니다.
 
 

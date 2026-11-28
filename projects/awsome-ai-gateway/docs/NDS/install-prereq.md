@@ -1,5 +1,7 @@
 # 배포 호스트 준비 — Deployment EC2 생성 → 도구 설치 → 세션 재시작
 
+**한국어** · [English](install-prereq.en.md)
+
 > **한 줄**: 랩톱에는 VS Code + Remote-SSH만 깔면 된다 — AWS 명령과 도구는
 > **전부 배포 EC2에서** 돈다. 이 문서는 어느 리전에서든 같은 절차입니다
 > (us-llm-gateway install-guide 의 리전 중립 버전).

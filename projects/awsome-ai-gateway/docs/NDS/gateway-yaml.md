@@ -1,5 +1,7 @@
 # gateway.yaml 설정 설명서
 
+**한국어** · [English](gateway-yaml.en.md)
+
 `deployment/gateway.yaml` 은 배포의 **유일한 설정 원본**입니다. 이 파일을 고치고
 `./deploy apply`(plan 미리보기 → 확인 → 적용)를 실행하는 것이 모든 변경의
 표준 경로입니다. 직접 편집 대신 `./deploy configure` 로 현재 값을 기본값으로

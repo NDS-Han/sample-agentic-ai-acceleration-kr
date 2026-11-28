@@ -1,5 +1,7 @@
 # LLM Gateway — Operations & Deployment Guide (NDS)
 
+[한국어](README.ko.md) · **English**
+
 > **Audience:** SSIR operations team taking over the LLM Gateway.
 > **Scope:** everything from first install to day-2 operations, updates,
 > capacity, and disaster recovery — in one document.
@@ -352,8 +354,8 @@ login → browser to ADFS → AD auth → signed assertion (email/name/groups)
 - **Relying party settings.** Give the ADFS administrator the Cognito
   **RP identifier** `urn:amazon:cognito:sp:<pool-id>` and the HTTPS **ACS URL**
   ending in `/saml2/idpresponse`. The administrator console URL is the
-  entry point for users. See [AD integration](../ad-sync.md) and
-  [declarative SAML deployment](../adfs-sso.md).
+  entry point for users. See [AD integration](../ad-sync.en.md) and
+  [declarative SAML deployment](../adfs-sso.en.md).
 - **Attribute permissions.** Cognito needs a mutable `custom:groups`
   attribute and app-client write access to populate it from the SAML
   mapping. Read access controls its availability in the ID token. The
@@ -466,7 +468,7 @@ aws-marketplace:Subscribe` means subscribe in the target account.
 
 Catalog = **aliases** clients send; upstream IDs stay behind the alias.
 Registering a new model (admin-ui `/models` — full field reference and
-screenshots in [guides/models.md](../guides/models.md)):
+screenshots in [Model Management](../guides/admin-guide.en.html#models)):
 
 1. **Serving-account prerequisite** — the account that will invoke the
    model must be able to. New Anthropic models are **Marketplace
@@ -523,10 +525,10 @@ destination. Review the impact dialog before entering the alias.
   `features.alerting` adds SNS + CloudWatch alarms for Aurora/
   ElastiCache plus optional Fargate→CloudWatch log shipping through the
   managed overlay. Confirm the SNS subscriptions to receive CloudWatch
-  notifications. See [Observability and alerting](../observability.md).
+  notifications. See [Observability and alerting](../observability.en.md).
 - **Cost accuracy alerts** are sent by notification-worker when
   `features.business_alerts` is enabled. Review the target-specific Slack
-  configuration before enabling [cost accuracy alerts](../observability.md#11-비용-이상-알림--notification-worker).
+  configuration before enabling [cost accuracy alerts](../observability.en.md#cost-accuracy-notifications).
 - **Audit Log**: every mutation, atomically committed — first stop for
   "who changed X". Body-log views are themselves logged.
 - **Analytics**: aggregated reporting (KPIs, cost trend, per-model,
@@ -562,7 +564,7 @@ in `REPORTING_TIMEZONE`, default **Asia/Seoul**):
 
 ### 9.9 Employee onboarding — final gate
 
-Before opening to employees ([operations.md](../operations.md) §2 checklist):
+Before opening to employees (see the [pre-onboarding checks](../operations.en.md#before-onboarding-employees)):
 
 - [ ] OIDC login redirects to Cognito — **dev-login must be off**
   (`DEV_LOGIN_ENABLED=false`). A blank `oidc` block = unsigned admin
@@ -576,7 +578,7 @@ Before opening to employees ([operations.md](../operations.md) §2 checklist):
 - [ ] `infra.bedrock_allowed_model_arns` reviewed.
 - [ ] `oidc.vk_ttl_hours` per policy.
 - [ ] Backups verified (§12); `VIRTUAL_KEY_ENCRYPTION_KEY` escrowed.
-- [ ] Hand employees [client-setup.md](../client-setup.md) + `./deploy client-values`.
+- [ ] Hand employees [client-setup](../client-setup.en.md) + `./deploy client-values`.
 
 ---
 
@@ -597,7 +599,7 @@ Before opening to employees ([operations.md](../operations.md) §2 checklist):
   adapter → HPA (`executorInflightTarget`). Without the observability
   stack it stays `<unknown>` and only CPU-HPA runs.
 - Validate capacity claims with `loadtest/sse_loadgen.py` — real
-  concurrency, not estimates (see [loadtest.md](../loadtest.md)).
+  concurrency, not estimates (see [loadtest](../loadtest.en.md)).
 
 ---
 
@@ -614,7 +616,7 @@ Before opening to employees ([operations.md](../operations.md) §2 checklist):
   values.
 - **Migrations are forward-only** — no DB rollback. Roll back by pinning
   the previous image tag; schema stays forward.
-- **Cluster/Aurora engine upgrades:** [upgrade-eks-cluster.md](../upgrade-eks-cluster.md) runbook.
+- **Cluster/Aurora engine upgrades:** [upgrade-eks-cluster](../upgrade-eks-cluster.en.md) runbook.
 - **Teardown:** `./deploy teardown` (app only) /
   `teardown --infra` (app + terraform env infra, with preview + confirm).
 
@@ -755,13 +757,13 @@ received — an unchecked row here is a future incident.
       subscription, and `log_shipping` routes container logs to
       CloudWatch (eks). Email subscriptions need a manual confirm —
       verify they are ACTIVE, not PendingConfirmation
-      ([observability.md](../observability.md) §3). ALB 5xx/UnHealthyHost
+      ([AWS alerts and logs](../observability.en.md#aws-alerts-and-logs)). ALB 5xx/UnHealthyHost
       alarms are auto-discovered by `deploy apply` (eks) — verify they
       exist after the apply following ingress creation
       (§8-A). Pod/app-level alerts: in-cluster Alertmanager + gateway/cost
       PrometheusRules ship with the observability stack; Slack delivery
       starts once the user creates `alertmanager-slack-<env>`
-      ([observability.md](../observability.md) §10). Prometheus retention
+      ([EKS metrics and Alertmanager](../observability.en.md#eks-metrics-and-alertmanager)). Prometheus retention
       is still 24h on emptyDir — persistent storage is a follow-up
 - [ ] **Notification channel** — `features.notifications.provider`
       (ses/smtp/internal_api): sender address ownership, who receives
@@ -810,7 +812,7 @@ received — an unchecked row here is a future incident.
       login → VK → a live request
 - [ ] If `features.alerting` enabled: SNS subscriptions all ACTIVE,
       one `set-alarm-state` test delivered
-      ([observability.md](../observability.md) §4, §7)
+      ([AWS alerts and logs](../observability.en.md#aws-alerts-and-logs))
 
 ---
 
@@ -818,22 +820,22 @@ received — an unchecked row here is a future incident.
 
 | Need | Document |
 |---|---|
-| Deploy host setup | [install-prereq.md](../install-prereq.md) |
-| EKS install/update/adopt | [install-eks.md](../install-eks.md) ([install-compose.md](../install-compose.md), [install-ecs.md](../install-ecs.md) for other backends) |
-| Full `gateway.yaml` reference | [gateway-yaml.md](../gateway-yaml.md) |
-| Domain modes | [domain.md](../domain.md) |
-| ADFS/SAML deployment and user registration | [SAML deployment](../adfs-sso.md), [AD integration](../ad-sync.md) |
-| Ops runbook depth | [operations.md](../operations.md) |
-| Update/rollback/teardown | [update.md](../update.md) |
-| Cluster/engine upgrades | [EKS and Aurora upgrades](../upgrade-eks-cluster.md) |
-| Legacy EKS migration reference | [Pre-adoption EKS procedure](../upgrade-eks-legacy.md) |
-| DR | [dr-runbook.md](../dr-runbook.md) |
-| Observability & alerting | [observability.md](../observability.md) |
-| Load testing | [loadtest.md](../loadtest.md) |
-| BI chat agent | [chat-agent.md](../chat-agent.md) |
+| Deploy host setup | [install-prereq](../install-prereq.en.md) |
+| EKS install/update/adopt | [install-eks](../install-eks.en.md) ([install-compose](../install-compose.en.md), [install-ecs](../install-ecs.en.md) for other backends) |
+| Full `gateway.yaml` reference | [gateway-yaml](../gateway-yaml.en.md) |
+| Domain modes | [domain](../domain.en.md) |
+| ADFS/SAML deployment and user registration | [SAML deployment](../adfs-sso.en.md), [AD integration](../ad-sync.en.md) |
+| Ops runbook depth | [operations](../operations.en.md) |
+| Update/rollback/teardown | [update](../update.en.md) |
+| Cluster/engine upgrades | [EKS and Aurora upgrades](../upgrade-eks-cluster.en.md) |
+| Legacy EKS migration reference | [Pre-adoption EKS procedure](../upgrade-eks-legacy.en.md) |
+| DR | [dr-runbook](../dr-runbook.en.md) |
+| Observability & alerting | [observability](../observability.en.md) |
+| Load testing | [loadtest](../loadtest.en.md) |
+| BI chat agent | [chat-agent](../chat-agent.en.md) |
 | Administrator procedures and screenshots | [English HTML guide](../guides/admin-guide.en.html), [Korean guide index](../guides/README.md) |
-| Employee setup | [client-setup.md](../client-setup.md), [client-admin.md](../client-admin.md), [cowork/](../cowork/README.md) |
-| Design rationale | [decisions.md](../decisions.md) |
+| Employee setup | [client-setup](../client-setup.en.md), [client-admin](../client-admin.en.md), [cowork/](../cowork/README.en.md) |
+| Design rationale | [decisions](../decisions.en.md) |
 
 ---
 

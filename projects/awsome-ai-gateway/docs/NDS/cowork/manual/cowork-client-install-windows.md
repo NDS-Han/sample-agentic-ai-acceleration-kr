@@ -1,5 +1,7 @@
 # Cowork(Claude Desktop 3P) 클라이언트 설치
 
+**한국어** · [English](cowork-client-install-windows.en.md)
+
 > **상태: 종단 검증 완료 — 2026-08-03, Windows Server 2025.**
 > 절차 1~5 를 처음부터 끝까지 실제로 돌려 응답과 웹서치까지 확인했고, 그 과정에서 드러난 문서 문제를 반영했습니다. 검증 내용은 맨 아래 「검증 기록」에 있습니다.
 

@@ -1,5 +1,7 @@
 # ADFS SAML SSO 연동 가이드
 
+**한국어** · [English](adfs-sso.en.md)
+
 Cognito User Pool 에 SAML IdP(ADFS)를 선언적으로 연동하는 절차.
 NDS 배포 방식을 따른다 — 설치자가 `gateway.yaml` 을 갱신하면 수렴은 `./deploy apply` 의 표준 경로.
 

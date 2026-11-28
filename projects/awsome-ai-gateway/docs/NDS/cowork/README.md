@@ -1,5 +1,7 @@
 # Cowork (Claude Desktop) 클라이언트 문서
 
+**한국어** · [English](README.en.md)
+
 > **독자**: Cowork를 게이트웨이에 붙이는 사람 — 설치는 아래 표에서 갈래를 고릅니다.
 > **전제**. [HTTPS 게이트웨이 도메인](../domain.md)이 필요합니다.
 

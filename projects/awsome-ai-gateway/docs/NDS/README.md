@@ -1,12 +1,50 @@
-# NDS 배포 가이드 — gateway.yaml 기반 통합 배포
+# NDS Gateway 문서
 
-LLM Gateway(Claude Code · Cowork · Codex 지원)를 **어느 AWS 계정·리전에서든**
-같은 방법으로 배포하는 표준 절차입니다. 기존 `docs/us-llm-gateway/`는 특정
-사이트(US, us-west-2)에 고정된 운영 문서이고, 이 디렉토리는 범용입니다.
+**한국어** · [English](README.en.md)
 
-핵심 아이디어: **설정은 `deployment/gateway.yaml` 한 파일**이 원본이고,
-`./deploy` 하나가 그 파일을 읽어 배포 대상에 맞는 모든 것을 만듭니다.
-환경별 스크립트를 찾아 돌리는 방식이 아닙니다.
+Claude Code, Cowork, Codex를 연결하는 NDS Gateway의 배포·운영 문서입니다.
+환경은 `deployment/gateway.yaml`에 선언하고 `./deploy`로 배포합니다.
+
+| 지금 할 일 | 시작할 문서 |
+|---|---|
+| 관리자 콘솔에서 계정·모델·정책 관리 | [관리자 상세 가이드](guides/admin-guide.ko.md) |
+| 게이트웨이 신규 설치 또는 운영 인수 | [운영·배포 인수인계](op-guide/README.ko.md) |
+| 내 PC에서 Claude Code·Cowork·Codex 사용 | [직원 PC 빠른 시작](client-setup.md) |
+| 장애 조사 또는 복구 | [운영 런북](operations.md) · [관측·알림](observability.md) · [재해 복구](dr-runbook.md) |
+
+## 문서 목록 — 나는 누구인가
+
+### 배포 담당자
+
+| 작업 | 문서 |
+|---|---|
+| 배포 호스트 준비 | [사전 준비](install-prereq.md) |
+| 배포 대상 선택 | [EKS](install-eks.md) · [ECS](install-ecs.md) · [Compose](install-compose.md) |
+| 기존 환경 편입, 업데이트, 롤백 | [변경 관리](update.md) · [EKS/Aurora 업그레이드](upgrade-eks-cluster.md) |
+| 도메인과 인증 연결 | [도메인·TLS](domain.md) · [ADFS 설정](adfs-sso.md) · [그룹 매핑·등록 검증](ad-sync.md) · [Cognito 로그인 브랜딩](managed-login.md) |
+| 배포 설정 확인 | [gateway.yaml 레퍼런스](gateway-yaml.md) |
+
+### 운영 관리자
+
+| 작업 | 문서 |
+|---|---|
+| 콘솔 기능 및 스크린샷 | [관리자 상세 가이드](guides/admin-guide.ko.md) · [콘솔 문서 목록](guides/README.md) |
+| 설치·운영 인수인계 | [운영·배포 가이드](op-guide/README.ko.md) |
+| 직원 등록과 모델 라우팅 | [운영 런북](operations.md) · [모델 관리](guides/models.md) |
+| 관측, 복구, 부하 검증 | [관측·알림](observability.md) · [재해 복구](dr-runbook.md) · [부하 검증](loadtest.md) |
+| 선택 기능과 직원 배포 | [BI Insight 배포](chat-agent.md) · [클라이언트 관리자](client-admin.md) |
+
+### 직원과 애플리케이션 개발자
+
+- [직원 PC 빠른 시작](client-setup.md)에서 운영체제와 앱을 선택합니다.
+- [Cowork 설치 및 제거](cowork/README.md)에서 macOS 프로파일과 Windows 설치기 절차를 확인합니다.
+- [AICM 통합 계약](aicm/README.ko.md)에서 전용 API와 인증 방식을 확인합니다.
+
+### 설계 및 이전 배포 참고
+
+- 유지보수 · [upstream 동기화](upstream-sync.md) · [배포 설계 결정](decisions.md)
+- 기술 참고 · [Alertmanager 추가 수신자 예시](alerting-receivers.md) · [R7 외부 비용 대조 설계](cost-reconciliation-r7.ko.md)
+- 이전 기록 · [레거시 EKS 전환](upgrade-eks-legacy.md) · [NDS 전환 변경 기록](upstream-diff/README.md) · [리뷰 기록](review/README.md)
 
 ## 어떤 경로로 배포할까
 
@@ -99,57 +137,6 @@ docs/NDS/.venv/bin/pip install -r docs/NDS/deploy/requirements.txt
 ```
 
 (`deploy`는 venv가 없으면 시스템 python3로 폴백 — PyYAML과 `rich`가 있으면 동작)
-
-## 문서 목록 — 나는 누구인가
-
-**🛠️ 나는 게이트웨이를 설치/업데이트하는 사람** (배포 담당·인프라)
-
-| 문서 | 내용 |
-|---|---|
-| [install-prereq.md](install-prereq.md) | **0단계 — 배포 호스트 준비** (EC2·deployer role·Bedrock 확인·bootstrap-ec2) |
-| [install-compose.md](install-compose.md) | **t0 — EC2 1대 설치** |
-| [install-ecs.md](install-ecs.md) | **t1/t2 — ECS Fargate 신규 구축** |
-| [install-eks.md](install-eks.md) | **t2/t3 — EKS 신규 구축(bootstrap)·기존 배포 온보딩·업데이트** |
-| [domain.md](domain.md) | **도메인 획득 → 배포에 등록** — backend별 자동화 정도 |
-| [ADFS SAML 배포](adfs-sso.md) | `gateway.yaml`로 SAML IdP와 앱 클라이언트 설정 관리 |
-| [AD 그룹 및 사용자 등록](ad-sync.md) | RP Identifier, ACS URL, `custom:groups`, 로그인 후 역할·팀 검증 |
-| [Cognito Managed Login](managed-login.md) | 호스팅 로그인 화면 브랜딩 설정과 검증 |
-| [update.md](update.md) | 업데이트·롤백·기존 배포 온보딩(capture) |
-| [upgrade-eks-cluster.md](upgrade-eks-cluster.md) | EKS 컨트롤플레인/애드온/Aurora 업그레이드 |
-| [gateway-yaml.md](gateway-yaml.md) | 설정 파일 전체 항목 설명서 |
-
-**🧭 나는 게이트웨이를 운영하는 사람** (관리자)
-
-| 문서 | 내용 |
-|---|---|
-| [영문 관리자 상세 가이드](guides/admin-guide.en.html) | 로그인, 관리자 메뉴 13개, 단계별 작업 절차와 dev 캡처 74장. 브라우저에서 열 때 `screenshots` 폴더를 HTML과 함께 둡니다. |
-| [한국어 관리자 UI 가이드](guides/README.md) | 로그인 및 비밀번호 재설정, 기능별 화면과 진입 경로, 모델 관리 |
-| [영문 운영·배포 인수인계 가이드](op-guide/README.md) | 설치부터 운영, 변경, 장애 복구까지의 절차와 체크리스트 |
-| [operations.md](operations.md) | **운영 런북** — 직원 등록·오픈 전 체크리스트·크로스계정 라우팅·Marketplace |
-| [관측 및 알림](observability.md) | CloudWatch·SNS, Alertmanager, 비용 원장 이상 알림 |
-| [dr-runbook.md](dr-runbook.md) | **재해 복구** — 백업 복원·시크릿 유실·RTO/RPO·리허설 |
-| [loadtest.md](loadtest.md) | **부하테스트** — mock-bedrock SSE 동시성·executor-HPA 검증·원복 절차 |
-| [chat-agent.md](chat-agent.md) | **admin-chat-agent (BI 챗)** — 기본 미배포, 옵트인 활성화 절차 |
-| [client-admin.md](client-admin.md) | **클라이언트 관리자용** — env 4줄 산출·인스톨러 빌드/배포·서버측 진단 |
-
-**💻 나는 이 게이트웨이에 내 PC를 연결하는 직원**
-
-| 문서 | 내용 |
-|---|---|
-| [client-setup.md](client-setup.md) | **시작은 여기** — Claude Code · Cowork · Codex (한 페이지, 3×3 매트릭스) |
-| [cowork/](cowork/README.md) | Cowork 상세 — macOS 수동·Windows 인스톨러/수동/제거 |
-
-**통합 및 저장소 유지보수**
-
-| 문서 | 내용 |
-|---|---|
-| [AICM 통합 계약](aicm/README.md) | `/aicm/v1` 인증·권한·예산 동작과 OpenAPI 계약 |
-| [upstream 동기화](upstream-sync.md) | upstream 변경을 `nds/dev`에 병합하는 절차 |
-
-**설계 및 이전 배포 참고**
-
-- [배포 설계 결정](decisions.md) · [R7 외부 비용 대조 설계](cost-reconciliation-r7.md)
-- [`install-eks.sh` 배포의 전환 참고](upgrade-eks-legacy.md) · [NDS 전환 변경 기록](upstream-diff/README.md) · [리뷰 기록](review/README.md)
 
 ## 지원 클라이언트와 모델
 

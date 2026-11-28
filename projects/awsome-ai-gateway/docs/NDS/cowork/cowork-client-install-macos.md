@@ -1,5 +1,7 @@
 # Cowork(Claude Desktop 3P) 클라이언트 설치 — macOS
 
+**한국어** · [English](cowork-client-install-macos.en.md)
+
 > **독자**: macOS에서 Cowork를 손으로 붙이는 직원/관리자.
 > **전제**: https 게이트웨이 + 본인 VK(`vk-…`). **결과**: 대시보드에 `client=cowork` 기록.
 > **빠른 길**: §1만 따라 하면 대부분 끝납니다 — 막히면 문제 판별 절로.

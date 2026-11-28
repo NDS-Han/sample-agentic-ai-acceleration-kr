@@ -1,8 +1,10 @@
 # 관리자 UI 및 기능
 
+**한국어** · [English](admin-guide.en.html)
+
 관리자로 로그인하면 **Dashboard**가 열립니다. 왼쪽 메뉴에서 목적에 맞는 화면을 선택합니다. 화면 이름은 dev 배포 버전 `4fe6d927`의 영문 메뉴 기준입니다.
 
-[관리자 화면 모음](admin-screens.md)에서 메뉴별 기본 화면과 상세 화면, 탭, 필터, 변경 양식을 여는 경로를 볼 수 있습니다.
+[관리자 상세 가이드](admin-guide.ko.md)에서 단계별 절차를, [관리자 화면 모음](admin-screens.md)에서 메뉴별 기본 화면과 상세 화면, 탭, 필터, 변경 양식을 여는 경로를 볼 수 있습니다.
 
 | 목적 | 메뉴 | 확인하거나 관리할 내용 |
 |---|---|---|
@@ -22,4 +24,4 @@
 
 팀 리더는 **Budget Management**, **Analytics**, **My Usage** 등을 사용할 수 있습니다. 개발자는 **My Usage**, **Integration**, **CLI**에서 자기 사용량과 연결 방법을 확인합니다. 사용을 마치면 상단의 로그아웃 버튼을 선택합니다.
 
-[가이드 목차](README.md) · [로그인](login.md) · [운영 가이드](../op-guide/README.md)
+[가이드 목차](README.md) · [로그인](login.md) · [운영 가이드](../op-guide/README.ko.md)

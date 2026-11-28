@@ -1,5 +1,7 @@
 # NDS 배포 도구 + 애플리케이션 — 기능별 심층 리뷰 레포트
 
+**한국어** · [English](README.en.md)
+
 이 문서는 당시 커밋의 리뷰·수정·검증 기록입니다. 현재 배포와 운영 절차는 [NDS 문서 목차](../README.md)에서 확인합니다.
 
 `docs/NDS/deploy/` (NDS deploy 도구, ~11k LOC)에 대해 진행한 29라운드와

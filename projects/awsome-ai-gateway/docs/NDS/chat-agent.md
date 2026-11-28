@@ -1,5 +1,7 @@
 # admin-chat-agent (BI 챗) 배포 — NDS 옵트인 경로
 
+**한국어** · [English](chat-agent.en.md)
+
 **기본 상태: 미배포.** `features.bi_insight` 는 기본 false 이고 tfvars scaffold
 도 `enable_chat_agent = false`(`deploy/bootstrap.py`)라 인프라가 만들어지지
 않으며, admin-api 에도 `AGENTCORE_RUNTIME_ARN` 이 없어 `/admin/chat/*` 는

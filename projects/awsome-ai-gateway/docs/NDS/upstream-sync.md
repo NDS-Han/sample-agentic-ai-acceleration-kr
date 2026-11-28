@@ -1,5 +1,7 @@
 # upstream 동기화 — pr/nds-delta → nds/dev 머지 절차
 
+**한국어** · [English](upstream-sync.en.md)
+
 두 갈래 작업이 동시에 진행됩니다:
 
 - **`pr/nds-delta`** — upstream(aws-samples fork)에 올리는 PR 작업 브랜치.

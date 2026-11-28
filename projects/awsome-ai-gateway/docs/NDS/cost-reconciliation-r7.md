@@ -1,5 +1,7 @@
 # R7 — Bedrock invocation-log / CloudWatch / CUR cost match (design only)
 
+[한국어](cost-reconciliation-r7.ko.md) · **English**
+
 Status: design (wave 3). Not implemented. The nightly reconciliation job
 (`cost-recorder-worker/src/worker/reconciliation.py`, R1–R6) compares our own ledgers with each
 other. R7 compares our ledger with what AWS says it charged. It needs AWS reads (CloudWatch Logs

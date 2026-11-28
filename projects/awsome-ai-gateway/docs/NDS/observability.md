@@ -1,5 +1,7 @@
 # Observability & Alerting — NDS 관측·알림 가이드
 
+**한국어** · [English](observability.en.md)
+
 이 문서는 LLM Gateway 의 관측 계층 전체와, NDS 방식(`gateway.yaml` +
 `./deploy`)으로 배포되는 알림·로그 기능을 다룹니다.
 

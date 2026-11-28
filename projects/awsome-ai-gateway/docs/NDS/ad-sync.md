@@ -1,5 +1,7 @@
 # AD 연동 (ADFS ↔ Cognito SAML 페더레이션)
 
+**한국어** · [English](ad-sync.en.md)
+
 회사 AD 계정으로 admin-ui/gateway-cli에 로그인하는 설정입니다. 사용자가 매번
 복사되거나 동기화되는 게 아니라, **로그인할 때마다 SAML assertion으로 속성이
 전달**됩니다.

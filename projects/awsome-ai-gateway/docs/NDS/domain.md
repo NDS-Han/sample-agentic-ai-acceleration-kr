@@ -1,5 +1,7 @@
 # 도메인 — 모드 선택, 획득, 등록
 
+**한국어** · [English](domain.en.md)
+
 `gateway.yaml`의 `domain:` 블록 하나로 HTTPS와 주소 체계를 선언합니다.
 
 ```yaml

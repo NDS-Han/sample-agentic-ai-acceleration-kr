@@ -1,5 +1,7 @@
 # 로그인
 
+**한국어** · [English](admin-guide.en.html#access)
+
 1. [Dev 관리자 콘솔](https://admin-dev.ssir-dev.nds.remu.one/)에 접속합니다. Cognito의 **Sign in** 화면이 열립니다.
 2. **Email address**에 dev 계정 이메일을, **Password**에 비밀번호를 입력합니다.
 3. **Sign in**을 선택합니다. 관리자 계정은 [Dashboard](admin-screens.md#dashboard)에서 시작합니다.

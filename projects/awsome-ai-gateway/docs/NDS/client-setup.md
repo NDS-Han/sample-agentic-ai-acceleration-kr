@@ -1,5 +1,7 @@
 # 직원 PC 클라이언트 연결 — Claude Code · Cowork · Codex (CLI + Desktop)
 
+**한국어** · [English](client-setup.en.md)
+
 > **누가**: 직원(또는 세팅해 주는 IT). **목표**: 5분 안에 클라이언트를 게이트웨이에 연결.
 > 인증 구조는 넷 다 같다 — **`gateway-cli login` 한 번**이면 모두 같은 키 체계
 > (`api-key-helper` → Virtual Key)를 공유한다.

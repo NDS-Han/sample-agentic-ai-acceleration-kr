@@ -1,5 +1,7 @@
 # 업데이트 · 롤백
 
+**한국어** · [English](update.en.md)
+
 모든 변경은 `gateway.yaml` 하나가 원본이고 `./deploy`가 나머지를 합니다.
 일상 경로는 **`./deploy configure`(항목별 확인 → 배포까지)**, 파일 직접 편집 경로는
 **`./deploy apply`(render 내장)** 입니다 — 환경별 스크립트를 찾아 돌릴 필요가 없습니다.

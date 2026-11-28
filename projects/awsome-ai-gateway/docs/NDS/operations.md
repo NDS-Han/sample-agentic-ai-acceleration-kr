@@ -1,5 +1,7 @@
 # 운영 런북 — 직원 등록 · 오픈 전 체크리스트 · 라우팅 프로필 · 모델별 계정 라우팅 · 신형 모델 구독
 
+**한국어** · [English](operations.en.md)
+
 배포가 끝난 뒤 **반복되는 운영 작업**을 모읍니다. 설치 자체는
 install-{compose,ecs,eks}.md, 변경은 [update.md](update.md) 참조.
 관리자 화면과 버튼별 절차는 [관리자 가이드](guides/README.md)에서 확인합니다.

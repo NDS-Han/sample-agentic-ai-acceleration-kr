@@ -1,5 +1,7 @@
 # 레거시 EKS 배포 업그레이드 참고
 
+**한국어** · [English](upgrade-eks-legacy.en.md)
+
 이 문서는 `install-eks.sh`로 구축한 환경의 수동 업그레이드 기록입니다. 현재 운영
 환경의 편입과 업데이트는 [EKS 설치 및 업데이트](install-eks.md)와
 [업데이트 런북](update.md)을 따릅니다. 아래 절차는 아직 선언적 배포로 편입하지 않은

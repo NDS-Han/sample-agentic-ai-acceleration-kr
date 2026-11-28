@@ -1,5 +1,7 @@
 # Cowork 설치기 — 되돌리기·제거 (Windows)
 
+**한국어** · [English](cowork-installer-uninstall-windows.en.md)
+
 > **독자**: 인스톨러가 깐 것을 되돌리는 사람 — 되돌릴 범위를 표에서 고릅니다.
 
 

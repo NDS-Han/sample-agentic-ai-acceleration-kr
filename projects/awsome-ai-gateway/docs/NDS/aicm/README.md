@@ -1,5 +1,7 @@
 # AICM integration guide — `/aicm/v1`
 
+[한국어](README.ko.md) · **English**
+
 [`aicm-v1-openapi.json`](aicm-v1-openapi.json) is the machine-readable API contract. The
 [`aicm-client-contract.json`](aicm-client-contract.json) file lists the mirrored client operations. The surface is
 mounted only when `AICM_API_ENABLED=true`.

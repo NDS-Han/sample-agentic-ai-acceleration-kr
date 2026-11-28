@@ -1,5 +1,7 @@
 # t1/t2 설치 — AWS ECS Fargate
 
+**한국어** · [English](install-ecs.en.md)
+
 **대상**: 소규모(100~300명, t1) / 표준(300~1000명, t2) 운영 배포.
 AWS 관리형으로 자동 복구·수평 확장·무패치 컴퓨트를 얻고, Kubernetes 운영 부담은 없습니다.
 

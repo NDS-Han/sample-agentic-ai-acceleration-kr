@@ -1,5 +1,7 @@
 # Cowork 설치기 — 관리자 End-to-End (Windows)
 
+**한국어** · [English](cowork-installer-admin-e2e-windows.en.md)
+
 > **독자**: 빌드→서명→배포→직원 검수까지 전체를 책임지는 관리자 — 단계별 담당 PC가 다릅니다.
 
 

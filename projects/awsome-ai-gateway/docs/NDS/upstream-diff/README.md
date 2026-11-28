@@ -1,5 +1,7 @@
 # NDS 전환 변경사항 종합 — upstream 대비 기능 차이 목록
 
+**한국어** · [English](README.en.md)
+
 이 디렉토리는 upstream(`gonsoomoon-ml/sample-agentic-ai-acceleration-kr`)과
 NDS 브랜치 사이의 **기능 단위 차이 전체**를 정리한다. 기준 커밋:
 

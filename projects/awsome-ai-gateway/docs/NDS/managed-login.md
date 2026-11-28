@@ -1,5 +1,7 @@
 # Cognito Managed Login 로그인 화면
 
+**한국어** · [English](managed-login.en.md)
+
 `gateway.yaml` 의 `branding.managed_login: true` 로 켜는 로그인 화면입니다.
 ecs/eks 전용(Cognito 를 terraform `module.cognito` 가 만드는 배포).
 

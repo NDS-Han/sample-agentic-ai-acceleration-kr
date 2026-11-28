@@ -1,5 +1,7 @@
 # Alertmanager 수신자 예시 — Slack 외 (문서 전용, 미구현)
 
+**한국어** · [English](alerting-receivers.en.md)
+
 > **이 저장소에서 제공하는 Alertmanager 수신자 오버레이는 Slack입니다.** `deployment/observability/kube-prometheus-stack/alertmanager-slack.yaml`
 > + `install.sh` 의 Secret 감지([observability.md](observability.md) §10).
 > 이 문서의 수신자는 **예시**입니다. 저장소에 오버레이 파일도, `install.sh` 연결도 없습니다.

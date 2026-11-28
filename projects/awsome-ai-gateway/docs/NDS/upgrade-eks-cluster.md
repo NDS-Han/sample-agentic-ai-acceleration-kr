@@ -1,5 +1,7 @@
 # EKS 클러스터·의존성 업그레이드 런북
 
+**한국어** · [English](upgrade-eks-cluster.en.md)
+
 > **범위**: EKS 컨트롤플레인 minor · EKS 애드온(coredns/kube-proxy/vpc-cni) ·
 > Fargate kubelet · Aurora 엔진 — `./deploy apply`가 하지 않습니다
 > (앱 업데이트는 [update.md](update.md)). 클러스터+애드온은

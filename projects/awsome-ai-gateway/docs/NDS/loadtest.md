@@ -1,5 +1,7 @@
 # 부하테스트 — mock-bedrock SSE 동시성 · executor-HPA 검증
 
+**한국어** · [English](loadtest.en.md)
+
 claude-code형 인터랙티브 트래픽(SSE 스트림 장기 점유)에서 게이트웨이의
 **실제 용량 한계** — executor 스레드 포화 지점·큐잉·HPA 스케일 루프 — 을
 **실 AWS 호출 없이(비용 $0)** 검증하는 절차. 도구 자체의 설명은
